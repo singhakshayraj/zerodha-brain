@@ -1,11 +1,46 @@
 import config
 from indicators import run_all_indicators
+from regime_detector import RegimeDetector
 
 
 class SignalEngine:
 
-    def generate_signal(self, candles: list, live_price: float, symbol: str) -> dict:
-        ind = run_all_indicators(candles)
+    def __init__(self):
+        self.regime_detector = RegimeDetector()
+
+    def generate_signal(
+        self,
+        candles_5min: list,
+        candles_15min: list,
+        candles_1hour: list,
+        live_price: float,
+        symbol: str,
+        nifty_direction: str,
+        nifty_change_percent: float,
+    ) -> dict:
+        regime = self.regime_detector.detect(
+            candles_5min or [],
+            candles_15min or [],
+            candles_1hour or [],
+            nifty_direction,
+            nifty_change_percent,
+        )
+
+        if not regime['can_trade']:
+            return {
+                'action': 'HOLD',
+                'confidence': 0,
+                'reasons': [],
+                'skip_reasons': regime['reasons'],
+                'stop_loss': round(live_price * 0.98, 2),
+                'target': round(live_price * 1.02, 2),
+                'risk_reward_ratio': 1.0,
+                'indicators': {},
+                'regime': regime['regime'],
+                'market_bias': regime.get('market_bias', 'NEUTRAL'),
+            }
+
+        ind = run_all_indicators(candles_15min)
 
         if ind['candle_count'] < 35:
             return {
@@ -13,75 +48,109 @@ class SignalEngine:
                 'confidence': 0,
                 'reasons': [],
                 'skip_reasons': ['Insufficient historical data'],
-                'stop_loss': 0,
-                'target': 0,
-                'risk_reward_ratio': 0,
+                'stop_loss': round(live_price * 0.98, 2),
+                'target': round(live_price * 1.02, 2),
+                'risk_reward_ratio': 1.0,
                 'indicators': ind,
+                'regime': regime['regime'],
+                'market_bias': regime.get('market_bias', 'NEUTRAL'),
             }
+
+        ind_1h = run_all_indicators(candles_1hour) if candles_1hour else None
+
+        nifty_bias = regime.get('nifty_bias', 'NEUTRAL')
+        allow_buy = nifty_bias != 'BEARISH'
+        allow_sell = nifty_bias != 'BULLISH'
 
         # BUY scoring
         buy_score = 0
         buy_reasons = []
 
-        if ind['rsi_14'] is not None and ind['rsi_14'] < 35:
+        if ind['rsi_14'] is not None and ind['rsi_14'] < 40:
             buy_score += 20
-            buy_reasons.append(f"RSI oversold at {ind['rsi_14']}")
+            buy_reasons.append(f"RSI oversold {ind['rsi_14']:.1f}")
 
         if ind['ema_21'] and live_price > ind['ema_21']:
             buy_score += 15
-            buy_reasons.append(f"Price above EMA21 ({ind['ema_21']})")
+            buy_reasons.append(f"Above EMA21 ({ind['ema_21']:.2f})")
 
         if ind['ema_200'] and live_price > ind['ema_200']:
-            buy_score += 15
-            buy_reasons.append("Price in long-term uptrend (above EMA200)")
+            buy_score += 10
+            buy_reasons.append("Long-term uptrend (above EMA200)")
 
         if ind['macd_histogram'] is not None and ind['macd_histogram'] > 0:
             buy_score += 15
-            buy_reasons.append(f"MACD bullish histogram: {ind['macd_histogram']}")
+            buy_reasons.append(f"MACD bullish ({ind['macd_histogram']:.3f})")
 
-        if ind['bb_lower'] and ind['bb_middle']:
-            if live_price <= ind['bb_lower'] * 1.02:
-                buy_score += 15
-                buy_reasons.append("Price near lower Bollinger Band")
+        if ind['bb_lower'] and live_price <= ind['bb_lower'] * 1.015:
+            buy_score += 10
+            buy_reasons.append("Near lower Bollinger Band")
 
         if ind['volume_sma_20'] and ind['current_volume']:
             if ind['current_volume'] > ind['volume_sma_20'] * 1.5:
-                buy_score += 20
+                buy_score += 15
                 buy_reasons.append(
-                    f"Volume spike: {ind['current_volume']:.0f} "
-                    f"vs avg {ind['volume_sma_20']:.0f}"
+                    f"Volume spike ({ind['current_volume']/ind['volume_sma_20']:.1f}x avg)"
+                )
+
+        if ind['vwap'] and live_price > ind['vwap']:
+            buy_score += 10
+            buy_reasons.append(f"Above VWAP ({ind['vwap']:.2f})")
+
+        if ind_1h and ind_1h.get('ema_21') and ind_1h.get('ema_50'):
+            if live_price > ind_1h['ema_21'] > ind_1h['ema_50']:
+                buy_score += 10
+                buy_reasons.append("1H timeframe bullish aligned")
+            else:
+                buy_score -= 15
+                buy_reasons.append("WARNING: 1H trend disagrees")
+
+        if ind['adx_plus_di'] is not None and ind['adx_minus_di'] is not None:
+            if ind['adx_plus_di'] > ind['adx_minus_di']:
+                buy_score += 5
+                buy_reasons.append(
+                    f"+DI > -DI ({ind['adx_plus_di']:.1f} vs {ind['adx_minus_di']:.1f})"
                 )
 
         # SELL scoring
         sell_score = 0
         sell_reasons = []
 
-        if ind['rsi_14'] is not None and ind['rsi_14'] > 65:
+        if ind['rsi_14'] is not None and ind['rsi_14'] > 60:
             sell_score += 25
-            sell_reasons.append(f"RSI overbought at {ind['rsi_14']}")
+            sell_reasons.append(f"RSI overbought {ind['rsi_14']:.1f}")
 
         if ind['ema_21'] and live_price < ind['ema_21']:
             sell_score += 20
-            sell_reasons.append(f"Price below EMA21 ({ind['ema_21']})")
+            sell_reasons.append(f"Below EMA21 ({ind['ema_21']:.2f})")
 
         if ind['macd_histogram'] is not None and ind['macd_histogram'] < 0:
             sell_score += 20
-            sell_reasons.append(f"MACD bearish histogram: {ind['macd_histogram']}")
+            sell_reasons.append(f"MACD bearish ({ind['macd_histogram']:.3f})")
 
-        if ind['bb_upper'] and ind['bb_middle']:
-            if live_price >= ind['bb_upper'] * 0.98:
-                sell_score += 20
-                sell_reasons.append("Price near upper Bollinger Band")
+        if ind['bb_upper'] and live_price >= ind['bb_upper'] * 0.985:
+            sell_score += 15
+            sell_reasons.append("Near upper Bollinger Band")
 
         if ind['volume_sma_20'] and ind['current_volume']:
             if ind['current_volume'] > ind['volume_sma_20'] * 1.5:
-                sell_score += 15
-                sell_reasons.append("Volume confirming move")
+                sell_score += 10
+                sell_reasons.append("Volume confirming sell move")
 
-        # Stop loss / target
-        atr = ind['atr_14'] if ind['atr_14'] else live_price * 0.01
-        stop_loss = round(live_price - (2 * atr), 2)
-        target = round(live_price + (3 * atr), 2)
+        if ind['vwap'] and live_price < ind['vwap']:
+            sell_score += 10
+            sell_reasons.append(f"Below VWAP ({ind['vwap']:.2f})")
+
+        if ind_1h and ind_1h.get('ema_21'):
+            if live_price < ind_1h['ema_21']:
+                sell_score += 10
+                sell_reasons.append("1H trend turned bearish")
+
+        confidence_boost = regime['confidence_modifier']
+
+        atr = ind['atr_14'] if ind['atr_14'] else live_price * 0.008
+        stop_loss = round(live_price - (1.2 * atr), 2)
+        target = round(live_price + (2.0 * atr), 2)
         stop_loss_pct = ((live_price - stop_loss) / live_price) * 100 if live_price else 0
         target_pct = ((target - live_price) / live_price) * 100 if live_price else 0
         risk_reward = round(target_pct / stop_loss_pct, 2) if stop_loss_pct > 0 else 0
@@ -90,28 +159,31 @@ class SignalEngine:
         action = 'HOLD'
         confidence = 0
 
-        if buy_score >= config.MIN_BUY_CONFIDENCE:
+        raw_buy_confidence = min(100, max(0, buy_score + confidence_boost))
+        raw_sell_confidence = min(100, max(0, sell_score + confidence_boost))
+
+        if raw_buy_confidence >= config.MIN_BUY_CONFIDENCE and allow_buy:
             if risk_reward < config.MIN_RISK_REWARD_RATIO:
                 skip_reasons.append(
-                    f"Risk/reward {risk_reward} below minimum "
-                    f"{config.MIN_RISK_REWARD_RATIO}"
+                    f'R:R {risk_reward:.2f} below minimum {config.MIN_RISK_REWARD_RATIO}'
                 )
                 action = 'HOLD'
-                confidence = buy_score
+                confidence = raw_buy_confidence
             else:
                 action = 'BUY'
-                confidence = min(100, buy_score)
-        elif sell_score >= config.MIN_SELL_CONFIDENCE:
+                confidence = raw_buy_confidence
+        elif raw_sell_confidence >= config.MIN_SELL_CONFIDENCE and allow_sell:
             action = 'SELL'
-            confidence = min(100, sell_score)
+            confidence = raw_sell_confidence
         else:
-            action = 'HOLD'
             skip_reasons.append(
-                f"Buy score {buy_score}/100, "
-                f"Sell score {sell_score}/100 — "
-                f"neither above threshold"
+                f'Buy: {raw_buy_confidence}/100, Sell: {raw_sell_confidence}/100 — below thresholds'
             )
-            confidence = max(buy_score, sell_score)
+            if not allow_buy:
+                skip_reasons.append('BUY blocked — Nifty in downtrend')
+            if not allow_sell:
+                skip_reasons.append('SELL blocked — Nifty in uptrend')
+            confidence = max(raw_buy_confidence, raw_sell_confidence)
 
         return {
             'action': action,
@@ -122,4 +194,6 @@ class SignalEngine:
             'target': target,
             'risk_reward_ratio': risk_reward,
             'indicators': ind,
+            'regime': regime['regime'],
+            'market_bias': regime.get('market_bias', 'NEUTRAL'),
         }

@@ -214,6 +214,105 @@ def calculate_vwap(candles: list):
         return None
 
 
+def calculate_adx(candles: list, period: int = 14):
+    try:
+        if len(candles) < (2 * period) + 1:
+            return None
+
+        plus_dm = []
+        minus_dm = []
+        trs = []
+
+        for i in range(1, len(candles)):
+            high = float(candles[i]['high'])
+            low = float(candles[i]['low'])
+            prev_high = float(candles[i - 1]['high'])
+            prev_low = float(candles[i - 1]['low'])
+            prev_close = float(candles[i - 1]['close'])
+
+            up_move = high - prev_high
+            down_move = prev_low - low
+
+            p_dm = up_move if (up_move > 0 and up_move > down_move) else 0.0
+            m_dm = down_move if (down_move > 0 and down_move > up_move) else 0.0
+
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+
+            plus_dm.append(p_dm)
+            minus_dm.append(m_dm)
+            trs.append(tr)
+
+        if len(trs) < period:
+            return None
+
+        # Wilder smooth
+        sm_plus = sum(plus_dm[:period])
+        sm_minus = sum(minus_dm[:period])
+        sm_tr = sum(trs[:period])
+
+        dxs = []
+
+        def _dx(sp, sm, st):
+            if st == 0:
+                return None, None, None
+            pdi = 100 * sp / st
+            mdi = 100 * sm / st
+            denom = pdi + mdi
+            if denom == 0:
+                return pdi, mdi, 0.0
+            return pdi, mdi, 100 * abs(pdi - mdi) / denom
+
+        pdi_v, mdi_v, dx_v = _dx(sm_plus, sm_minus, sm_tr)
+        if dx_v is not None:
+            dxs.append(dx_v)
+
+        for i in range(period, len(trs)):
+            sm_plus = sm_plus - (sm_plus / period) + plus_dm[i]
+            sm_minus = sm_minus - (sm_minus / period) + minus_dm[i]
+            sm_tr = sm_tr - (sm_tr / period) + trs[i]
+            pdi_v, mdi_v, dx_v = _dx(sm_plus, sm_minus, sm_tr)
+            if dx_v is not None:
+                dxs.append(dx_v)
+
+        if len(dxs) < period:
+            return None
+
+        adx = sum(dxs[:period]) / period
+        for d in dxs[period:]:
+            adx = (adx * (period - 1) + d) / period
+
+        return {
+            'adx': round(adx, 2),
+            'plus_di': round(pdi_v, 2) if pdi_v is not None else None,
+            'minus_di': round(mdi_v, 2) if mdi_v is not None else None,
+        }
+    except Exception as e:
+        print(f"[indicators.calculate_adx] error: {e}")
+        return None
+
+
+def calculate_ema_5min(candles_5min: list, period: int):
+    closes = get_closes(candles_5min)
+    return calculate_ema(closes, period)
+
+
+def get_candle_direction(candles: list, lookback: int = 3) -> str:
+    try:
+        if not candles or len(candles) < lookback:
+            return 'NEUTRAL'
+        recent = candles[-lookback:]
+        bullish = sum(1 for c in recent if float(c['close']) > float(c['open']))
+        bearish = sum(1 for c in recent if float(c['close']) < float(c['open']))
+        if bullish >= 2:
+            return 'BULLISH'
+        if bearish >= 2:
+            return 'BEARISH'
+        return 'NEUTRAL'
+    except Exception as e:
+        print(f"[indicators.get_candle_direction] error: {e}")
+        return 'NEUTRAL'
+
+
 def run_all_indicators(candles: list) -> dict:
     closes = get_closes(candles)
     current_close = closes[-1] if closes else 0.0
@@ -221,6 +320,19 @@ def run_all_indicators(candles: list) -> dict:
 
     macd = calculate_macd(candles)
     bb = calculate_bollinger_bands(candles)
+    adx = calculate_adx(candles, 14)
+    candle_dir = get_candle_direction(candles, 3)
+
+    if adx and adx.get('adx') is not None:
+        a = adx['adx']
+        if a > 25:
+            trend_strength = 'STRONG'
+        elif a >= 20:
+            trend_strength = 'WEAK'
+        else:
+            trend_strength = 'CHOPPY'
+    else:
+        trend_strength = 'CHOPPY'
 
     return {
         'rsi_14': calculate_rsi(candles, 14),
@@ -241,4 +353,9 @@ def run_all_indicators(candles: list) -> dict:
         'current_volume': current_volume,
         'current_close': current_close,
         'candle_count': len(candles),
+        'adx': adx['adx'] if adx else None,
+        'adx_plus_di': adx['plus_di'] if adx else None,
+        'adx_minus_di': adx['minus_di'] if adx else None,
+        'candle_direction': candle_dir,
+        'trend_strength': trend_strength,
     }

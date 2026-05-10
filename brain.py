@@ -34,6 +34,7 @@ class TradingBrain:
         self.last_context_log = None
         self.consecutive_losses = 0
         self._nifty50_cache = None
+        self._session_ended = False
 
     def initialize(self, token: str, session_config: dict) -> bool:
         try:
@@ -65,6 +66,8 @@ class TradingBrain:
 
             # Step 1
             self._check_and_close_positions()
+            if self._session_ended:
+                return
 
             # Step 2
             limits = self.risk_manager.check_session_limits(
@@ -106,20 +109,35 @@ class TradingBrain:
                     continue
 
                 try:
-                    candles = self.market_data.get_candles(
+                    candles_5min = self.market_data.get_candles(
+                        f"{exchange}:{symbol}", interval='5minute', days=3
+                    )
+                    candles_15min = self.market_data.get_candles(
                         f"{exchange}:{symbol}", interval='15minute', days=5
                     )
-                    quote = self.market_data.get_live_quote(f"{exchange}:{symbol}")
+                    candles_1hour = self.market_data.get_candles(
+                        f"{exchange}:{symbol}", interval='60minute', days=20
+                    )
 
-                    if not candles or not quote:
+                    if not candles_15min:
                         continue
 
+                    quote = self.market_data.get_live_quote(f"{exchange}:{symbol}")
                     live_price = quote.get('last_price', 0) if isinstance(quote, dict) else 0
                     if not live_price:
                         continue
 
+                    nifty_change = nifty['change_percent'] if nifty else 0.0
+                    nifty_dir = nifty['direction'] if nifty else 'SIDEWAYS'
+
                     signal = self.signal_engine.generate_signal(
-                        candles, live_price, symbol
+                        candles_5min=candles_5min or [],
+                        candles_15min=candles_15min,
+                        candles_1hour=candles_1hour or [],
+                        live_price=live_price,
+                        symbol=symbol,
+                        nifty_direction=nifty_dir,
+                        nifty_change_percent=nifty_change,
                     )
 
                     db.log_decision(self.session_id, {
@@ -134,6 +152,8 @@ class TradingBrain:
                         'confidence_score': signal['confidence'],
                         'reasons': signal['reasons'],
                         'skip_reasons': signal['skip_reasons'],
+                        'regime': signal.get('regime', 'UNKNOWN'),
+                        'market_bias': signal.get('market_bias', 'NEUTRAL'),
                     })
 
                     if signal['action'] == 'BUY' and signal['confidence'] >= config.MIN_BUY_CONFIDENCE:
@@ -259,13 +279,18 @@ class TradingBrain:
             if should_exit:
                 self._execute_sell_by_trade(trade, current_price, exit_reason)
 
-            if self.consecutive_losses >= 3:
-                print("WARNING: 3 consecutive losses. Consider stopping session.")
+            if self.consecutive_losses >= config.CIRCUIT_BREAKER_CONSECUTIVE_LOSSES:
+                print(
+                    "CIRCUIT BREAKER: 3 consecutive losses. "
+                    "Stopping session to protect capital."
+                )
                 db.update_heartbeat(
                     'RUNNING',
                     self.session_stats['trades_executed'],
-                    'WARNING: 3 consecutive losses',
+                    'CIRCUIT BREAKER: 3 consecutive losses — stopping',
                 )
+                self.end_session('CIRCUIT_BREAKER')
+                return
 
     def _execute_sell_by_trade(self, trade: dict, current_price: float, exit_reason: str) -> None:
         result = self.order_manager.place_sell_order(
@@ -339,6 +364,7 @@ class TradingBrain:
 
     def end_session(self, reason: str) -> None:
         print(f"Ending session. Reason: {reason}")
+        self._session_ended = True
 
         open_trades = db.get_open_trades(self.session_id)
         if open_trades:
