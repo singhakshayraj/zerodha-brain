@@ -292,6 +292,29 @@ def log_decision(session_id: str, decision_data: dict) -> None:
         print(f"[database.log_decision] symbol={payload.get('symbol')}")
 
 
+# --- BRAIN ACTIVITY ---
+
+def log_brain_activity(
+    session_id: str,
+    activity_type: str,
+    symbol: str = None,
+    message: str = None,
+    data: dict = None,
+) -> None:
+    try:
+        payload = {
+            'session_id': session_id,
+            'activity_type': activity_type,
+            'symbol': symbol,
+            'message': message,
+            'data': json.dumps(data) if data else None,
+            'created_at': datetime.now(timezone.utc).isoformat(),
+        }
+        supabase.table('brain_activity').insert(payload).execute()
+    except Exception as e:
+        print(f"[DB] log_brain_activity error: {type(e).__name__}: {e}")
+
+
 # --- MARKET CONTEXT ---
 
 def log_market_context(session_id: str, context_data: dict) -> None:

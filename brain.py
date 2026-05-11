@@ -97,6 +97,13 @@ class TradingBrain:
                 print("No stocks in universe")
                 return
 
+            db.log_brain_activity(
+                session_id=self.session_id,
+                activity_type='CYCLE_START',
+                message=f"Cycle {self.session_stats['trades_executed']} — "
+                        f"Scanning {len(universe)} stocks",
+            )
+
             # Step 4
             nifty = self.market_data.get_nifty_level()
             nifty_level = nifty['level'] if nifty else None
@@ -140,6 +147,13 @@ class TradingBrain:
                     if not live_price:
                         continue
 
+                    db.log_brain_activity(
+                        session_id=self.session_id,
+                        activity_type='ANALYZING',
+                        symbol=symbol,
+                        message=f"Analyzing {symbol} @ ₹{live_price}",
+                    )
+
                     nifty_change = nifty['change_percent'] if nifty else 0.0
                     nifty_dir = nifty['direction'] if nifty else 'SIDEWAYS'
 
@@ -151,6 +165,26 @@ class TradingBrain:
                         symbol=symbol,
                         nifty_direction=nifty_dir,
                         nifty_change_percent=nifty_change,
+                    )
+
+                    db.log_brain_activity(
+                        session_id=self.session_id,
+                        activity_type='SIGNAL',
+                        symbol=symbol,
+                        message=f"Signal: {signal['action']} — "
+                                f"Confidence: {signal['confidence']}% — "
+                                f"Regime: {signal.get('regime', 'UNKNOWN')}",
+                        data={
+                            'action': signal['action'],
+                            'confidence': signal['confidence'],
+                            'reasons': signal['reasons'],
+                            'skip_reasons': signal['skip_reasons'],
+                            'rsi': signal['indicators'].get('rsi_14') if signal.get('indicators') else None,
+                            'regime': signal.get('regime'),
+                            'stop_loss': signal['stop_loss'],
+                            'target': signal['target'],
+                            'risk_reward': signal['risk_reward_ratio'],
+                        },
                     )
 
                     db.log_decision(self.session_id, {
@@ -254,12 +288,30 @@ class TradingBrain:
                 f"BUY executed: {symbol} x{result['quantity']} "
                 f"@ ₹{result['price']}"
             )
+            db.log_brain_activity(
+                session_id=self.session_id,
+                activity_type='ORDER_PLACED',
+                symbol=symbol,
+                message=f"BUY {symbol} × {result['quantity']} @ ₹{result['price']}",
+                data={
+                    'order_id': result['order_id'],
+                    'quantity': result['quantity'],
+                    'price': result['price'],
+                    'value': result['value'],
+                },
+            )
         else:
             db.close_trade(trade['id'], {
                 'exit_reason': 'ORDER_FAILED',
                 'pnl': 0,
                 'pnl_percent': 0,
             })
+            db.log_brain_activity(
+                session_id=self.session_id,
+                activity_type='ORDER_FAILED',
+                symbol=symbol,
+                message=f"BUY order failed for {symbol}",
+            )
 
     def _check_and_close_positions(self) -> None:
         open_trades = db.get_open_trades(self.session_id)
@@ -336,6 +388,19 @@ class TradingBrain:
             else:
                 self.session_stats['losing_trades'] += 1
 
+            db.log_brain_activity(
+                session_id=self.session_id,
+                activity_type='POSITION_EXIT',
+                symbol=trade['symbol'],
+                message=f"EXIT {trade['symbol']} — {exit_reason} — "
+                        f"P&L: ₹{pnl:.2f}",
+                data={
+                    'exit_reason': exit_reason,
+                    'pnl': pnl,
+                    'pnl_percent': pnl_pct,
+                },
+            )
+
     def _execute_sell_by_symbol(
         self,
         symbol: str,
@@ -378,6 +443,21 @@ class TradingBrain:
     def end_session(self, reason: str) -> None:
         print(f"Ending session. Reason: {reason}")
         self._session_ended = True
+        try:
+            db.log_brain_activity(
+                session_id=self.session_id,
+                activity_type='SESSION_END',
+                message=f"Session ended: {reason}",
+                data={
+                    'reason': reason,
+                    'total_pnl': self.session_stats['total_pnl'],
+                    'trades_executed': self.session_stats['trades_executed'],
+                    'winning_trades': self.session_stats['winning_trades'],
+                    'losing_trades': self.session_stats['losing_trades'],
+                },
+            )
+        except Exception:
+            pass
 
         open_trades = db.get_open_trades(self.session_id)
         if open_trades:
