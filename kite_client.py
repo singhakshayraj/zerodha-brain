@@ -22,9 +22,9 @@ class KiteClient:
         self.token = token
         self.base_url = config.KITE_BASE_URL
         self.session = requests.Session()
+        # Authorization only — no Content-Type globally (breaks GET requests)
         self.session.headers.update({
             'Authorization': f'enctoken {token}',
-            'Content-Type': 'application/x-www-form-urlencoded',
         })
         self._instrument_cache = {}
         self._instrument_map = {}
@@ -32,12 +32,12 @@ class KiteClient:
 
     # --- CORE HTTP ---
 
-    def _request(self, method: str, path: str, params: dict = None, data: dict = None, raw: bool = False):
+    def _get(self, path: str, params=None, raw: bool = False):
         url = f"{self.base_url}{path}"
         last_err = None
         for attempt in range(config.MAX_RETRIES):
             try:
-                resp = self.session.request(method, url, params=params, data=data, timeout=15)
+                resp = self.session.get(url, params=params, timeout=10)
                 if resp.status_code == 403:
                     raise TokenExpiredError(f"403 from Kite: {resp.text}")
                 if resp.status_code == 429:
@@ -48,28 +48,59 @@ class KiteClient:
                     raise KiteAPIError(f"{resp.status_code} on {path}: {resp.text}")
                 if raw:
                     return resp.text
-                payload = resp.json()
-                return payload.get('data')
+                return resp.json().get('data')
             except TokenExpiredError:
                 raise
             except KiteAPIError as e:
                 last_err = e
-                print(f"[kite] api error attempt {attempt+1}: {e}")
+                print(f"[kite] GET error attempt {attempt+1}: {e}")
                 time.sleep(1)
             except requests.RequestException as e:
                 last_err = e
-                print(f"[kite] network error attempt {attempt+1}: {e}")
+                print(f"[kite] GET network error attempt {attempt+1}: {e}")
                 time.sleep(2)
-        raise KiteAPIError(f"max retries exceeded for {path}: {last_err}")
-
-    def _get(self, path: str, params: dict = None, raw: bool = False):
-        return self._request('GET', path, params=params, raw=raw)
+        raise KiteAPIError(f"GET max retries exceeded for {path}: {last_err}")
 
     def _post(self, path: str, data: dict = None):
-        return self._request('POST', path, data=data)
+        url = f"{self.base_url}{path}"
+        last_err = None
+        for attempt in range(config.MAX_RETRIES):
+            try:
+                resp = self.session.post(
+                    url,
+                    data=data,
+                    headers={'Content-Type': 'application/x-www-form-urlencoded'},
+                    timeout=10,
+                )
+                if resp.status_code == 403:
+                    raise TokenExpiredError(f"403 from Kite: {resp.text}")
+                if resp.status_code == 429:
+                    print(f"[kite] 429 rate limit on {path}, sleeping 1s")
+                    time.sleep(1)
+                    continue
+                if resp.status_code >= 400:
+                    raise KiteAPIError(f"{resp.status_code} on {path}: {resp.text}")
+                return resp.json().get('data')
+            except TokenExpiredError:
+                raise
+            except KiteAPIError as e:
+                last_err = e
+                print(f"[kite] POST error attempt {attempt+1}: {e}")
+                time.sleep(1)
+            except requests.RequestException as e:
+                last_err = e
+                print(f"[kite] POST network error attempt {attempt+1}: {e}")
+                time.sleep(2)
+        raise KiteAPIError(f"POST max retries exceeded for {path}: {last_err}")
 
     def _delete(self, path: str):
-        return self._request('DELETE', path)
+        url = f"{self.base_url}{path}"
+        resp = self.session.delete(url, timeout=10)
+        if resp.status_code == 403:
+            raise TokenExpiredError(f"403 from Kite: {resp.text}")
+        if resp.status_code >= 400:
+            raise KiteAPIError(f"{resp.status_code} on DELETE {path}: {resp.text}")
+        return resp.json().get('data')
 
     # --- USER ---
 
