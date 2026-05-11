@@ -45,6 +45,18 @@ def run():
                     time.sleep(30)
                     continue
 
+                # Get or create session
+                session_id = db.get_or_create_session(session_config)
+                if not session_id:
+                    print("Failed to get or create session")
+                    db.update_heartbeat('ERROR', 0, 'Failed to create session')
+                    time.sleep(30)
+                    continue
+
+                # Inject sessionId into config
+                session_config['sessionId'] = session_id
+                print(f"Using session: {session_id}")
+
                 db.write_config('brain_status', 'RUNNING')
 
                 brain = TradingBrain()
