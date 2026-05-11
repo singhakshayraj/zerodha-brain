@@ -43,8 +43,14 @@ class TradingBrain:
             self.session_config = session_config
             self.session_id = session_config.get('sessionId')
 
-            print("Building instrument map...")
-            self.kite.get_instruments()
+            try:
+                print("Building instrument map...")
+                instruments = self.kite.get_instruments()
+                if instruments:
+                    print(f"Loaded {len(instruments)} instruments")
+            except Exception as e:
+                print(f"Instruments fetch skipped: {e}")
+                print("Using quote-based token lookup instead")
 
             try:
                 print("Fetching holdings...")

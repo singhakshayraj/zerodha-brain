@@ -13,11 +13,17 @@ class MarketData:
         self.kite = kite
         self.candle_cache = {}
         self.quote_cache = {}
+        self._instrument_cache = {}
         self.cache_ttl_seconds = 60
         self.candle_cache_ttl_seconds = 900
 
     def _now(self) -> datetime:
         return datetime.now(IST)
+
+    def get_instrument_token(self, symbol: str):
+        if symbol in self._instrument_cache:
+            return self._instrument_cache[symbol]
+        return None
 
     def get_candles(self, symbol: str, interval: str = '15minute', days: int = 5) -> list:
         try:
@@ -27,20 +33,60 @@ class MarketData:
             if cached and (now - cached['fetched_at']).total_seconds() < self.candle_cache_ttl_seconds:
                 return cached['data']
 
-            token = self.kite.get_instrument_token(symbol)
-            if not token:
-                print(f"[market_data.get_candles] no token for {symbol}")
+            # Get live quote first to get instrument_token
+            quote = self.get_live_quote(symbol)
+            if not quote:
                 return []
 
-            from_dt = now - timedelta(days=days)
-            from_str = from_dt.strftime('%Y-%m-%d %H:%M:%S')
-            to_str = now.strftime('%Y-%m-%d %H:%M:%S')
+            instrument_token = quote.get('instrument_token')
+            if not instrument_token:
+                print(f"[market_data.get_candles] no instrument token for {symbol}")
+                return []
 
-            candles = self.kite.get_historical_data(token, interval, from_str, to_str)
+            # Cache for later lookups
+            self._instrument_cache[symbol] = instrument_token
+
+            candles = self._get_historical(instrument_token, interval, days)
             self.candle_cache[key] = {'data': candles, 'fetched_at': now}
             return candles
         except Exception as e:
             print(f"[market_data.get_candles] error for {symbol}: {e}")
+            return []
+
+    def _get_historical(self, token: int, interval: str, days: int) -> list:
+        now = self._now()
+
+        if interval == '5minute':
+            from_dt = now - timedelta(days=3)
+        elif interval == '15minute':
+            from_dt = now - timedelta(days=5)
+        else:
+            from_dt = now - timedelta(days=20)
+
+        from_date = from_dt.strftime('%Y-%m-%d %H:%M:%S')
+        to_date = now.strftime('%Y-%m-%d %H:%M:%S')
+
+        try:
+            result = self.kite._get(
+                f'/instruments/historical/{token}/{interval}',
+                params={'from': from_date, 'to': to_date},
+            )
+
+            candles_raw = result.get('candles', []) if isinstance(result, dict) else []
+            return [
+                {
+                    'timestamp': c[0],
+                    'open': c[1],
+                    'high': c[2],
+                    'low': c[3],
+                    'close': c[4],
+                    'volume': c[5],
+                }
+                for c in candles_raw
+                if len(c) >= 6
+            ]
+        except Exception as e:
+            print(f"[market_data._get_historical] failed: {e}")
             return []
 
     def get_live_quote(self, symbol: str):

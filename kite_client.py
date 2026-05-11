@@ -165,30 +165,10 @@ class KiteClient:
         return out
 
     def get_instruments(self) -> list:
-        today = datetime.now().date()
-        if self._instrument_cache_date == today and self._instrument_cache:
-            return list(self._instrument_cache.values())
-
-        text = self._get('/instruments', raw=True)
-        rows = []
-        reader = csv.DictReader(io.StringIO(text))
-        new_cache = {}
-        new_map = {}
-        for row in reader:
-            try:
-                token = int(row.get('instrument_token') or 0)
-            except ValueError:
-                continue
-            exch = row.get('exchange', '')
-            tsym = row.get('tradingsymbol', '')
-            key = f"{exch}:{tsym}"
-            new_cache[key] = row
-            new_map[key] = token
-            rows.append(row)
-        self._instrument_cache = new_cache
-        self._instrument_map = new_map
-        self._instrument_cache_date = today
-        return rows
+        # Instruments endpoint not available on kite.zerodha.com/oms
+        # Tokens fetched from quote responses instead
+        print("[kite] Instruments endpoint not available on OMS")
+        return []
 
     def get_instrument_token(self, symbol: str):
         if not self._instrument_map:
