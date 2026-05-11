@@ -84,30 +84,42 @@ def update_heartbeat(status: str, cycle: int, message: str) -> None:
 
 # --- SESSIONS ---
 
-def create_session(session_config: dict):
+def create_session(config: dict):
     try:
-        session_id = str(uuid.uuid4())
-        payload = {
-            'id': session_id,
-            'status': 'ACTIVE',
-            'started_at': _now_iso(),
-            'capital_deployed': session_config.get('capitalDeployed', 0),
-            'max_trades': session_config.get('maxTrades', 10),
-            'max_loss_percent': session_config.get('maxLossPercent', 5),
-            'max_profit_percent': session_config.get('maxProfitPercent', 15),
-            'trade_interval_seconds': session_config.get('tradeIntervalSeconds', 300),
-            'stock_universe': session_config.get('stockUniverse', 'ALL'),
+        print(f"[DB] Raw config received: {config}")
+
+        data = {
+            'capital_deployed': float(config.get('capitalDeployed', 0)),
+            'max_trades': int(config.get('maxTrades', 25)),
+            'max_loss_percent': float(config.get('maxLossPercent', 5)),
+            'max_profit_percent': float(config.get('maxProfitPercent', 15)),
+            'trade_interval_seconds': int(config.get('tradeIntervalSeconds', 300)),
+            'stock_universe': str(config.get('stockUniverse', 'BOTH')),
+            'status': 'RUNNING',
         }
-        print(f"[database.create_session] inserting payload: {payload}")
-        res = supabase.table('trading_sessions').insert(payload).execute()
-        if res.data and len(res.data) > 0:
-            print(f"[database.create_session] session created: {session_id}")
-            return res.data[0]
-        print(f"[database.create_session] no data returned from insert")
-        return None
+
+        print(f"[DB] Inserting session data: {data}")
+
+        result = supabase.table('trading_sessions').insert(data).execute()
+
+        print(f"[DB] Raw result: {result}")
+        print(f"[DB] Result data: {result.data}")
+
+        if result.data and len(result.data) > 0:
+            session_id = result.data[0]['id']
+            print(f"[DB] Session created successfully: {session_id}")
+            return result.data[0]
+        else:
+            print(f"[DB] No data returned from insert")
+            print(f"[DB] Result model: {result.model_dump() if hasattr(result, 'model_dump') else 'N/A'}")
+            return None
+
     except Exception as e:
-        print(f"[database.create_session] error: {e}")
-        print(f"[database.create_session] payload attempted: {payload}")
+        print(f"[DB] Session creation FAILED")
+        print(f"[DB] Error type: {type(e).__name__}")
+        print(f"[DB] Error message: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return None
 
 

@@ -30,32 +30,38 @@ def run():
                 token = db.get_enc_token()
                 session_config = db.get_session_config()
 
+                print(f"[SCHEDULER] Token exists: {bool(token)}")
+                print(f"[SCHEDULER] Session config: {session_config}")
+
                 if not token:
-                    print("No enc_token found in config")
-                    db.update_heartbeat(
-                        'ERROR', 0,
-                        'No token found. Please connect from the app.',
-                    )
+                    print("[SCHEDULER] No token found")
+                    db.update_heartbeat('ERROR', 0, 'No token — reconnect from app')
                     time.sleep(30)
                     continue
 
                 if not session_config:
-                    print("No session config found")
+                    print("[SCHEDULER] No session config found")
                     db.update_heartbeat('ERROR', 0, 'No session config found')
                     time.sleep(30)
                     continue
 
-                # Get or create session
-                session_id = db.get_or_create_session(session_config)
-                if not session_id:
-                    print("Failed to get or create session")
-                    db.update_heartbeat('ERROR', 0, 'Failed to create session')
+                # Brain always creates its own session
+                print("[SCHEDULER] Creating session in DB...")
+                session = db.create_session(session_config)
+
+                if not session:
+                    print("[SCHEDULER] CRITICAL: Session creation failed")
+                    db.update_heartbeat('ERROR', 0, 'DB session creation failed')
+                    db.write_config('brain_status', 'IDLE')
                     time.sleep(30)
                     continue
 
-                # Inject sessionId into config
+                session_id = session['id']
+                db.write_config('active_session_id', session_id)
+                print(f"[SCHEDULER] Session ready: {session_id}")
+
+                # Now pass session_id into brain
                 session_config['sessionId'] = session_id
-                print(f"Using session: {session_id}")
 
                 db.write_config('brain_status', 'RUNNING')
 
