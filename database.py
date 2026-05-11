@@ -84,21 +84,37 @@ def update_heartbeat(status: str, cycle: int, message: str) -> None:
 
 # --- SESSIONS ---
 
-def create_session(config: dict):
-    try:
-        print(f"[DB] Raw config received: {config}")
+ALLOWED_SESSION_COLUMNS = {
+    'capital_deployed',
+    'max_trades',
+    'max_loss_percent',
+    'max_profit_percent',
+    'trade_interval_seconds',
+    'stock_universe',
+    'status',
+}
 
+
+def create_session(session_config: dict):
+    try:
+        print(f"[DB] Raw config received: {session_config}")
+
+        # Build strictly — only the 7 known columns
         data = {
-            'capital_deployed': float(config.get('capitalDeployed', 0)),
-            'max_trades': int(config.get('maxTrades', 25)),
-            'max_loss_percent': float(config.get('maxLossPercent', 5)),
-            'max_profit_percent': float(config.get('maxProfitPercent', 15)),
-            'trade_interval_seconds': int(config.get('tradeIntervalSeconds', 300)),
-            'stock_universe': str(config.get('stockUniverse', 'BOTH')),
+            'capital_deployed': float(session_config.get('capitalDeployed', 0)),
+            'max_trades': int(session_config.get('maxTrades', 25)),
+            'max_loss_percent': float(session_config.get('maxLossPercent', 5)),
+            'max_profit_percent': float(session_config.get('maxProfitPercent', 15)),
+            'trade_interval_seconds': int(session_config.get('tradeIntervalSeconds', 300)),
+            'stock_universe': str(session_config.get('stockUniverse', 'BOTH')),
             'status': 'RUNNING',
         }
 
+        # Defensive sanitize: drop any key not in whitelist
+        data = {k: v for k, v in data.items() if k in ALLOWED_SESSION_COLUMNS}
+
         print(f"[DB] Inserting session data: {data}")
+        print(f"[DB] Keys being sent: {list(data.keys())}")
 
         result = supabase.table('trading_sessions').insert(data).execute()
 
