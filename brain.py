@@ -10,6 +10,7 @@ from market_data import MarketData
 from order_manager import OrderManager
 from risk_manager import RiskManager
 from signal_engine import SignalEngine
+from trading_principles import TradingPrinciples
 
 IST = pytz.timezone('Asia/Kolkata')
 
@@ -83,8 +84,10 @@ class TradingBrain:
                 return
 
             # Step 2
+            stats_with_streak = dict(self.session_stats)
+            stats_with_streak['consecutive_losses'] = self.consecutive_losses
             limits = self.risk_manager.check_session_limits(
-                self.session_stats, self.session_config
+                stats_with_streak, self.session_config
             )
             if not limits['can_trade']:
                 print(f"Session limit reached: {limits['reason']}")

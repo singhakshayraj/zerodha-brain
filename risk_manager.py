@@ -3,11 +3,15 @@ from datetime import datetime
 import pytz
 
 import config
+from trading_principles import TradingPrinciples
 
 IST = pytz.timezone('Asia/Kolkata')
 
 
 class RiskManager:
+
+    def __init__(self):
+        self.consecutive_losses = 0
 
     def calculate_position_size(
         self,
@@ -15,27 +19,26 @@ class RiskManager:
         live_price: float,
         confidence: int,
         stop_loss_price: float,
+        historical_win_rate: float = None,
+        historical_avg_win: float = None,
+        historical_avg_loss: float = None,
     ) -> int:
         try:
-            risk_amount = capital * (config.MAX_RISK_PER_TRADE_PERCENT / 100)
-            stop_distance = live_price - stop_loss_price
-            if stop_distance <= 0:
+            qty = TradingPrinciples.calculate_position_size(
+                capital=capital,
+                entry_price=live_price,
+                stop_loss_price=stop_loss_price,
+                win_rate=historical_win_rate if historical_win_rate else 0.50,
+                avg_win=historical_avg_win if historical_avg_win else 100,
+                avg_loss=historical_avg_loss if historical_avg_loss else 100,
+                slippage_percent=0.005,
+                commission_percent=0.001,
+            )
+
+            if qty * live_price < config.MIN_TRADE_VALUE:
                 return 0
 
-            quantity = risk_amount / stop_distance
-
-            if confidence >= 80:
-                quantity *= 1.2
-            elif confidence < 70:
-                quantity *= 0.8
-
-            max_quantity = (capital * config.MAX_POSITION_SIZE_PERCENT / 100) / live_price
-            quantity = min(quantity, max_quantity)
-
-            if quantity * live_price < config.MIN_TRADE_VALUE:
-                return 0
-
-            return max(1, int(quantity))
+            return qty
         except Exception as e:
             print(f"[risk_manager.calculate_position_size] error: {e}")
             return 0
@@ -43,19 +46,27 @@ class RiskManager:
     def check_session_limits(self, session_stats: dict, session_config: dict) -> dict:
         try:
             capital = session_config['capitalDeployed']
-            max_loss_amount = capital * session_config['maxLossPercent'] / 100
+            max_loss_percent = session_config['maxLossPercent']
             max_profit_amount = capital * session_config['maxProfitPercent'] / 100
 
             total_pnl = session_stats['total_pnl']
             trades_executed = session_stats['trades_executed']
             max_trades = session_config['maxTrades']
 
-            if total_pnl <= -max_loss_amount:
-                return {
-                    'can_trade': False,
-                    'reason': f'MAX_LOSS_HIT: P&L ₹{total_pnl:.2f} '
-                              f'exceeded limit ₹{-max_loss_amount:.2f}',
-                }
+            consecutive_losses = session_stats.get(
+                'consecutive_losses', self.consecutive_losses
+            )
+
+            check = TradingPrinciples.should_continue_trading(
+                current_session_pnl=total_pnl,
+                session_capital=capital,
+                max_loss_percent=max_loss_percent,
+                consecutive_losses=consecutive_losses,
+                max_consecutive_losses=3,
+            )
+
+            if not check['should_continue']:
+                return {'can_trade': False, 'reason': check['reason']}
 
             if total_pnl >= max_profit_amount:
                 return {
@@ -73,7 +84,7 @@ class RiskManager:
             if not self.is_market_open():
                 return {'can_trade': False, 'reason': 'MARKET_CLOSED'}
 
-            return {'can_trade': True, 'reason': None}
+            return {'can_trade': True, 'reason': check['reason']}
         except Exception as e:
             print(f"[risk_manager.check_session_limits] error: {e}")
             return {'can_trade': False, 'reason': f'ERROR: {e}'}

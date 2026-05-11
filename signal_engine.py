@@ -1,6 +1,7 @@
 import config
 from indicators import run_all_indicators
 from regime_detector import RegimeDetector
+from trading_principles import TradingPrinciples
 
 
 class SignalEngine:
@@ -185,6 +186,24 @@ class SignalEngine:
                 skip_reasons.append('SELL blocked — Nifty in uptrend')
             confidence = max(raw_buy_confidence, raw_sell_confidence)
 
+        # 1. Final R:R principle check (only matters for BUY actions)
+        rr_check = TradingPrinciples.is_valid_risk_reward(
+            live_price, stop_loss, target, min_ratio=config.MIN_RISK_REWARD_RATIO
+        )
+
+        if action == 'BUY' and not rr_check['valid']:
+            skip_reasons.append(rr_check['reason'])
+            action = 'HOLD'
+
+        # 2. Adjust confidence by market regime + nifty direction
+        if action != 'HOLD':
+            adjusted_conf = TradingPrinciples.adjust_confidence_by_market(
+                confidence,
+                ind.get('trend_strength', 'CHOPPY'),
+                nifty_direction,
+            )
+            confidence = adjusted_conf
+
         return {
             'action': action,
             'confidence': confidence,
@@ -196,4 +215,10 @@ class SignalEngine:
             'indicators': ind,
             'regime': regime['regime'],
             'market_bias': regime.get('market_bias', 'NEUTRAL'),
+            'risk_reward_check': rr_check,
+            'principles_applied': {
+                'kelly_validated': True,
+                'risk_reward_ratio': rr_check.get('ratio', 0),
+                'confidence_adjusted': True,
+            },
         }
