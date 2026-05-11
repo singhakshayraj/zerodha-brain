@@ -8,7 +8,7 @@ SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_SERVICE_KEY = os.getenv('SUPABASE_SERVICE_KEY')
 
 # Zerodha
-KITE_BASE_URL = 'https://api.kite.trade'
+KITE_BASE_URL = 'https://kite.zerodha.com/oms'
 
 # Market timing (IST)
 MARKET_OPEN_HOUR = 9
