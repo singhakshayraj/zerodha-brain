@@ -25,6 +25,7 @@ class KiteClient:
         # Authorization only — no Content-Type globally (breaks GET requests)
         self.session.headers.update({
             'Authorization': f'enctoken {token}',
+            'X-Kite-Version': '3',
         })
         self._instrument_cache = {}
         self._instrument_map = {}
