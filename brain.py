@@ -46,16 +46,23 @@ class TradingBrain:
             print("Building instrument map...")
             self.kite.get_instruments()
 
-            print("Fetching holdings...")
-            holdings = self.kite.get_holdings()
-            if holdings:
-                db.add_holdings_to_universe(holdings)
+            try:
+                print("Fetching holdings...")
+                holdings = self.kite.get_holdings()
+                if holdings:
+                    db.add_holdings_to_universe(holdings)
+                    print(f"Added {len(holdings)} holdings to universe")
+                else:
+                    print("No holdings found — continuing with Nifty50 only")
+            except Exception as e:
+                print(f"Holdings fetch failed: {e}")
+                print("Continuing without holdings — using Nifty50 universe only")
 
             self.market_data.clear_cache()
             print(f"Brain initialized. Session: {self.session_id}")
             return True
         except Exception as e:
-            print(f"Brain initialization failed: {e}")
+            print(f"Brain initialization failed (instrument map): {e}")
             return False
 
     def run_cycle(self) -> None:
