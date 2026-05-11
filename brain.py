@@ -131,6 +131,11 @@ class TradingBrain:
                 if symbol in self.traded_symbols_this_cycle:
                     continue
 
+                tradeable = TradingPrinciples.is_tradeable_indian_stock(symbol)
+                if not tradeable['tradeable']:
+                    print(f"[{symbol}] {tradeable['reason']}")
+                    continue
+
                 try:
                     candles_5min = self.market_data.get_candles(
                         f"{exchange}:{symbol}", interval='5minute', days=3

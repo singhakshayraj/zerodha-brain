@@ -21,7 +21,7 @@ class TradingPrinciples:
         win_rate: float,
         avg_win: float,
         avg_loss: float,
-        safety_multiplier: float = 0.5,
+        safety_multiplier: float = 0.33,
     ) -> float:
         try:
             if win_rate <= 0 or win_rate > 1:
@@ -54,7 +54,7 @@ class TradingPrinciples:
         entry_price: float,
         stop_loss_price: float,
         target_price: float,
-        min_ratio: float = 1.5,
+        min_ratio: float = 2.0,
     ) -> dict:
         try:
             risk = entry_price - stop_loss_price
@@ -111,13 +111,13 @@ class TradingPrinciples:
     @staticmethod
     def calculate_max_drawdown_capital(
         capital: float,
-        acceptable_drawdown_percent: float = 20,
+        acceptable_drawdown_percent: float = 15,
     ) -> float:
         try:
             return capital * (acceptable_drawdown_percent / 100)
         except Exception as e:
             print(f"[max_drawdown] Error: {e}")
-            return capital * 0.20
+            return capital * 0.15
 
     @staticmethod
     def calculate_position_size(
@@ -132,7 +132,7 @@ class TradingPrinciples:
     ) -> int:
         try:
             kelly_f = TradingPrinciples.kelly_fraction(
-                win_rate, avg_win, avg_loss, safety_multiplier=0.5
+                win_rate, avg_win, avg_loss, safety_multiplier=0.33
             )
 
             risk_amount = capital * kelly_f
@@ -145,7 +145,7 @@ class TradingPrinciples:
 
             quantity = risk_amount / stop_distance
 
-            max_per_trade = capital * 0.20 / entry_price
+            max_per_trade = capital * 0.15 / entry_price
             min_per_trade = 1
 
             final_quantity = int(max(min_per_trade, min(quantity, max_per_trade)))
@@ -167,7 +167,7 @@ class TradingPrinciples:
         session_capital: float,
         max_loss_percent: float = 5,
         consecutive_losses: int = 0,
-        max_consecutive_losses: int = 3,
+        max_consecutive_losses: int = 2,
     ) -> dict:
         try:
             max_loss = session_capital * (max_loss_percent / 100)
@@ -207,14 +207,17 @@ class TradingPrinciples:
             adjusted = base_confidence
 
             if market_regime == 'CHOPPY':
-                adjusted -= 15
-                print(f"[confidence] Choppy market -15")
+                adjusted -= 20
+                print(f"[confidence] Choppy market -20")
+            elif market_regime == 'SIDEWAYS':
+                adjusted -= 25
+                print(f"[confidence] Sideways market -25")
             elif market_regime == 'WEAK_TREND' or market_regime == 'WEAK':
                 adjusted -= 5
                 print(f"[confidence] Weak trend -5")
             elif market_regime == 'TRENDING' or market_regime == 'STRONG':
-                adjusted += 10
-                print(f"[confidence] Trending market +10")
+                adjusted += 5
+                print(f"[confidence] Trending market +5")
 
             if nifty_direction == 'BULLISH':
                 adjusted += 5
@@ -243,7 +246,7 @@ class TradingPrinciples:
         market_condition: str = 'normal',
     ) -> float:
         try:
-            base_slippage_percent = 0.003
+            base_slippage_percent = 0.005
             volatility_factor = 1.0 + (volatility / 100.0)
             size_factor = 1.0 + (quantity / 1000.0)
 
@@ -279,3 +282,44 @@ class TradingPrinciples:
         except Exception as e:
             print(f"[slippage] Error: {e}")
             return stock_price * 0.005
+
+    @staticmethod
+    def is_tradeable_indian_stock(
+        symbol: str,
+        time: datetime = None,
+        is_corporate_action: bool = False,
+    ) -> dict:
+        try:
+            if is_corporate_action:
+                return {
+                    'tradeable': False,
+                    'reason': f'{symbol} has corporate action — skip',
+                }
+
+            now = time if time is not None else datetime.now(IST)
+            if now.tzinfo is None:
+                now = IST.localize(now)
+            else:
+                now = now.astimezone(IST)
+
+            minutes = now.hour * 60 + now.minute
+
+            # 9:15-9:30 opening chaos
+            if 9 * 60 + 15 <= minutes < 9 * 60 + 30:
+                return {
+                    'tradeable': False,
+                    'reason': 'Opening 15 min (9:15-9:30) — chaotic, skip',
+                }
+
+            # 3:15-3:30 closing
+            if 15 * 60 + 15 <= minutes < 15 * 60 + 30:
+                return {
+                    'tradeable': False,
+                    'reason': 'Closing window (3:15-3:30) — skip',
+                }
+
+            return {'tradeable': True, 'reason': 'OK'}
+
+        except Exception as e:
+            print(f"[tradeable] Error: {e}")
+            return {'tradeable': True, 'reason': str(e)}
