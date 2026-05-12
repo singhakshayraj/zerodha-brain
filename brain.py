@@ -115,7 +115,12 @@ class TradingBrain:
             # Step 5
             self._maybe_log_market_context(nifty, time_bucket)
 
-            # Step 6
+            # Step 6 — batch fetch quotes for entire universe in one call
+            symbols_to_analyze = [
+                f"{s.get('exchange', 'NSE')}:{s['symbol']}" for s in universe
+            ]
+            cycle_quotes = self.market_data.get_live_quote(symbols_to_analyze)
+
             remaining_trades = (
                 self.session_config['maxTrades'] -
                 self.session_stats['trades_executed']
@@ -150,8 +155,9 @@ class TradingBrain:
                     if not candles_15min:
                         continue
 
-                    quote = self.market_data.get_live_quote(f"{exchange}:{symbol}")
-                    live_price = quote.get('last_price', 0) if isinstance(quote, dict) else 0
+                    key = f"{exchange}:{symbol}"
+                    quote = cycle_quotes.get(key) or {}
+                    live_price = quote.get('price') or quote.get('last_price') or 0
                     if not live_price:
                         continue
 

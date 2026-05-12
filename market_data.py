@@ -33,17 +33,16 @@ class MarketData:
             if cached and (now - cached['fetched_at']).total_seconds() < self.candle_cache_ttl_seconds:
                 return cached['data']
 
-            # Get live quote first to get instrument_token
-            quote = self.get_live_quote(symbol)
-            if not quote:
-                return []
+            instrument_token = self._instrument_cache.get(symbol)
+            if not instrument_token:
+                quotes = self.get_live_quote([symbol])
+                q = quotes.get(symbol) if quotes else None
+                instrument_token = q.get('instrument_token') if q else None
 
-            instrument_token = quote.get('instrument_token')
             if not instrument_token:
                 print(f"[market_data.get_candles] no instrument token for {symbol}")
                 return []
 
-            # Cache for later lookups
             self._instrument_cache[symbol] = instrument_token
 
             candles = self._get_historical(instrument_token, interval, days)
@@ -89,31 +88,82 @@ class MarketData:
             print(f"[market_data._get_historical] failed: {e}")
             return []
 
-    def get_live_quote(self, symbol: str):
+    def get_live_quote(self, symbols) -> dict:
+        """
+        Fetch live quotes for one or more symbols.
+
+        Zerodha requires: ?i=NSE:STOCK1&i=NSE:STOCK2
+        NOT: ?symbols=['NSE:STOCK1', 'NSE:STOCK2']
+        """
         try:
+            # Accept str for backward compat — wrap as list
+            if isinstance(symbols, str):
+                symbols = [symbols]
+
+            if not symbols:
+                return {}
+
             now = self._now()
-            cached = self.quote_cache.get(symbol)
-            if cached and (now - cached['fetched_at']).total_seconds() < self.cache_ttl_seconds:
-                return cached['data']
-            res = self.kite.get_quote([symbol]) or {}
-            data = res.get(symbol)
-            self.quote_cache[symbol] = {'data': data, 'fetched_at': now}
-            return data
+            quotes = {}
+            uncached = []
+
+            # Serve from cache where possible
+            for s in symbols:
+                cached = self.quote_cache.get(s)
+                if cached and (now - cached['fetched_at']).total_seconds() < self.cache_ttl_seconds:
+                    quotes[s] = cached['data']
+                else:
+                    uncached.append(s)
+
+            if uncached:
+                query_string = '&'.join(f'i={sym}' for sym in uncached)
+                path = f'/quote?{query_string}'
+
+                print(f"[market_data] Fetching quotes: {uncached}")
+                result = self.kite._get(path) or {}
+
+                for sym in uncached:
+                    raw = result.get(sym)
+                    if not raw:
+                        continue
+                    ohlc = raw.get('ohlc') or {}
+                    depth = raw.get('depth') or {}
+                    bid_arr = depth.get('buy') or []
+                    ask_arr = depth.get('sell') or []
+                    bid = bid_arr[0].get('price', 0) if bid_arr else 0
+                    ask = ask_arr[0].get('price', 0) if ask_arr else 0
+
+                    mapped = {
+                        'price': raw.get('last_price', 0),
+                        'last_price': raw.get('last_price', 0),
+                        'high': raw.get('high') or ohlc.get('high', 0),
+                        'low': raw.get('low') or ohlc.get('low', 0),
+                        'close': raw.get('close') or ohlc.get('close', 0),
+                        'prev_close': ohlc.get('close', 0),
+                        'volume': raw.get('volume', 0),
+                        'bid': bid,
+                        'ask': ask,
+                        'instrument_token': raw.get('instrument_token', 0),
+                        'ohlc': ohlc,
+                    }
+                    quotes[sym] = mapped
+                    self.quote_cache[sym] = {'data': mapped, 'fetched_at': now}
+
+            print(f"[market_data] Got quotes for {len(quotes)} symbols")
+            return quotes
+
         except Exception as e:
-            print(f"[market_data.get_live_quote] error for {symbol}: {e}")
-            return None
+            print(f"[market_data.get_live_quote] error: {e}")
+            return {}
 
     def get_live_quotes_batch(self, symbols: list) -> dict:
+        # Kept for compatibility; delegates to chunked get_live_quote
         out = {}
         try:
             batch_size = config.MAX_SYMBOLS_PER_QUOTE
             for i in range(0, len(symbols), batch_size):
                 batch = symbols[i:i + batch_size]
-                try:
-                    res = self.kite.get_quote(batch) or {}
-                    out.update(res)
-                except Exception as e:
-                    print(f"[market_data.get_live_quotes_batch] batch error: {e}")
+                out.update(self.get_live_quote(batch))
             return out
         except Exception as e:
             print(f"[market_data.get_live_quotes_batch] error: {e}")
@@ -121,10 +171,10 @@ class MarketData:
 
     def get_nifty_level(self) -> dict:
         try:
-            q = self.get_live_quote('NSE:NIFTY 50') or {}
-            last_price = q.get('last_price') or 0
-            ohlc = q.get('ohlc') or {}
-            prev_close = ohlc.get('close') or 0
+            quotes = self.get_live_quote(['NSE:NIFTY 50'])
+            q = quotes.get('NSE:NIFTY 50') or {}
+            last_price = q.get('price') or q.get('last_price') or 0
+            prev_close = q.get('prev_close') or 0
             change_percent = 0.0
             if prev_close:
                 change_percent = ((last_price - prev_close) / prev_close) * 100
