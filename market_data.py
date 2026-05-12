@@ -5,6 +5,8 @@ import pytz
 import config
 from kite_client import KiteClient
 
+INDEX_BLOCKLIST = ('NIFTY', 'SENSEX', 'BANKNIFTY', 'FINNIFTY')
+
 IST = pytz.timezone('Asia/Kolkata')
 
 
@@ -88,44 +90,74 @@ class MarketData:
             print(f"[market_data._get_historical] failed: {e}")
             return []
 
+    def _is_blocked_symbol(self, sym: str) -> bool:
+        upper = sym.upper()
+        return any(idx in upper for idx in INDEX_BLOCKLIST)
+
+    def _rewrite_exchange(self, sym: str) -> str:
+        # BSE: → NSE: for /quote (OMS quote uses NSE for most stocks)
+        if sym.startswith('BSE:'):
+            return 'NSE:' + sym[4:]
+        return sym
+
     def get_live_quote(self, symbols) -> dict:
         """
         Fetch live quotes for one or more symbols.
 
         Zerodha requires: ?i=NSE:STOCK1&i=NSE:STOCK2
-        NOT: ?symbols=['NSE:STOCK1', 'NSE:STOCK2']
         """
         try:
-            # Accept str for backward compat — wrap as list
             if isinstance(symbols, str):
                 symbols = [symbols]
 
             if not symbols:
                 return {}
 
+            # Drop index/ETF symbols not tradeable via /quote
+            tradeable = [s for s in symbols if not self._is_blocked_symbol(s)]
+            if not tradeable:
+                return {}
+
             now = self._now()
             quotes = {}
             uncached = []
 
-            # Serve from cache where possible
-            for s in symbols:
+            for s in tradeable:
                 cached = self.quote_cache.get(s)
                 if cached and (now - cached['fetched_at']).total_seconds() < self.cache_ttl_seconds:
                     quotes[s] = cached['data']
                 else:
                     uncached.append(s)
 
-            if uncached:
-                query_string = '&'.join(f'i={sym}' for sym in uncached)
-                path = f'/quote?{query_string}'
+            if not uncached:
+                return quotes
 
-                print(f"[market_data] Fetching quotes: {uncached}")
-                result = self.kite._get(path) or {}
+            # Map original symbol -> api symbol (BSE→NSE) and URL-encode
+            api_syms = [self._rewrite_exchange(s) for s in uncached]
+            encoded = [s.replace('&', '%26').replace(' ', '%20') for s in api_syms]
 
-                for sym in uncached:
-                    raw = result.get(sym)
+            batch_size = 50
+            for i in range(0, len(encoded), batch_size):
+                batch_enc = encoded[i:i + batch_size]
+                batch_api = api_syms[i:i + batch_size]
+                batch_orig = uncached[i:i + batch_size]
+
+                params_str = '&'.join(f'i={s}' for s in batch_enc)
+                path = f'/quote?{params_str}'
+
+                print(f"[quote] Batch {i // batch_size + 1}: {len(batch_enc)} symbols")
+
+                try:
+                    result = self.kite._get(path) or {}
+                except Exception as e:
+                    print(f"[quote] Batch error: {e}")
+                    continue
+
+                for orig, api_sym in zip(batch_orig, batch_api):
+                    raw = result.get(orig) or result.get(api_sym)
                     if not raw:
                         continue
+
                     ohlc = raw.get('ohlc') or {}
                     depth = raw.get('depth') or {}
                     bid_arr = depth.get('buy') or []
@@ -146,15 +178,25 @@ class MarketData:
                         'instrument_token': raw.get('instrument_token', 0),
                         'ohlc': ohlc,
                     }
-                    quotes[sym] = mapped
-                    self.quote_cache[sym] = {'data': mapped, 'fetched_at': now}
+                    quotes[orig] = mapped
+                    self.quote_cache[orig] = {'data': mapped, 'fetched_at': now}
 
-            print(f"[market_data] Got quotes for {len(quotes)} symbols")
+            print(f"[quote] Total fetched: {len(quotes)}")
             return quotes
 
         except Exception as e:
             print(f"[market_data.get_live_quote] error: {e}")
             return {}
+
+    def _fetch_index_quote(self, symbol: str):
+        """Bypass blocklist — used by get_nifty_level for index data."""
+        try:
+            encoded = symbol.replace('&', '%26').replace(' ', '%20')
+            result = self.kite._get(f'/quote?i={encoded}') or {}
+            return result.get(symbol)
+        except Exception as e:
+            print(f"[market_data._fetch_index_quote] {symbol} error: {e}")
+            return None
 
     def get_live_quotes_batch(self, symbols: list) -> dict:
         # Kept for compatibility; delegates to chunked get_live_quote
@@ -171,10 +213,10 @@ class MarketData:
 
     def get_nifty_level(self) -> dict:
         try:
-            quotes = self.get_live_quote(['NSE:NIFTY 50'])
-            q = quotes.get('NSE:NIFTY 50') or {}
-            last_price = q.get('price') or q.get('last_price') or 0
-            prev_close = q.get('prev_close') or 0
+            raw = self._fetch_index_quote('NSE:NIFTY 50') or {}
+            last_price = raw.get('last_price') or 0
+            ohlc = raw.get('ohlc') or {}
+            prev_close = ohlc.get('close') or 0
             change_percent = 0.0
             if prev_close:
                 change_percent = ((last_price - prev_close) / prev_close) * 100

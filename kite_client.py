@@ -50,6 +50,14 @@ class KiteClient:
                 if response.status_code == 403:
                     raise TokenExpiredError("Token expired")
 
+                if response.status_code == 400:
+                    body = response.text
+                    print(f"[kite] error {attempt}: 400 body={body[:300]}")
+                    if 'TokenException' in body or 'tokenexception' in body.lower():
+                        raise TokenExpiredError("Token expired, needs refresh")
+                    # 400 = bad request, not transient. Do not retry.
+                    raise KiteAPIError(f"400 on {path}: {body[:200]}")
+
                 if response.status_code != 200:
                     print(f"[kite] error {attempt}: {response.status_code} body={response.text[:200]}")
                     if attempt == config.MAX_RETRIES:
