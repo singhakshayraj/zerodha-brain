@@ -13,15 +13,32 @@ risk_manager = RiskManager()
 
 _brain_lock = threading.Lock()
 _is_trading = False
-_last_heartbeat = 0.0
+
+# Shared heartbeat state written by trade loop, read by heartbeat thread
+_heartbeat_status = 'ONLINE'
+_heartbeat_cycle = 0
+_heartbeat_message = 'Waiting for START command'
+_heartbeat_lock = threading.Lock()
 
 
-def _maybe_heartbeat(status: str, cycle: int, message: str) -> None:
-    global _last_heartbeat
-    now = time.time()
-    if now - _last_heartbeat >= 55:
-        db.update_heartbeat(status, cycle, message)
-        _last_heartbeat = now
+def _set_heartbeat(status: str, cycle: int, message: str) -> None:
+    global _heartbeat_status, _heartbeat_cycle, _heartbeat_message
+    with _heartbeat_lock:
+        _heartbeat_status = status
+        _heartbeat_cycle = cycle
+        _heartbeat_message = message
+
+
+def _heartbeat_thread() -> None:
+    """Daemon thread: pings DB every 30s regardless of trade interval."""
+    while True:
+        try:
+            with _heartbeat_lock:
+                s, c, m = _heartbeat_status, _heartbeat_cycle, _heartbeat_message
+            db.update_heartbeat(s, c, m)
+        except Exception as e:
+            print(f"[HEARTBEAT] error: {e}")
+        time.sleep(30)
 
 
 def run():
@@ -32,12 +49,15 @@ def run():
         f"{datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}"
     )
 
+    # Start background heartbeat — fires every 30s independent of trade sleep
+    t = threading.Thread(target=_heartbeat_thread, daemon=True, name='heartbeat')
+    t.start()
+
     db.update_heartbeat('ONLINE', 0, 'Brain started, waiting for command')
-    _last_heartbeat_ref = [time.time()]  # track so first loop doesn't double-ping
 
     while True:
         try:
-            _maybe_heartbeat('ONLINE', 0, 'Waiting for START command')
+            _set_heartbeat('ONLINE', 0, 'Waiting for START command')
             command = db.get_brain_command()
 
             if command == 'START':
@@ -58,13 +78,13 @@ def run():
 
                     if not token:
                         print("[SCHEDULER] No token found")
-                        db.update_heartbeat('ERROR', 0, 'No token — reconnect from app')
+                        _set_heartbeat('ERROR', 0, 'No token — reconnect from app')
                         time.sleep(30)
                         continue
 
                     if not session_config:
                         print("[SCHEDULER] No session config found")
-                        db.update_heartbeat('ERROR', 0, 'No session config found')
+                        _set_heartbeat('ERROR', 0, 'No session config found')
                         time.sleep(30)
                         continue
 
@@ -73,7 +93,7 @@ def run():
 
                     if not session:
                         print("[SCHEDULER] CRITICAL: Session creation failed")
-                        db.update_heartbeat('ERROR', 0, 'DB session creation failed')
+                        _set_heartbeat('ERROR', 0, 'DB session creation failed')
                         db.write_config('brain_status', 'IDLE')
                         time.sleep(30)
                         continue
@@ -92,7 +112,7 @@ def run():
                     if not initialized:
                         print("Brain initialization failed")
                         db.write_config('brain_status', 'IDLE')
-                        db.update_heartbeat('ERROR', 0, 'Initialization failed')
+                        _set_heartbeat('ERROR', 0, 'Initialization failed')
                         time.sleep(30)
                         continue
 
@@ -119,7 +139,7 @@ def run():
                             db.write_config('brain_status', 'IDLE')
                             break
 
-                        _maybe_heartbeat(
+                        _set_heartbeat(
                             'RUNNING',
                             brain.session_stats['trades_executed'],
                             f"Active | P&L: ₹{brain.session_stats['total_pnl']:.2f}",
@@ -138,11 +158,11 @@ def run():
 
         except KeyboardInterrupt:
             print("Brain stopped manually")
-            db.update_heartbeat('OFFLINE', 0, 'Stopped manually')
+            _set_heartbeat('OFFLINE', 0, 'Stopped manually')
             break
 
         except Exception as e:
             print(f"Scheduler error: {e}")
-            db.update_heartbeat('ERROR', 0, f"Error: {str(e)}")
+            _set_heartbeat('ERROR', 0, f"Error: {str(e)}")
             _is_trading = False
             time.sleep(60)
