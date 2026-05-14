@@ -55,6 +55,10 @@ ADX_WEAK_THRESHOLD = 20.0
 # Circuit breaker
 CIRCUIT_BREAKER_CONSECUTIVE_LOSSES = 3
 
+# Trading mode — force holdings-only since /quote endpoint
+# does not work on OMS for retail authentication
+TRADING_MODE_FORCE = 'HOLDINGS_ONLY'
+
 # NSE 2025 holidays (hardcoded)
 NSE_HOLIDAYS_2025 = [
     '2025-01-26',  # Republic Day

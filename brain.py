@@ -36,6 +36,7 @@ class TradingBrain:
         self.consecutive_losses = 0
         self._nifty50_cache = None
         self._session_ended = False
+        self.universe = {}
 
     def initialize(self, token: str, session_config: dict) -> bool:
         try:
@@ -66,6 +67,18 @@ class TradingBrain:
                 print("Continuing without holdings — using Nifty50 universe only")
 
             self.market_data.clear_cache()
+
+            # Build holdings-only universe (forced — /quote endpoint disabled)
+            self.market_data.refresh_holdings_cache()
+            self.universe = {}
+            for sym, data in self.market_data._holdings_cache.items():
+                self.universe[sym] = {
+                    'symbol': sym.split(':', 1)[1] if ':' in sym else sym,
+                    'exchange': sym.split(':', 1)[0] if ':' in sym else 'NSE',
+                    'instrument_token': data.get('instrument_token', 0),
+                }
+            print(f"Universe: {len(self.universe)} stocks (holdings only)")
+
             print(f"Brain initialized. Session: {self.session_id}")
             return True
         except Exception as e:
@@ -75,6 +88,9 @@ class TradingBrain:
     def run_cycle(self) -> None:
         try:
             print(f"\n--- Cycle start: {datetime.now(IST).strftime('%H:%M:%S')} ---")
+
+            # Refresh prices at start of cycle (holdings-cache mode)
+            self.market_data.refresh_holdings_cache()
 
             self.traded_symbols_this_cycle = set()
 
@@ -94,17 +110,17 @@ class TradingBrain:
                 self.end_session(limits['reason'].split(':')[0])
                 return
 
-            # Step 3
-            universe = db.get_stock_universe('ALL')
-            if not universe:
-                print("No stocks in universe")
+            # Step 3 — universe is holdings-only (forced mode)
+            if not self.universe:
+                print("No stocks in universe (no holdings)")
                 return
+            universe = list(self.universe.values())
 
             db.log_brain_activity(
                 session_id=self.session_id,
                 activity_type='CYCLE_START',
                 message=f"Cycle {self.session_stats['trades_executed']} — "
-                        f"Scanning {len(universe)} stocks",
+                        f"Scanning {len(universe)} stocks (holdings only)",
             )
 
             # Step 4

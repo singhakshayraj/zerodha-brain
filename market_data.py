@@ -1,3 +1,4 @@
+import time
 from datetime import datetime, timedelta
 
 import pytz
@@ -16,8 +17,49 @@ class MarketData:
         self.candle_cache = {}
         self.quote_cache = {}
         self._instrument_cache = {}
+        self._holdings_cache = {}
+        self._holdings_cache_time = 0.0
         self.cache_ttl_seconds = 60
         self.candle_cache_ttl_seconds = 900
+
+    def refresh_holdings_cache(self) -> bool:
+        """Fetch holdings once and cache prices + instrument_tokens."""
+        try:
+            holdings = self.kite.get_holdings() or []
+            now = time.time()
+
+            for h in holdings:
+                tsym = h.get('tradingsymbol')
+                if not tsym:
+                    continue
+                exch = h.get('exchange') or 'NSE'
+                key = f"{exch}:{tsym}"
+
+                price = h.get('last_price', 0) or 0
+                token = h.get('instrument_token', 0) or 0
+
+                self._holdings_cache[key] = {
+                    'price': price,
+                    'last_price': price,
+                    'high': h.get('day_change', 0) or 0,
+                    'low': price,
+                    'close': h.get('close_price', 0) or 0,
+                    'prev_close': h.get('close_price', 0) or 0,
+                    'volume': h.get('volume', 0) or 0,
+                    'bid': 0,
+                    'ask': 0,
+                    'instrument_token': token,
+                    'ohlc': {'close': h.get('close_price', 0) or 0},
+                }
+                if token:
+                    self._instrument_cache[key] = token
+
+            self._holdings_cache_time = now
+            print(f"[market_data] Cached {len(self._holdings_cache)} holdings")
+            return True
+        except Exception as e:
+            print(f"[market_data] Holdings cache error: {e}")
+            return False
 
     def _now(self) -> datetime:
         return datetime.now(IST)
@@ -102,9 +144,8 @@ class MarketData:
 
     def get_live_quote(self, symbols) -> dict:
         """
-        Fetch live quotes for one or more symbols.
-
-        Zerodha requires: ?i=NSE:STOCK1&i=NSE:STOCK2
+        Return prices from holdings cache. Skips /quote endpoint
+        entirely — it does not work on Zerodha OMS for retail auth.
         """
         try:
             if isinstance(symbols, str):
@@ -113,90 +154,24 @@ class MarketData:
             if not symbols:
                 return {}
 
-            # Drop index/ETF symbols not tradeable via /quote
-            tradeable = [s for s in symbols if not self._is_blocked_symbol(s)]
-            if not tradeable:
-                return {}
+            # Refresh cache if stale
+            if time.time() - self._holdings_cache_time > 60:
+                self.refresh_holdings_cache()
 
-            now = self._now()
-            quotes = {}
-            uncached = []
+            result = {}
+            for sym in symbols:
+                if sym in self._holdings_cache:
+                    result[sym] = self._holdings_cache[sym]
 
-            for s in tradeable:
-                cached = self.quote_cache.get(s)
-                if cached and (now - cached['fetched_at']).total_seconds() < self.cache_ttl_seconds:
-                    quotes[s] = cached['data']
-                else:
-                    uncached.append(s)
-
-            if not uncached:
-                return quotes
-
-            # Map original symbol -> api symbol (BSE→NSE) and URL-encode
-            api_syms = [self._rewrite_exchange(s) for s in uncached]
-            encoded = [s.replace('&', '%26').replace(' ', '%20') for s in api_syms]
-
-            batch_size = 50
-            for i in range(0, len(encoded), batch_size):
-                batch_enc = encoded[i:i + batch_size]
-                batch_api = api_syms[i:i + batch_size]
-                batch_orig = uncached[i:i + batch_size]
-
-                params_str = '&'.join(f'i={s}' for s in batch_enc)
-                path = f'/quote?{params_str}'
-
-                print(f"[quote] Batch {i // batch_size + 1}: {len(batch_enc)} symbols")
-
-                try:
-                    result = self.kite._get(path) or {}
-                except Exception as e:
-                    print(f"[quote] Batch error: {e}")
-                    continue
-
-                for orig, api_sym in zip(batch_orig, batch_api):
-                    raw = result.get(orig) or result.get(api_sym)
-                    if not raw:
-                        continue
-
-                    ohlc = raw.get('ohlc') or {}
-                    depth = raw.get('depth') or {}
-                    bid_arr = depth.get('buy') or []
-                    ask_arr = depth.get('sell') or []
-                    bid = bid_arr[0].get('price', 0) if bid_arr else 0
-                    ask = ask_arr[0].get('price', 0) if ask_arr else 0
-
-                    mapped = {
-                        'price': raw.get('last_price', 0),
-                        'last_price': raw.get('last_price', 0),
-                        'high': raw.get('high') or ohlc.get('high', 0),
-                        'low': raw.get('low') or ohlc.get('low', 0),
-                        'close': raw.get('close') or ohlc.get('close', 0),
-                        'prev_close': ohlc.get('close', 0),
-                        'volume': raw.get('volume', 0),
-                        'bid': bid,
-                        'ask': ask,
-                        'instrument_token': raw.get('instrument_token', 0),
-                        'ohlc': ohlc,
-                    }
-                    quotes[orig] = mapped
-                    self.quote_cache[orig] = {'data': mapped, 'fetched_at': now}
-
-            print(f"[quote] Total fetched: {len(quotes)}")
-            return quotes
+            print(
+                f"[market_data] Returning {len(result)} of "
+                f"{len(symbols)} requested quotes"
+            )
+            return result
 
         except Exception as e:
             print(f"[market_data.get_live_quote] error: {e}")
             return {}
-
-    def _fetch_index_quote(self, symbol: str):
-        """Bypass blocklist — used by get_nifty_level for index data."""
-        try:
-            encoded = symbol.replace('&', '%26').replace(' ', '%20')
-            result = self.kite._get(f'/quote?i={encoded}') or {}
-            return result.get(symbol)
-        except Exception as e:
-            print(f"[market_data._fetch_index_quote] {symbol} error: {e}")
-            return None
 
     def get_live_quotes_batch(self, symbols: list) -> dict:
         # Kept for compatibility; delegates to chunked get_live_quote
@@ -212,14 +187,12 @@ class MarketData:
             return out
 
     def get_nifty_level(self) -> dict:
+        # /quote disabled — no Nifty 50 access via OMS for retail
+        # Return neutral context so regime detector treats market as SIDEWAYS
         try:
-            raw = self._fetch_index_quote('NSE:NIFTY 50') or {}
-            last_price = raw.get('last_price') or 0
-            ohlc = raw.get('ohlc') or {}
-            prev_close = ohlc.get('close') or 0
+            last_price = 0
+            prev_close = 0
             change_percent = 0.0
-            if prev_close:
-                change_percent = ((last_price - prev_close) / prev_close) * 100
 
             if change_percent > 0.3:
                 direction = 'BULLISH'
