@@ -1,10 +1,14 @@
 import time
 
 import config
+import database as db
 from kite_client import KiteClient
 
 
 class OrderManager:
+
+    def __init__(self):
+        self.session_id = None
 
     def place_buy_order(
         self,
@@ -47,21 +51,42 @@ class OrderManager:
             print(f"BUY order status: {status} for {symbol}")
             return None
 
-    def _has_intraday_long(self, kite: KiteClient, symbol: str, quantity: int) -> bool:
+    def _check_safety_sell(self, kite: KiteClient, symbol: str) -> bool:
+        """Return True if SELL is safe (MIS long exists). False blocks."""
+        clean_symbol = symbol.replace('NSE:', '').replace('BSE:', '')
         try:
             positions = kite.get_positions() or {}
             net = positions.get('net', []) if isinstance(positions, dict) else []
-            bare_symbol = symbol.replace('NSE:', '').replace('BSE:', '')
+
             for p in net:
                 if (
-                    p.get('tradingsymbol') == bare_symbol
+                    p.get('tradingsymbol') == clean_symbol
                     and p.get('product') == 'MIS'
                     and (p.get('quantity') or 0) > 0
                 ):
                     return True
+
+            print(f"[SAFETY] BLOCKED SELL on {symbol}")
+            print(f"[SAFETY] Reason: No intraday MIS position")
+            print(f"[SAFETY] CNC holdings will NOT be touched")
+
+            if self.session_id:
+                try:
+                    db.log_brain_activity(
+                        self.session_id,
+                        'ORDER_FAILED',
+                        symbol=symbol,
+                        message='SELL blocked: would reduce CNC holding',
+                        data={'safety_lock': True},
+                    )
+                except Exception:
+                    pass
+
             return False
+
         except Exception as e:
-            print(f"[order_manager._has_intraday_long] error: {e}")
+            print(f"[SAFETY] Position check failed: {e}")
+            print(f"[SAFETY] BLOCKING order as precaution")
             return False
 
     def place_sell_order(
@@ -73,14 +98,8 @@ class OrderManager:
     ):
         print(f"Placing SELL order: {symbol} x{quantity}")
 
-        # SAFETY: never SELL unless an MIS long exists.
-        # Prevents accidentally shorting from CNC holdings.
-        if not self._has_intraday_long(kite, symbol, quantity):
-            print(
-                f"[SAFETY] Blocking SELL on {symbol} — "
-                f"no intraday position to close. "
-                f"Will not touch CNC holding."
-            )
+        # SAFETY: block SELL on CNC holdings — only MIS positions can close
+        if not self._check_safety_sell(kite, symbol):
             return None
 
         order_id = kite.place_order(

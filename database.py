@@ -278,58 +278,66 @@ def get_session_trades(session_id: str) -> list:
 
 # --- DECISIONS ---
 
-ALLOWED_DECISION_COLUMNS = {
-    'session_id',
-    'symbol',
-    'signal',
-    'confidence',
-    'confidence_score',
-    'rsi_14',
-    'ema_9',
-    'ema_21',
-    'ema_50',
-    'ema_200',
-    'macd',
-    'bollinger_upper',
-    'bollinger_lower',
-    'atr_14',
-    'volume_sma',
-    'vwap',
-    'reasons',
-    'skip_reasons',
-    'stop_loss',
-    'target',
-    'risk_reward',
-    'position_size',
-    'live_price',
-    'price_at_decision',
-    'indicators',
-    'created_at',
-    'trade_id',
-    'nifty_level_at_decision',
-    'time_of_day_bucket',
-}
-
-
-def log_decision(session_id: str, decision_data: dict) -> None:
-    payload = {}
+def log_decision(
+    session_id: str,
+    symbol: str,
+    signal: str,
+    confidence: int,
+    indicators: dict,
+    reasons: list,
+    skip_reasons: list,
+    live_price: float = 0,
+    nifty_level: float = 0,
+    time_bucket: str = 'NORMAL',
+    stop_loss: float = None,
+    target: float = None,
+    risk_reward: float = None,
+    position_size: int = None,
+    regime: str = None,
+    market_bias: str = None,
+    **kwargs,
+) -> None:
+    """Log decision; extra fields merged into indicators JSONB."""
     try:
-        payload = dict(decision_data)
-        payload['session_id'] = session_id
+        enhanced = dict(indicators) if indicators else {}
 
-        # Whitelist columns — drop anything not in schema (market_bias etc.)
-        payload = {k: v for k, v in payload.items() if k in ALLOWED_DECISION_COLUMNS}
-        # Drop None values to keep insert clean
-        payload = {k: v for k, v in payload.items() if v is not None}
+        if stop_loss is not None:
+            enhanced['stop_loss'] = float(stop_loss)
+        if target is not None:
+            enhanced['target'] = float(target)
+        if risk_reward is not None:
+            enhanced['risk_reward'] = float(risk_reward)
+        if position_size is not None:
+            enhanced['position_size'] = int(position_size)
+        if regime is not None:
+            enhanced['regime'] = str(regime)
+        if market_bias is not None:
+            enhanced['market_bias'] = str(market_bias)
 
-        symbol = payload.get('symbol', '?')
-        signal = payload.get('signal', '?')
-        conf = payload.get('confidence_score', '?')
-        print(f"[database.log_decision] {symbol} {signal} conf={conf}")
+        for k, v in kwargs.items():
+            if v is not None:
+                enhanced[k] = v
+
+        payload = {
+            'session_id': session_id,
+            'symbol': symbol,
+            'signal': signal,
+            'confidence_score': int(confidence),
+            'indicators': enhanced,
+            'reasons': reasons if reasons else [],
+            'skip_reasons': skip_reasons if skip_reasons else [],
+            'price_at_decision': float(live_price) if live_price else 0,
+            'nifty_level_at_decision': float(nifty_level) if nifty_level else 0,
+            'time_of_day_bucket': time_bucket,
+            'decided_at': datetime.now(timezone.utc).isoformat(),
+        }
+
         supabase.table('brain_decisions').insert(payload).execute()
+        print(f"[log_decision] OK {symbol} {signal} conf={confidence}")
+
     except Exception as e:
-        print(f"[database.log_decision] error: {type(e).__name__}: {e}")
-        print(f"[database.log_decision] symbol={payload.get('symbol')}")
+        print(f"[log_decision] error: {e}")
+        print(f"[log_decision] symbol={symbol}")
 
 
 # --- BRAIN ACTIVITY ---
@@ -341,18 +349,30 @@ def log_brain_activity(
     message: str = None,
     data: dict = None,
 ) -> None:
+    """
+    Log activity for live UI feed.
+
+    activity_type: CYCLE_START | ANALYZING | SIGNAL |
+                   ORDER_PLACED | ORDER_FAILED |
+                   POSITION_EXIT | SESSION_END | ERROR
+    """
     try:
         payload = {
             'session_id': session_id,
             'activity_type': activity_type,
-            'symbol': symbol,
-            'message': message,
-            'data': json.dumps(data) if data else None,
             'created_at': datetime.now(timezone.utc).isoformat(),
         }
+        if symbol is not None:
+            payload['symbol'] = symbol
+        if message is not None:
+            payload['message'] = message
+        if data is not None:
+            payload['data'] = data
+
         supabase.table('brain_activity').insert(payload).execute()
+        print(f"[activity] {activity_type} {symbol or ''} {message or ''}")
     except Exception as e:
-        print(f"[DB] log_brain_activity error: {type(e).__name__}: {e}")
+        print(f"[log_brain_activity] error: {e}")
 
 
 # --- MARKET CONTEXT ---

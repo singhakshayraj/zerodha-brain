@@ -68,6 +68,9 @@ class TradingBrain:
 
             self.market_data.clear_cache()
 
+            # Propagate session_id to order_manager for safety logging
+            self.order_manager.session_id = self.session_id
+
             # Build holdings-only universe (forced — /quote endpoint disabled)
             self.market_data.refresh_holdings_cache()
             self.universe = {}
@@ -217,21 +220,23 @@ class TradingBrain:
                         },
                     )
 
-                    db.log_decision(self.session_id, {
-                        'session_id': self.session_id,
-                        'trade_id': None,
-                        'symbol': symbol,
-                        'price_at_decision': live_price,
-                        'nifty_level_at_decision': nifty_level,
-                        'time_of_day_bucket': time_bucket,
-                        'indicators': signal['indicators'],
-                        'signal': signal['action'],
-                        'confidence_score': signal['confidence'],
-                        'reasons': signal['reasons'],
-                        'skip_reasons': signal['skip_reasons'],
-                        'regime': signal.get('regime', 'UNKNOWN'),
-                        'market_bias': signal.get('market_bias', 'NEUTRAL'),
-                    })
+                    db.log_decision(
+                        session_id=self.session_id,
+                        symbol=symbol,
+                        signal=signal['action'],
+                        confidence=signal['confidence'],
+                        indicators=signal['indicators'],
+                        reasons=signal['reasons'],
+                        skip_reasons=signal['skip_reasons'],
+                        live_price=live_price,
+                        nifty_level=nifty_level or 0,
+                        time_bucket=time_bucket,
+                        stop_loss=signal.get('stop_loss'),
+                        target=signal.get('target'),
+                        risk_reward=signal.get('risk_reward_ratio'),
+                        regime=signal.get('regime', 'UNKNOWN'),
+                        market_bias=signal.get('market_bias', 'NEUTRAL'),
+                    )
 
                     if signal['action'] == 'BUY' and signal['confidence'] >= config.MIN_BUY_CONFIDENCE:
                         self._execute_buy(symbol, exchange, live_price, signal)
