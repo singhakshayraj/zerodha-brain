@@ -79,8 +79,8 @@ def run():
                         continue
 
                     session_id = session['id']
-                    db.write_config('active_session_id', session_id)
                     print(f"[SCHEDULER] Session ready: {session_id}")
+                    db.write_config('active_session_id', session_id)
 
                     session_config['sessionId'] = session_id
 
