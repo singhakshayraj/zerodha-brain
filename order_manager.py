@@ -47,6 +47,23 @@ class OrderManager:
             print(f"BUY order status: {status} for {symbol}")
             return None
 
+    def _has_intraday_long(self, kite: KiteClient, symbol: str, quantity: int) -> bool:
+        try:
+            positions = kite.get_positions() or {}
+            net = positions.get('net', []) if isinstance(positions, dict) else []
+            bare_symbol = symbol.replace('NSE:', '').replace('BSE:', '')
+            for p in net:
+                if (
+                    p.get('tradingsymbol') == bare_symbol
+                    and p.get('product') == 'MIS'
+                    and (p.get('quantity') or 0) > 0
+                ):
+                    return True
+            return False
+        except Exception as e:
+            print(f"[order_manager._has_intraday_long] error: {e}")
+            return False
+
     def place_sell_order(
         self,
         kite: KiteClient,
@@ -55,6 +72,16 @@ class OrderManager:
         quantity: int,
     ):
         print(f"Placing SELL order: {symbol} x{quantity}")
+
+        # SAFETY: never SELL unless an MIS long exists.
+        # Prevents accidentally shorting from CNC holdings.
+        if not self._has_intraday_long(kite, symbol, quantity):
+            print(
+                f"[SAFETY] Blocking SELL on {symbol} — "
+                f"no intraday position to close. "
+                f"Will not touch CNC holding."
+            )
+            return None
 
         order_id = kite.place_order(
             symbol=symbol,
