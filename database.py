@@ -278,10 +278,33 @@ def get_session_trades(session_id: str) -> list:
 
 # --- DECISIONS ---
 
+ALLOWED_DECISION_COLUMNS = {
+    'session_id',
+    'trade_id',
+    'symbol',
+    'price_at_decision',
+    'nifty_level_at_decision',
+    'time_of_day_bucket',
+    'indicators',
+    'signal',
+    'confidence_score',
+    'reasons',
+    'skip_reasons',
+    'regime',
+}
+
+
 def log_decision(session_id: str, decision_data: dict) -> None:
+    payload = {}
     try:
         payload = dict(decision_data)
         payload['session_id'] = session_id
+
+        # Whitelist columns — drop anything not in schema (market_bias etc.)
+        payload = {k: v for k, v in payload.items() if k in ALLOWED_DECISION_COLUMNS}
+        # Drop None values to keep insert clean
+        payload = {k: v for k, v in payload.items() if v is not None}
+
         symbol = payload.get('symbol', '?')
         signal = payload.get('signal', '?')
         conf = payload.get('confidence_score', '?')
