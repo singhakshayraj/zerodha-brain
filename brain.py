@@ -74,7 +74,7 @@ class TradingBrain:
             # Propagate session_id to order_manager for safety logging
             self.order_manager.session_id = self.session_id
 
-            # Build holdings-only universe (forced — /quote endpoint disabled)
+            # Build universe from holdings (always) + Nifty50 if mode requires
             self.market_data.refresh_holdings_cache()
             self.universe = {}
             for sym, data in self.market_data._holdings_cache.items():
@@ -82,8 +82,35 @@ class TradingBrain:
                     'symbol': sym.split(':', 1)[1] if ':' in sym else sym,
                     'exchange': sym.split(':', 1)[0] if ':' in sym else 'NSE',
                     'instrument_token': data.get('instrument_token', 0),
+                    'source': 'holdings',
                 }
-            print(f"Universe: {len(self.universe)} stocks (holdings only)")
+            print(f"Added {len(self.universe)} holdings to universe")
+
+            stock_universe = session_config.get('stockUniverse', 'HOLDINGS')
+            if stock_universe in ('BOTH', 'OPEN_MARKET', 'NIFTY50'):
+                nifty50 = [
+                    'NSE:RELIANCE', 'NSE:TCS', 'NSE:HDFCBANK', 'NSE:INFY',
+                    'NSE:ICICIBANK', 'NSE:HINDUNILVR', 'NSE:SBIN', 'NSE:BHARTIARTL',
+                    'NSE:KOTAKBANK', 'NSE:LT', 'NSE:AXISBANK', 'NSE:BAJFINANCE',
+                    'NSE:WIPRO', 'NSE:HCLTECH', 'NSE:MARUTI', 'NSE:SUNPHARMA',
+                    'NSE:TITAN', 'NSE:POWERGRID', 'NSE:TATAMOTORS', 'NSE:TATASTEEL',
+                    'NSE:JSWSTEEL', 'NSE:HINDALCO', 'NSE:ONGC', 'NSE:COALINDIA',
+                    'NSE:BAJAJFINSV', 'NSE:DRREDDY', 'NSE:CIPLA',
+                ]
+                added = 0
+                for sym in nifty50:
+                    if sym not in self.universe:
+                        parts = sym.split(':', 1)
+                        self.universe[sym] = {
+                            'symbol': parts[1],
+                            'exchange': parts[0],
+                            'instrument_token': 0,
+                            'source': 'nifty50',
+                        }
+                        added += 1
+                print(f"Added {added} Nifty50 stocks to universe")
+
+            print(f"Universe: {len(self.universe)} stocks (mode: {stock_universe})")
 
             print(f"Brain initialized. Session: {self.session_id}")
             return True
@@ -93,14 +120,17 @@ class TradingBrain:
 
     def run_cycle(self) -> None:
         if not self._cycle_lock.acquire(blocking=False):
-            print("[brain] Cycle already running, skipping")
+            print(f"[brain] Cycle {self.cycle_count + 1} skipped — previous cycle still running")
             return
         try:
             self.cycle_count += 1
-            print(f"\n--- Cycle {self.cycle_count} start: {datetime.now(IST).strftime('%H:%M:%S')} ---")
+            current_cycle = self.cycle_count
+            print(f"\n[brain] === Cycle {current_cycle} start: {datetime.now(IST).strftime('%H:%M:%S')} ===")
 
-            # Refresh prices at start of cycle (holdings-cache mode)
+            # Always fetch fresh prices at cycle start
+            print("[brain] Refreshing prices from Zerodha...")
             self.market_data.refresh_holdings_cache()
+            print(f"[brain] Prices refreshed for {len(self.market_data._holdings_cache)} stocks")
 
             self.traded_symbols_this_cycle = set()
 
@@ -129,7 +159,7 @@ class TradingBrain:
             db.log_brain_activity(
                 session_id=self.session_id,
                 activity_type='CYCLE_START',
-                message=f"Cycle {self.cycle_count} — Scanning {len(universe)} stocks",
+                message=f"Cycle {current_cycle} — Scanning {len(universe)} stocks (holdings only)",
             )
 
             # Step 4

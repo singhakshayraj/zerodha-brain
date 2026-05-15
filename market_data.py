@@ -144,8 +144,8 @@ class MarketData:
 
     def get_live_quote(self, symbols) -> dict:
         """
-        Return prices from holdings cache. Skips /quote endpoint
-        entirely — it does not work on Zerodha OMS for retail auth.
+        Return prices from holdings cache. No TTL check — caller
+        is responsible for calling refresh_holdings_cache() first.
         """
         try:
             if isinstance(symbols, str):
@@ -153,10 +153,6 @@ class MarketData:
 
             if not symbols:
                 return {}
-
-            # Refresh cache if stale
-            if time.time() - self._holdings_cache_time > 60:
-                self.refresh_holdings_cache()
 
             result = {}
             for sym in symbols:
