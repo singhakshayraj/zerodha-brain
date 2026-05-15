@@ -88,25 +88,18 @@ class TradingBrain:
 
             stock_universe = session_config.get('stockUniverse', 'HOLDINGS')
             if stock_universe in ('BOTH', 'OPEN_MARKET', 'NIFTY50'):
-                nifty50 = [
-                    'NSE:RELIANCE', 'NSE:TCS', 'NSE:HDFCBANK', 'NSE:INFY',
-                    'NSE:ICICIBANK', 'NSE:HINDUNILVR', 'NSE:SBIN', 'NSE:BHARTIARTL',
-                    'NSE:KOTAKBANK', 'NSE:LT', 'NSE:AXISBANK', 'NSE:BAJFINANCE',
-                    'NSE:WIPRO', 'NSE:HCLTECH', 'NSE:MARUTI', 'NSE:SUNPHARMA',
-                    'NSE:TITAN', 'NSE:POWERGRID', 'NSE:TATAMOTORS', 'NSE:TATASTEEL',
-                    'NSE:JSWSTEEL', 'NSE:HINDALCO', 'NSE:ONGC', 'NSE:COALINDIA',
-                    'NSE:BAJAJFINSV', 'NSE:DRREDDY', 'NSE:CIPLA',
-                ]
                 added = 0
-                for sym in nifty50:
+                for sym, token in config.NIFTY50_INSTRUMENT_TOKENS.items():
                     if sym not in self.universe:
                         parts = sym.split(':', 1)
                         self.universe[sym] = {
                             'symbol': parts[1],
                             'exchange': parts[0],
-                            'instrument_token': 0,
+                            'instrument_token': token,
                             'source': 'nifty50',
                         }
+                        if token > 0:
+                            self.market_data._instrument_cache[sym] = token
                         added += 1
                 print(f"Added {added} Nifty50 stocks to universe")
 
