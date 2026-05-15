@@ -4,6 +4,12 @@ from datetime import datetime, timezone
 from supabase import create_client, Client
 import config
 
+if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_KEY:
+    raise RuntimeError(
+        "SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in environment. "
+        "Check Railway environment variables."
+    )
+
 supabase: Client = create_client(
     config.SUPABASE_URL,
     config.SUPABASE_SERVICE_KEY
