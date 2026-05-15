@@ -35,6 +35,14 @@ class RiskManager:
                 commission_percent=0.001,
             )
 
+            # Floor to 1 if affordable, skip if price exceeds capital
+            if qty == 0:
+                if live_price <= capital:
+                    qty = 1
+                else:
+                    print(f"[risk] price ₹{live_price:.0f} exceeds capital ₹{capital:.0f} — skip")
+                    return 0
+
             if qty * live_price < config.MIN_TRADE_VALUE:
                 return 0
 
