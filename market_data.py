@@ -11,16 +11,21 @@ INDEX_BLOCKLIST = ('NIFTY', 'SENSEX', 'BANKNIFTY', 'FINNIFTY')
 IST = pytz.timezone('Asia/Kolkata')
 
 
+_CANDLE_TTL = {
+    '5minute': 5 * 60,
+    '15minute': 15 * 60,
+    '60minute': 60 * 60,
+}
+
+
 class MarketData:
     def __init__(self, kite: KiteClient):
         self.kite = kite
-        self.candle_cache = {}
-        self.quote_cache = {}
         self._instrument_cache = {}
         self._holdings_cache = {}
         self._holdings_cache_time = 0.0
-        self.cache_ttl_seconds = 60
-        self.candle_cache_ttl_seconds = 900
+        self._candle_cache = {}
+        self._candle_cache_time = {}
 
     def refresh_holdings_cache(self) -> bool:
         """Fetch holdings once and cache prices + instrument_tokens."""
@@ -70,31 +75,32 @@ class MarketData:
         return None
 
     def get_candles(self, symbol: str, interval: str = '15minute', days: int = 5) -> list:
-        try:
-            key = f'{symbol}_{interval}'
-            cached = self.candle_cache.get(key)
-            now = self._now()
-            if cached and (now - cached['fetched_at']).total_seconds() < self.candle_cache_ttl_seconds:
-                return cached['data']
+        cache_key = f'{symbol}_{interval}'
+        now = time.time()
+        ttl = _CANDLE_TTL.get(interval, 5 * 60)
 
+        last_fetch = self._candle_cache_time.get(cache_key, 0)
+        if now - last_fetch < ttl and cache_key in self._candle_cache:
+            return self._candle_cache[cache_key]
+
+        try:
             instrument_token = self._instrument_cache.get(symbol)
             if not instrument_token:
-                quotes = self.get_live_quote([symbol])
-                q = quotes.get(symbol) if quotes else None
+                q = self._holdings_cache.get(symbol)
                 instrument_token = q.get('instrument_token') if q else None
 
             if not instrument_token:
                 print(f"[market_data.get_candles] no instrument token for {symbol}")
-                return []
+                return self._candle_cache.get(cache_key, [])
 
             self._instrument_cache[symbol] = instrument_token
-
             candles = self._get_historical(instrument_token, interval, days)
-            self.candle_cache[key] = {'data': candles, 'fetched_at': now}
+            self._candle_cache[cache_key] = candles
+            self._candle_cache_time[cache_key] = now
             return candles
         except Exception as e:
             print(f"[market_data.get_candles] error for {symbol}: {e}")
-            return []
+            return self._candle_cache.get(cache_key, [])
 
     def _get_historical(self, token: int, interval: str, days: int) -> list:
         now = self._now()
@@ -218,5 +224,5 @@ class MarketData:
         return 'CLOSING'
 
     def clear_cache(self) -> None:
-        self.candle_cache = {}
-        self.quote_cache = {}
+        self._candle_cache = {}
+        self._candle_cache_time = {}

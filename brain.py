@@ -150,16 +150,33 @@ class TradingBrain:
                 self.end_session(limits['reason'].split(':')[0])
                 return
 
-            # Step 3 — universe is holdings-only (forced mode)
+            # Step 3 — filter to stocks we have prices for
             if not self.universe:
-                print("No stocks in universe (no holdings)")
+                print("No stocks in universe")
                 return
-            universe = list(self.universe.values())
+
+            prices_snapshot = dict(self.market_data._holdings_cache)
+            price_time = datetime.now(IST)
+            print(f"[brain] Price snapshot at {price_time.strftime('%H:%M:%S')} "
+                  f"— {len(prices_snapshot)} stocks")
+
+            analyzable = {
+                key: data for key, data in self.universe.items()
+                if key in prices_snapshot
+                or self.market_data._instrument_cache.get(key, 0) > 0
+            }
+            holdings_count = sum(
+                1 for d in analyzable.values() if d.get('source') == 'holdings'
+            )
+            nifty_count = len(analyzable) - holdings_count
+            print(f"[brain] Analyzing {len(analyzable)} stocks "
+                  f"({holdings_count} holdings, {nifty_count} nifty50)")
 
             db.log_brain_activity(
                 session_id=self.session_id,
                 activity_type='CYCLE_START',
-                message=f"Cycle {current_cycle} — Scanning {len(universe)} stocks (holdings only)",
+                message=f"Cycle {current_cycle} — Scanning {len(analyzable)} stocks "
+                        f"({holdings_count} holdings, {nifty_count} nifty50)",
             )
 
             # Step 4
@@ -170,18 +187,15 @@ class TradingBrain:
             # Step 5
             self._maybe_log_market_context(nifty, time_bucket)
 
-            # Step 6 — batch fetch quotes for entire universe in one call
-            symbols_to_analyze = [
-                f"{s.get('exchange', 'NSE')}:{s['symbol']}" for s in universe
-            ]
-            cycle_quotes = self.market_data.get_live_quote(symbols_to_analyze)
-
             remaining_trades = (
                 self.session_config['maxTrades'] -
                 self.session_stats['trades_executed']
             )
 
-            for stock in universe:
+            cycle_start_time = time.time()
+            analyzed_count = 0
+
+            for key, stock in analyzable.items():
                 if remaining_trades <= 0:
                     break
 
@@ -197,24 +211,30 @@ class TradingBrain:
                     continue
 
                 try:
+                    stock_start = time.time()
+
                     candles_5min = self.market_data.get_candles(
-                        f"{exchange}:{symbol}", interval='5minute', days=3
+                        key, interval='5minute', days=3
                     )
                     candles_15min = self.market_data.get_candles(
-                        f"{exchange}:{symbol}", interval='15minute', days=5
+                        key, interval='15minute', days=5
                     )
                     candles_1hour = self.market_data.get_candles(
-                        f"{exchange}:{symbol}", interval='60minute', days=20
+                        key, interval='60minute', days=20
                     )
 
                     if not candles_15min:
                         continue
 
-                    key = f"{exchange}:{symbol}"
-                    quote = cycle_quotes.get(key) or {}
+                    quote = prices_snapshot.get(key) or {}
                     live_price = quote.get('price') or quote.get('last_price') or 0
                     if not live_price:
                         continue
+
+                    analyzed_count += 1
+                    stock_time = time.time() - stock_start
+                    if stock_time > 2:
+                        print(f"[timing] {symbol} took {stock_time:.1f}s")
 
                     db.log_brain_activity(
                         session_id=self.session_id,
@@ -301,8 +321,11 @@ class TradingBrain:
                 'losing_trades': self.session_stats['losing_trades'],
             })
 
+            cycle_time = time.time() - cycle_start_time
             print(
-                f"Cycle complete. Trades: {self.session_stats['trades_executed']}, "
+                f"[brain] Cycle {current_cycle} complete in {cycle_time:.1f}s — "
+                f"analyzed {analyzed_count} stocks, "
+                f"trades: {self.session_stats['trades_executed']}, "
                 f"P&L: ₹{self.session_stats['total_pnl']:.2f}"
             )
 
