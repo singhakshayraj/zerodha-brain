@@ -188,6 +188,25 @@ class MarketData:
             print(f"[market_data.get_live_quotes_batch] error: {e}")
             return out
 
+    def get_live_price_for_nifty50(self, symbol: str):
+        """Fetch last close from most recent 5-min candle for Nifty50 stocks."""
+        token = self._instrument_cache.get(symbol, 0)
+        if not token:
+            return None
+        try:
+            candles = self.get_candles(symbol, '5minute', days=1)
+            if candles:
+                last_price = candles[-1]['close']
+                self._holdings_cache[symbol] = {
+                    'price': last_price,
+                    'last_price': last_price,
+                    'instrument_token': token,
+                }
+                return last_price
+        except Exception as e:
+            print(f"[nifty50_price] Error for {symbol}: {e}")
+        return None
+
     def get_nifty_level(self) -> dict:
         # /quote disabled — no Nifty 50 access via OMS for retail
         # Return neutral context so regime detector treats market as SIDEWAYS
