@@ -199,6 +199,11 @@ class KiteClient:
         product: str = 'MIS',
     ):
         try:
+            # Strip exchange prefix if caller passed "NSE:SYMBOL" as symbol
+            if ':' in symbol:
+                exchange, symbol = symbol.split(':', 1)
+            exchange = (exchange or 'NSE').upper()
+
             data = {
                 'tradingsymbol': symbol,
                 'exchange': exchange,
@@ -208,6 +213,7 @@ class KiteClient:
                 'product': product,
                 'validity': 'DAY',
             }
+            print(f"[kite.place_order] {transaction_type} {exchange}:{symbol} x{quantity}")
             res = self._post('/orders/regular', data=data) or {}
             return res.get('order_id')
         except Exception as e:
