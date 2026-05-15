@@ -67,9 +67,9 @@ class SignalEngine:
         buy_score = 0
         buy_reasons = []
 
-        if ind['rsi_14'] is not None and ind['rsi_14'] < 40:
+        if ind['rsi_14'] is not None and ind['rsi_14'] < 50:
             buy_score += 20
-            buy_reasons.append(f"RSI oversold {ind['rsi_14']:.1f}")
+            buy_reasons.append(f"RSI below midline {ind['rsi_14']:.1f}")
 
         if ind['ema_21'] and live_price > ind['ema_21']:
             buy_score += 15
@@ -162,6 +162,13 @@ class SignalEngine:
 
         raw_buy_confidence = min(100, max(0, buy_score + confidence_boost))
         raw_sell_confidence = min(100, max(0, sell_score + confidence_boost))
+
+        print(
+            f"[BUY check] {symbol}: RSI={ind.get('rsi_14') or 0:.1f} "
+            f"EMA9={ind.get('ema_9') or 0:.1f} EMA21={ind.get('ema_21') or 0:.1f} "
+            f"MACD={ind.get('macd_histogram') or 0:.3f} RR={risk_reward:.2f} "
+            f"score={raw_buy_confidence}"
+        )
 
         if raw_buy_confidence >= config.MIN_BUY_CONFIDENCE and allow_buy:
             if risk_reward < config.MIN_RISK_REWARD_RATIO:
