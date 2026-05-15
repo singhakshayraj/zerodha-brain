@@ -141,8 +141,10 @@ def run():
 
                         _set_heartbeat(
                             'RUNNING',
-                            brain.session_stats['trades_executed'],
-                            f"Active | P&L: ₹{brain.session_stats['total_pnl']:.2f}",
+                            brain.cycle_count,
+                            f"Cycle {brain.cycle_count} | "
+                            f"Trades: {brain.session_stats['trades_executed']} | "
+                            f"P&L: ₹{brain.session_stats['total_pnl']:.2f}",
                         )
 
                         brain.run_cycle()

@@ -116,11 +116,19 @@ class RiskManager:
 
     def get_time_bucket(self) -> str:
         now_ist = datetime.now(IST)
-        total_minutes = now_ist.hour * 60 + now_ist.minute
-        if total_minutes < 10 * 60:
+        m = now_ist.hour * 60 + now_ist.minute
+        if m < 9 * 60 + 15:
+            return 'PRE_MARKET'
+        if m < 9 * 60 + 30:
             return 'OPENING'
-        if total_minutes < 12 * 60:
+        if m < 11 * 60 + 30:
             return 'MORNING'
-        if total_minutes < 14 * 60:
+        if m < 13 * 60:
+            return 'MIDDAY'
+        if m < 15 * 60:
             return 'AFTERNOON'
-        return 'CLOSING'
+        if m < 15 * 60 + 15:
+            return 'PRE_CLOSE'
+        if m <= 15 * 60 + 30:
+            return 'CLOSING'
+        return 'AFTER_MARKET'
