@@ -1,3 +1,4 @@
+import threading
 import time
 from datetime import datetime
 
@@ -37,6 +38,8 @@ class TradingBrain:
         self._nifty50_cache = None
         self._session_ended = False
         self.universe = {}
+        self.cycle_count = 0
+        self._cycle_lock = threading.Lock()
 
     def initialize(self, token: str, session_config: dict) -> bool:
         try:
@@ -89,8 +92,12 @@ class TradingBrain:
             return False
 
     def run_cycle(self) -> None:
+        if not self._cycle_lock.acquire(blocking=False):
+            print("[brain] Cycle already running, skipping")
+            return
         try:
-            print(f"\n--- Cycle start: {datetime.now(IST).strftime('%H:%M:%S')} ---")
+            self.cycle_count += 1
+            print(f"\n--- Cycle {self.cycle_count} start: {datetime.now(IST).strftime('%H:%M:%S')} ---")
 
             # Refresh prices at start of cycle (holdings-cache mode)
             self.market_data.refresh_holdings_cache()
@@ -122,8 +129,7 @@ class TradingBrain:
             db.log_brain_activity(
                 session_id=self.session_id,
                 activity_type='CYCLE_START',
-                message=f"Cycle {self.session_stats['trades_executed']} — "
-                        f"Scanning {len(universe)} stocks (holdings only)",
+                message=f"Cycle {self.cycle_count} — Scanning {len(universe)} stocks",
             )
 
             # Step 4
@@ -277,6 +283,9 @@ class TradingBrain:
 
         except Exception as e:
             print(f"Cycle error: {e}")
+
+        finally:
+            self._cycle_lock.release()
 
     def _execute_buy(self, symbol: str, exchange: str, live_price: float, signal: dict) -> None:
         capital = self.session_config['capitalDeployed']
