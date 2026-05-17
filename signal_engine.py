@@ -151,7 +151,7 @@ class SignalEngine:
 
         atr = ind['atr_14'] if ind['atr_14'] else live_price * 0.008
         stop_loss = round(live_price - (1.2 * atr), 2)
-        target = round(live_price + (2.0 * atr), 2)
+        target = round(live_price + (2.5 * atr), 2)
         stop_loss_pct = ((live_price - stop_loss) / live_price) * 100 if live_price else 0
         target_pct = ((target - live_price) / live_price) * 100 if live_price else 0
         risk_reward = round(target_pct / stop_loss_pct, 2) if stop_loss_pct > 0 else 0
@@ -171,7 +171,20 @@ class SignalEngine:
         )
 
         if raw_buy_confidence >= config.MIN_BUY_CONFIDENCE and allow_buy:
-            if risk_reward < config.MIN_RISK_REWARD_RATIO:
+            regime_name = regime.get('regime', 'UNKNOWN')
+            if regime_name not in ('TRENDING', 'WEAK_TREND'):
+                skip_reasons.append(
+                    f"Regime {regime_name} not suitable for BUY"
+                )
+                action = 'HOLD'
+                confidence = raw_buy_confidence
+            elif regime_name == 'WEAK_TREND' and raw_buy_confidence < 80:
+                skip_reasons.append(
+                    f"WEAK_TREND requires confidence >= 80%, got {raw_buy_confidence}%"
+                )
+                action = 'HOLD'
+                confidence = raw_buy_confidence
+            elif risk_reward < config.MIN_RISK_REWARD_RATIO:
                 skip_reasons.append(
                     f'R:R {risk_reward:.2f} below minimum {config.MIN_RISK_REWARD_RATIO}'
                 )

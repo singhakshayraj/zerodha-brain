@@ -3,6 +3,7 @@ import io
 import time
 from datetime import datetime
 from typing import Optional
+from urllib.parse import quote_plus
 
 import requests
 
@@ -29,6 +30,7 @@ class KiteClient:
             'Authorization': f'enctoken {self.token}',
             'Cookie': f'enctoken={self.token}',
             'X-Kite-Version': '3',
+            'Content-Type': 'application/x-www-form-urlencoded',
         })
 
         print(f"[kite] Initialized with base URL: {self.base_url}")
@@ -87,7 +89,8 @@ class KiteClient:
 
         body = None
         if data:
-            body = '&'.join(f"{k}={v}" for k, v in data.items())
+            body = '&'.join(f"{k}={quote_plus(str(v))}" for k, v in data.items())
+            print(f"[kite] POST {url} body={body}")
 
         for attempt in range(1, config.MAX_RETRIES + 1):
             try:

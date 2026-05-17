@@ -125,14 +125,21 @@ class TradingBrain:
             self.market_data.refresh_holdings_cache()
             print(f"[brain] Prices refreshed for {len(self.market_data._holdings_cache)} stocks")
 
-            # Fetch prices for Nifty50 stocks not in holdings cache
+            # Fetch Nifty50 prices only if not already cached from prior cycle
             nifty_priced = 0
+            nifty_total = 0
             for sym, data in self.universe.items():
-                if data.get('source') == 'nifty50' and sym not in self.market_data._holdings_cache:
-                    price = self.market_data.get_live_price_for_nifty50(sym)
-                    if price:
-                        nifty_priced += 1
-            print(f"[brain] Nifty50 prices fetched: {nifty_priced}/27")
+                if data.get('source') != 'nifty50':
+                    continue
+                nifty_total += 1
+                cached = self.market_data._holdings_cache.get(sym)
+                if cached and (cached.get('price') or cached.get('last_price') or 0) > 0:
+                    nifty_priced += 1
+                    continue
+                price = self.market_data.get_live_price_for_nifty50(sym)
+                if price:
+                    nifty_priced += 1
+            print(f"[brain] Nifty50 prices available: {nifty_priced}/{nifty_total}")
 
             self.traded_symbols_this_cycle = set()
 
