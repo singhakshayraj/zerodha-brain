@@ -3,7 +3,6 @@ import io
 import time
 from datetime import datetime
 from typing import Optional
-from urllib.parse import quote_plus
 
 import requests
 
@@ -87,14 +86,12 @@ class KiteClient:
     def _post(self, path: str, data: dict = None):
         url = f"{self.base_url}{path}"
 
-        body = None
         if data:
-            body = '&'.join(f"{k}={quote_plus(str(v))}" for k, v in data.items())
-            print(f"[kite] POST {url} body={body}")
+            print(f"[kite] POST {url} payload={data}")
 
         for attempt in range(1, config.MAX_RETRIES + 1):
             try:
-                response = self.session.post(url, data=body, timeout=10)
+                response = self.session.post(url, data=data, timeout=10)
 
                 if response.status_code == 403:
                     raise TokenExpiredError("Token expired")
@@ -195,29 +192,30 @@ class KiteClient:
     def place_order(
         self,
         symbol: str,
-        exchange: str,
-        transaction_type: str,
-        quantity: int,
+        exchange: str = 'NSE',
+        transaction_type: str = 'BUY',
+        quantity: int = 1,
         order_type: str = 'MARKET',
         product: str = 'MIS',
     ):
         try:
-            # Strip exchange prefix if caller passed "NSE:SYMBOL" as symbol
+            # Strip exchange prefix if caller passed "NSE:SYMBOL"
             if ':' in symbol:
                 exchange, symbol = symbol.split(':', 1)
+            tradingsymbol = symbol.replace('NSE:', '').replace('BSE:', '')
             exchange = (exchange or 'NSE').upper()
 
-            data = {
-                'tradingsymbol': symbol,
+            payload = {
+                'tradingsymbol': tradingsymbol,
                 'exchange': exchange,
                 'transaction_type': transaction_type,
-                'quantity': quantity,
                 'order_type': order_type,
+                'quantity': str(quantity),
                 'product': product,
                 'validity': 'DAY',
             }
-            print(f"[kite.place_order] {transaction_type} {exchange}:{symbol} x{quantity}")
-            res = self._post('/orders/regular', data=data) or {}
+            print(f"[kite] POST /orders/regular payload: {payload}")
+            res = self._post('/orders/regular', data=payload) or {}
             return res.get('order_id')
         except Exception as e:
             print(f"[kite.place_order] error for {symbol}: {e}")
