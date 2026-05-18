@@ -26,6 +26,7 @@ class OrderManager:
             quantity=quantity,
             order_type='MARKET',
             product='MIS',
+            variety='regular',
         )
 
         if not order_id:
@@ -109,6 +110,7 @@ class OrderManager:
             quantity=quantity,
             order_type='MARKET',
             product='MIS',
+            variety='regular',
         )
 
         if not order_id:

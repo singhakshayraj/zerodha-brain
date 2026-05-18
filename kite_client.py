@@ -198,6 +198,7 @@ class KiteClient:
         order_type: str = 'MARKET',
         product: str = 'MIS',
         price: str = None,
+        variety: str = 'regular',
     ):
         try:
             # Strip exchange prefix if caller passed "NSE:SYMBOL"
@@ -206,20 +207,20 @@ class KiteClient:
             tradingsymbol = symbol.replace('NSE:', '').replace('BSE:', '')
             exchange = (exchange or 'NSE').upper()
 
-            # TEMP: AMO test — ridiculously low LIMIT price, won't fill
             payload = {
-                'variety':          'amo',
                 'tradingsymbol':    tradingsymbol,
                 'exchange':         exchange,
                 'transaction_type': transaction_type,
-                'order_type':       'LIMIT',
+                'order_type':       order_type,
                 'quantity':         str(quantity),
-                'product':          'CNC',
+                'product':          product,
                 'validity':         'DAY',
-                'price':            price or '1.00',
             }
-            print(f"[kite] POST /orders/amo payload: {payload}")
-            res = self._post('/orders/amo', data=payload) or {}
+            if price:
+                payload['price'] = str(price)
+
+            print(f"[kite] POST /orders/{variety} payload: {payload}")
+            res = self._post(f'/orders/{variety}', data=payload) or {}
             return res.get('order_id')
         except Exception as e:
             print(f"[kite.place_order] error for {symbol}: {e}")

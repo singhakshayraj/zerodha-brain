@@ -33,7 +33,8 @@ try:
         quantity=1,
         order_type='LIMIT',
         product='CNC',
-        price='900.00',    # INFY ~₹1117, ₹900 below market — won't fill
+        price='1050.00',    # INFY ~₹1117, below market — won't fill
+        variety='amo',
     )
     if order_id:
         print(f"[test] ✅ SUCCESS — order_id={order_id}")
