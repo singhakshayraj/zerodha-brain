@@ -197,6 +197,7 @@ class KiteClient:
         quantity: int = 1,
         order_type: str = 'MARKET',
         product: str = 'MIS',
+        price: str = None,
     ):
         try:
             # Strip exchange prefix if caller passed "NSE:SYMBOL"
@@ -215,7 +216,7 @@ class KiteClient:
                 'quantity':         str(quantity),
                 'product':          'CNC',
                 'validity':         'DAY',
-                'price':            '1.00',
+                'price':            price or '1.00',
             }
             print(f"[kite] POST /orders/amo payload: {payload}")
             res = self._post('/orders/amo', data=payload) or {}
