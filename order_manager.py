@@ -136,6 +136,84 @@ class OrderManager:
             print(f"SELL order status: {status} for {symbol}")
             return None
 
+    def place_short_order(
+        self,
+        kite: KiteClient,
+        symbol: str,
+        exchange: str,
+        quantity: int,
+    ):
+        """Open a NEW intraday short via MIS SELL. No safety lock (no long needed)."""
+        print(f"Placing SHORT order: {symbol} x{quantity}")
+        order_id = kite.place_order(
+            symbol=symbol,
+            exchange=exchange,
+            transaction_type='SELL',
+            quantity=quantity,
+            order_type='MARKET',
+            product='MIS',
+            variety='regular',
+        )
+        if not order_id:
+            print(f"SHORT order failed for {symbol}")
+            return None
+
+        time.sleep(config.ORDER_CONFIRMATION_WAIT_SECONDS)
+        order = kite.get_order_status(order_id)
+        if order and order.get('status') == 'COMPLETE':
+            avg_price = order.get('average_price', 0) or 0
+            filled_qty = order.get('filled_quantity', quantity) or quantity
+            print(f"SHORT confirmed: {symbol} x{filled_qty} @ ₹{avg_price}")
+            return {
+                'order_id': order_id,
+                'status': 'COMPLETE',
+                'price': avg_price,
+                'quantity': filled_qty,
+                'value': avg_price * filled_qty,
+            }
+        status = order.get('status', 'UNKNOWN') if order else 'UNKNOWN'
+        print(f"SHORT order status: {status} for {symbol}")
+        return None
+
+    def cover_short_order(
+        self,
+        kite: KiteClient,
+        symbol: str,
+        exchange: str,
+        quantity: int,
+    ):
+        """Close (cover) an existing intraday short via MIS BUY."""
+        print(f"Covering SHORT: {symbol} x{quantity}")
+        order_id = kite.place_order(
+            symbol=symbol,
+            exchange=exchange,
+            transaction_type='BUY',
+            quantity=quantity,
+            order_type='MARKET',
+            product='MIS',
+            variety='regular',
+        )
+        if not order_id:
+            print(f"COVER order failed for {symbol}")
+            return None
+
+        time.sleep(config.ORDER_CONFIRMATION_WAIT_SECONDS)
+        order = kite.get_order_status(order_id)
+        if order and order.get('status') == 'COMPLETE':
+            avg_price = order.get('average_price', 0) or 0
+            filled_qty = order.get('filled_quantity', quantity) or quantity
+            print(f"COVER confirmed: {symbol} x{filled_qty} @ ₹{avg_price}")
+            return {
+                'order_id': order_id,
+                'status': 'COMPLETE',
+                'price': avg_price,
+                'quantity': filled_qty,
+                'value': avg_price * filled_qty,
+            }
+        status = order.get('status', 'UNKNOWN') if order else 'UNKNOWN'
+        print(f"COVER order status: {status} for {symbol}")
+        return None
+
     def square_off_all(self, kite: KiteClient, open_trades: list) -> None:
         print(f"Squaring off {len(open_trades)} open positions")
         for trade in open_trades:

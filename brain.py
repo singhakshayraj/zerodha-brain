@@ -148,6 +148,9 @@ class TradingBrain:
             if self._session_ended:
                 return
 
+            # Step 1b: auto-cover shorts at/after 3:15 PM IST
+            self._auto_cover_shorts_if_eod()
+
             # Step 2
             stats_with_streak = dict(self.session_stats)
             stats_with_streak['consecutive_losses'] = self.consecutive_losses
@@ -304,18 +307,58 @@ class TradingBrain:
                     )
 
                     if signal['action'] == 'BUY' and signal['confidence'] >= config.MIN_BUY_CONFIDENCE:
-                        self._execute_buy(symbol, exchange, live_price, signal)
-                        remaining_trades -= 1
-                        self.traded_symbols_this_cycle.add(symbol)
+                        # If existing SHORT — cover it instead of opening long
+                        open_shorts = db.get_open_shorts(self.session_id)
+                        short_match = next(
+                            (s for s in open_shorts if s['symbol'] == symbol), None
+                        )
+                        if short_match:
+                            self._cover_short(short_match, live_price)
+                            self.traded_symbols_this_cycle.add(symbol)
+                        else:
+                            self._execute_buy(symbol, exchange, live_price, signal)
+                            remaining_trades -= 1
+                            self.traded_symbols_this_cycle.add(symbol)
 
                     elif signal['action'] == 'SELL':
                         open_trades = db.get_open_trades(self.session_id)
-                        open_symbols = [t['symbol'] for t in open_trades]
-                        if symbol in open_symbols:
+                        open_long_symbols = [
+                            t['symbol'] for t in open_trades
+                            if t.get('position_type') != 'SHORT'
+                        ]
+                        open_short_symbols = [
+                            t['symbol'] for t in open_trades
+                            if t.get('position_type') == 'SHORT'
+                        ]
+                        is_cnc_holding = any(
+                            d.get('source') == 'holdings'
+                            for k, d in self.universe.items()
+                            if k == key
+                        )
+
+                        if symbol in open_long_symbols:
+                            # Close existing MIS long
                             self._execute_sell_by_symbol(
                                 symbol, exchange, live_price, signal, 'BRAIN_SIGNAL'
                             )
                             self.traded_symbols_this_cycle.add(symbol)
+                        elif symbol in open_short_symbols:
+                            print(f"[brain] Already short {symbol}, skipping")
+                        elif is_cnc_holding:
+                            print(f"[SAFETY] Will not short CNC holding: {symbol}")
+                        elif (
+                            signal.get('regime') == 'TRENDING'
+                            and signal['confidence'] >= 70
+                        ):
+                            self._open_short(symbol, exchange, live_price, signal)
+                            remaining_trades -= 1
+                            self.traded_symbols_this_cycle.add(symbol)
+                        else:
+                            print(
+                                f"[brain] SELL no-op {symbol} "
+                                f"conf={signal['confidence']}% "
+                                f"regime={signal.get('regime')}"
+                            )
 
                     time.sleep(0.5)
 
@@ -369,6 +412,7 @@ class TradingBrain:
             'exchange': exchange,
             'source': 'NIFTY50' if self._is_nifty50(symbol) else 'HOLDINGS',
             'status': 'OPEN',
+            'position_type': 'LONG',
             'stop_loss_price': signal['stop_loss'],
             'target_price': signal['target'],
             'risk_reward_ratio': signal['risk_reward_ratio'],
@@ -419,6 +463,130 @@ class TradingBrain:
                 message=f"BUY order failed for {symbol}",
             )
 
+    def _open_short(self, symbol: str, exchange: str, live_price: float, signal: dict) -> None:
+        capital = self.session_config['capitalDeployed']
+        # Invert stop/target for shorts: signal engine produces long-side levels.
+        long_stop = signal['stop_loss']
+        long_target = signal['target']
+        short_stop = round(live_price + (live_price - long_stop), 2)
+        short_target = round(live_price - (long_target - live_price), 2)
+
+        quantity = self.risk_manager.calculate_position_size(
+            capital=capital,
+            live_price=live_price,
+            confidence=signal['confidence'],
+            stop_loss_price=short_stop,
+        )
+        if quantity <= 0:
+            print(f"[brain] qty=0 for SHORT {symbol}, skipping")
+            return
+
+        trade = db.create_trade(self.session_id, {
+            'session_id': self.session_id,
+            'symbol': symbol,
+            'exchange': exchange,
+            'source': 'NIFTY50' if self._is_nifty50(symbol) else 'HOLDINGS',
+            'status': 'OPEN',
+            'position_type': 'SHORT',
+            'stop_loss_price': short_stop,
+            'target_price': short_target,
+            'risk_reward_ratio': signal['risk_reward_ratio'],
+        })
+        if not trade:
+            return
+
+        result = self.order_manager.place_short_order(
+            self.kite, symbol, exchange, quantity
+        )
+        if result:
+            db.update_trade_entry(trade['id'], {
+                'entry_order_id': result['order_id'],
+                'entry_time': datetime.now(IST).isoformat(),
+                'entry_price': result['price'],
+                'quantity': result['quantity'],
+                'entry_value': result['value'],
+            })
+            self.session_stats['trades_executed'] += 1
+            print(
+                f"SHORT opened: {symbol} x{result['quantity']} "
+                f"@ ₹{result['price']}"
+            )
+            db.log_brain_activity(
+                session_id=self.session_id,
+                activity_type='ORDER_PLACED',
+                symbol=symbol,
+                message=f"SHORT {symbol} × {result['quantity']} @ ₹{result['price']}",
+                data={
+                    'order_id': result['order_id'],
+                    'quantity': result['quantity'],
+                    'price': result['price'],
+                    'value': result['value'],
+                    'position_type': 'SHORT',
+                },
+            )
+        else:
+            db.close_trade(trade['id'], {
+                'exit_reason': 'ORDER_FAILED',
+                'pnl': 0,
+                'pnl_percent': 0,
+            })
+
+    def _cover_short(self, trade: dict, current_price: float) -> None:
+        symbol = trade['symbol']
+        exchange = trade.get('exchange', 'NSE')
+        qty = trade.get('quantity') or 0
+        if qty <= 0:
+            return
+
+        result = self.order_manager.cover_short_order(
+            self.kite, symbol, exchange, qty
+        )
+        if result:
+            entry_value = trade.get('entry_value') or 0
+            # For shorts: PnL = entry_value - exit_value (sold high, bought low)
+            pnl = entry_value - result['value']
+            pnl_pct = (pnl / entry_value) * 100 if entry_value else 0
+
+            db.close_trade(trade['id'], {
+                'exit_order_id': result['order_id'],
+                'exit_time': datetime.now(IST).isoformat(),
+                'exit_price': result['price'],
+                'exit_value': result['value'],
+                'exit_reason': 'COVER_SHORT',
+                'pnl': pnl,
+                'pnl_percent': pnl_pct,
+            })
+            db.update_stock_score(symbol, is_winner=pnl > 0, pnl=pnl)
+            self.session_stats['total_pnl'] += pnl
+            if pnl > 0:
+                self.session_stats['winning_trades'] += 1
+            else:
+                self.session_stats['losing_trades'] += 1
+            db.log_brain_activity(
+                session_id=self.session_id,
+                activity_type='POSITION_EXIT',
+                symbol=symbol,
+                message=f"COVER {symbol} — P&L: ₹{pnl:.2f}",
+                data={'exit_reason': 'COVER_SHORT', 'pnl': pnl, 'pnl_percent': pnl_pct},
+            )
+
+    def _auto_cover_shorts_if_eod(self) -> None:
+        """Cover all open shorts at/after 3:15 PM IST."""
+        now = datetime.now(IST)
+        if not (now.hour == 15 and now.minute >= 15):
+            return
+        open_shorts = db.get_open_shorts(self.session_id)
+        if not open_shorts:
+            return
+        print(f"[brain] 3:15 PM — auto-covering {len(open_shorts)} shorts")
+        for s in open_shorts:
+            key = f"{s.get('exchange', 'NSE')}:{s['symbol']}"
+            quote = self.market_data._holdings_cache.get(key, {}) or {}
+            price = quote.get('price') or quote.get('last_price') or 0
+            if not price:
+                price = self.market_data.get_live_price_for_nifty50(key) or 0
+            self._cover_short(s, price)
+
     def _check_and_close_positions(self) -> None:
         open_trades = db.get_open_trades(self.session_id)
         if not open_trades:
@@ -437,18 +605,31 @@ class TradingBrain:
 
             should_exit = False
             exit_reason = None
+            is_short = trade.get('position_type') == 'SHORT'
 
-            if current_price <= trade['stop_loss_price']:
-                should_exit = True
-                exit_reason = 'STOP_LOSS_HIT'
-                self.consecutive_losses += 1
-            elif current_price >= trade['target_price']:
-                should_exit = True
-                exit_reason = 'TARGET_HIT'
-                self.consecutive_losses = 0
-
-            if should_exit:
-                self._execute_sell_by_trade(trade, current_price, exit_reason)
+            if is_short:
+                # For shorts: stop ABOVE entry, target BELOW entry
+                if current_price >= trade['stop_loss_price']:
+                    should_exit = True
+                    exit_reason = 'STOP_LOSS_HIT'
+                    self.consecutive_losses += 1
+                elif current_price <= trade['target_price']:
+                    should_exit = True
+                    exit_reason = 'TARGET_HIT'
+                    self.consecutive_losses = 0
+                if should_exit:
+                    self._cover_short(trade, current_price)
+            else:
+                if current_price <= trade['stop_loss_price']:
+                    should_exit = True
+                    exit_reason = 'STOP_LOSS_HIT'
+                    self.consecutive_losses += 1
+                elif current_price >= trade['target_price']:
+                    should_exit = True
+                    exit_reason = 'TARGET_HIT'
+                    self.consecutive_losses = 0
+                if should_exit:
+                    self._execute_sell_by_trade(trade, current_price, exit_reason)
 
             if self.consecutive_losses >= config.CIRCUIT_BREAKER_CONSECUTIVE_LOSSES:
                 print(

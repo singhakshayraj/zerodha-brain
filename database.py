@@ -273,6 +273,40 @@ def get_open_trades(session_id: str) -> list:
         return []
 
 
+def get_open_shorts(session_id: str) -> list:
+    """Return all open SHORT positions for the session."""
+    try:
+        res = (
+            supabase.table('trades')
+            .select('*')
+            .eq('session_id', session_id)
+            .eq('status', 'OPEN')
+            .eq('position_type', 'SHORT')
+            .execute()
+        )
+        return res.data or []
+    except Exception as e:
+        print(f"[database.get_open_shorts] error: {e}")
+        return []
+
+
+def get_open_longs(session_id: str) -> list:
+    """Return all open LONG positions for the session."""
+    try:
+        res = (
+            supabase.table('trades')
+            .select('*')
+            .eq('session_id', session_id)
+            .eq('status', 'OPEN')
+            .neq('position_type', 'SHORT')
+            .execute()
+        )
+        return res.data or []
+    except Exception as e:
+        print(f"[database.get_open_longs] error: {e}")
+        return []
+
+
 def get_session_trades(session_id: str) -> list:
     try:
         res = supabase.table('trades').select('*').eq('session_id', session_id).order('created_at', desc=True).execute()

@@ -172,7 +172,11 @@ class SignalEngine:
 
         if raw_buy_confidence >= config.MIN_BUY_CONFIDENCE and allow_buy:
             regime_name = regime.get('regime', 'UNKNOWN')
-            if regime_name not in ('TRENDING', 'WEAK_TREND'):
+            if regime_name == 'CHOPPY':
+                skip_reasons.append('No BUY in CHOPPY regime')
+                action = 'HOLD'
+                confidence = raw_buy_confidence
+            elif regime_name not in ('TRENDING', 'WEAK_TREND'):
                 skip_reasons.append(
                     f"Regime {regime_name} not suitable for BUY"
                 )
