@@ -207,6 +207,32 @@ class MarketData:
             print(f"[nifty50_price] Error for {symbol}: {e}")
         return None
 
+    def verify_instrument_tokens(self, symbol_token_map: dict) -> list:
+        """Sanity-check tokens: fetch 5min candle close and warn on >10% deviation."""
+        mismatches = []
+        for symbol, token in symbol_token_map.items():
+            try:
+                self._instrument_cache[symbol] = token
+                candles = self.get_candles(symbol, '5minute', days=1)
+                if not candles:
+                    continue
+                last_price = candles[-1]['close']
+                cached = self._holdings_cache.get(symbol, {})
+                cached_price = cached.get('price') or cached.get('last_price') or 0
+                if cached_price and last_price:
+                    deviation = abs(last_price - cached_price) / cached_price
+                    if deviation > 0.10:
+                        msg = (
+                            f"[token_verify] {symbol} token={token} "
+                            f"candle=₹{last_price:.2f} cached=₹{cached_price:.2f} "
+                            f"({deviation*100:.1f}% deviation)"
+                        )
+                        print(msg)
+                        mismatches.append(symbol)
+            except Exception as e:
+                print(f"[token_verify] {symbol} error: {e}")
+        return mismatches
+
     def get_nifty_level(self) -> dict:
         # /quote disabled — no Nifty 50 access via OMS for retail
         # Return neutral context so regime detector treats market as SIDEWAYS

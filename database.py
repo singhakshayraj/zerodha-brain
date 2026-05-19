@@ -282,6 +282,31 @@ def close_trade(trade_id: str, exit_data: dict) -> None:
         print(f"[database.close_trade] error trade={trade_id}: {type(e).__name__}: {e}")
 
 
+def cleanup_stale_open_trades(current_session_id: str) -> int:
+    """Mark any OPEN trades from prior (non-current) sessions as STALE_CLEANUP."""
+    try:
+        res = (
+            supabase.table('trades')
+            .select('id,session_id,symbol')
+            .eq('status', 'OPEN')
+            .neq('session_id', current_session_id)
+            .execute()
+        )
+        stale = res.data or []
+        if not stale:
+            return 0
+        print(f"[database.cleanup_stale_open_trades] {len(stale)} stale OPEN trades from prior sessions")
+        for t in stale:
+            supabase.table('trades').update({
+                'status': 'CLOSED',
+                'exit_reason': 'STALE_CLEANUP',
+            }).eq('id', t['id']).execute()
+        return len(stale)
+    except Exception as e:
+        print(f"[database.cleanup_stale_open_trades] error: {e}")
+        return 0
+
+
 def get_open_trades(session_id: str) -> list:
     try:
         res = supabase.table('trades').select('*').eq('session_id', session_id).eq('status', 'OPEN').execute()

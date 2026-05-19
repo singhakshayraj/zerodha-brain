@@ -71,6 +71,9 @@ class TradingBrain:
 
             self.market_data.clear_cache()
 
+            # Cleanup stale OPEN trades from prior sessions (prevents ghost positions)
+            db.cleanup_stale_open_trades(self.session_id)
+
             # Propagate session_id to order_manager for safety logging
             self.order_manager.session_id = self.session_id
 
@@ -781,12 +784,37 @@ class TradingBrain:
                 if not price:
                     price = self.market_data.get_live_price_for_nifty50(key) or 0
 
-                if t.get('position_type') == 'SHORT':
-                    print(f"[square_off] Covering short: {t['symbol']} x{t.get('quantity', 0)}")
-                    self._cover_short(t, price)
-                else:
-                    print(f"[square_off] Closing long: {t['symbol']} x{t.get('quantity', 0)}")
-                    self._execute_sell_by_trade(t, price, 'SESSION_END')
+                trade_still_open = True
+                try:
+                    if t.get('position_type') == 'SHORT':
+                        print(f"[square_off] Covering short: {t['symbol']} x{t.get('quantity', 0)}")
+                        self._cover_short(t, price)
+                    else:
+                        print(f"[square_off] Closing long: {t['symbol']} x{t.get('quantity', 0)}")
+                        self._execute_sell_by_trade(t, price, 'SESSION_END')
+
+                    # Verify trade was actually closed (order may have failed)
+                    fresh = [r for r in db.get_open_trades(self.session_id) if r['id'] == t['id']]
+                    trade_still_open = bool(fresh)
+                except Exception as e:
+                    print(f"[square_off] Error closing {t['symbol']}: {e}")
+
+                # Force-close in DB if Kite order failed — prevents stale OPEN trades
+                if trade_still_open:
+                    entry_val = t.get('entry_value') or 0
+                    is_short = t.get('position_type') == 'SHORT'
+                    exit_val = (price or 0) * (t.get('quantity') or 0)
+                    pnl = (entry_val - exit_val) if is_short else (exit_val - entry_val)
+                    pnl_pct = (pnl / entry_val * 100) if entry_val else 0
+                    print(f"[square_off] Force-closing {t['symbol']} in DB (order failed)")
+                    db.close_trade(t['id'], {
+                        'exit_time': datetime.now(IST).isoformat(),
+                        'exit_price': price,
+                        'exit_value': exit_val,
+                        'exit_reason': 'SQUARE_OFF_FAILED',
+                        'pnl': pnl,
+                        'pnl_percent': pnl_pct,
+                    })
 
         db.end_session(self.session_id, reason)
         db.write_config('brain_status', 'IDLE')
