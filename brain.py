@@ -145,6 +145,7 @@ class TradingBrain:
             print(f"[brain] Nifty50 prices available: {nifty_priced}/{nifty_total}")
 
             self.traded_symbols_this_cycle = set()
+            self._sell_noops = []
 
             # Step 1
             self._check_and_close_positions()
@@ -368,10 +369,9 @@ class TradingBrain:
                             remaining_trades -= 1
                             self.traded_symbols_this_cycle.add(symbol)
                         else:
-                            print(
-                                f"[brain] SELL no-op {symbol} "
-                                f"conf={signal['confidence']}% "
-                                f"regime={signal.get('regime')}"
+                            regime_short = (signal.get('regime') or 'UNK')[:4]
+                            self._sell_noops.append(
+                                f"{symbol}({signal['confidence']}%{regime_short})"
                             )
 
                     time.sleep(0.5)
@@ -386,6 +386,9 @@ class TradingBrain:
                 'winning_trades': self.session_stats['winning_trades'],
                 'losing_trades': self.session_stats['losing_trades'],
             })
+
+            if self._sell_noops:
+                print(f"[brain] SELL no-ops ({len(self._sell_noops)}): {', '.join(self._sell_noops)}")
 
             cycle_time = time.time() - cycle_start_time
             print(
