@@ -446,11 +446,15 @@ class TradingBrain:
     def _execute_buy(self, symbol: str, exchange: str, live_price: float, signal: dict) -> None:
         capital = self.session_config['capitalDeployed']
 
+        win_rate, n_trades = db.get_win_rate()
         quantity = self.risk_manager.calculate_position_size(
             capital=capital,
             live_price=live_price,
             confidence=signal['confidence'],
             stop_loss_price=signal['stop_loss'],
+            target_price=signal.get('target'),
+            historical_win_rate=win_rate,
+            n_trades=n_trades,
         )
 
         if quantity <= 0:
@@ -531,11 +535,15 @@ class TradingBrain:
         short_stop = round(live_price + (live_price - long_stop), 2)
         short_target = round(live_price - (long_target - live_price), 2)
 
+        win_rate, n_trades = db.get_win_rate()
         quantity = self.risk_manager.calculate_position_size(
             capital=capital,
             live_price=live_price,
             confidence=signal['confidence'],
             stop_loss_price=short_stop,
+            target_price=short_target,
+            historical_win_rate=win_rate,
+            n_trades=n_trades,
         )
         if quantity <= 0:
             print(f"[brain] qty=0 for SHORT {symbol}, skipping")

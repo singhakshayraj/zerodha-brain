@@ -19,12 +19,13 @@ class RiskManager:
         live_price: float,
         confidence: int,
         stop_loss_price: float,
+        target_price: float = None,
         historical_win_rate: float = None,
         historical_avg_win: float = None,
         historical_avg_loss: float = None,
+        n_trades: int = 0,
     ) -> int:
         try:
-            # Validate stop loss (works for both LONG and SHORT — uses abs distance)
             stop_distance = abs(live_price - stop_loss_price)
             if stop_distance <= 0 or stop_distance > live_price * 0.5:
                 print(
@@ -33,18 +34,39 @@ class RiskManager:
                 )
                 return 0
 
-            # Cannot afford a single share
             if live_price > capital:
                 print(f"[risk] price ₹{live_price:.0f} exceeds capital ₹{capital:.0f} — skip")
                 return 0
 
-            # 1% risk-based sizing (floor to 1)
-            risk_amount = capital * 0.01
+            # Try Kelly sizing when we have ≥10 historical trades and target price
+            risk_amount = 0
+            used_kelly = False
+            if (
+                historical_win_rate is not None
+                and target_price is not None
+                and n_trades >= 10
+            ):
+                reward_distance = abs(target_price - live_price)
+                if reward_distance > 0:
+                    b = reward_distance / stop_distance
+                    w = historical_win_rate
+                    kelly_f = w - (1 - w) / b
+                    safe_f = max(0.0, kelly_f * 0.33)
+                    kelly_risk = capital * safe_f
+                    if kelly_risk >= 1:
+                        risk_amount = kelly_risk
+                        used_kelly = True
+                        print(
+                            f"[kelly] win={w:.1%} b={b:.2f} kelly={kelly_f:.4f} "
+                            f"safe={safe_f:.4f} risk=₹{risk_amount:.2f}"
+                        )
+
+            if not used_kelly:
+                risk_amount = capital * 0.01
+                print(f"[kelly] Using fixed 1% sizing (n_trades={n_trades})")
+
             qty_risk = int(risk_amount / stop_distance)
-
-            # Max 15% capital exposure per trade
             qty_max = int((capital * 0.15) / live_price)
-
             qty = max(1, min(qty_risk, qty_max if qty_max > 0 else 1))
             print(
                 f"[risk] qty={qty} (risk_amt=₹{risk_amount:.0f} "

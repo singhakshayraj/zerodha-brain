@@ -350,6 +350,30 @@ def get_open_longs(session_id: str) -> list:
         return []
 
 
+def get_win_rate() -> tuple:
+    """Lifetime win rate across all CLOSED trades with non-null pnl.
+    Returns (win_rate, total_trades). Fallback 0.45 when <10 trades."""
+    try:
+        res = (
+            supabase.table('trades')
+            .select('pnl')
+            .eq('status', 'CLOSED')
+            .not_.is_('pnl', 'null')
+            .execute()
+        )
+        trades = res.data or []
+        total = len(trades)
+        if total < 10:
+            return 0.45, total
+        wins = sum(1 for t in trades if (t.get('pnl') or 0) > 0)
+        win_rate = wins / total
+        print(f"[kelly] Historical win rate: {wins}/{total} = {win_rate:.1%}")
+        return win_rate, total
+    except Exception as e:
+        print(f"[kelly] Error fetching win rate: {e}")
+        return 0.45, 0
+
+
 def get_session_trades(session_id: str) -> list:
     try:
         res = supabase.table('trades').select('*').eq('session_id', session_id).order('created_at', desc=True).execute()
