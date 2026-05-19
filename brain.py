@@ -359,7 +359,10 @@ class TradingBrain:
                             print(f"[SAFETY] Will not short CNC holding: {symbol}")
                         elif (
                             signal.get('regime') == 'TRENDING'
-                            and signal['confidence'] >= 70
+                            and signal['confidence'] >= 65
+                        ) or (
+                            signal.get('regime') == 'WEAK_TREND'
+                            and signal['confidence'] >= 75
                         ):
                             self._open_short(symbol, exchange, live_price, signal)
                             remaining_trades -= 1

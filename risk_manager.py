@@ -24,28 +24,32 @@ class RiskManager:
         historical_avg_loss: float = None,
     ) -> int:
         try:
-            qty = TradingPrinciples.calculate_position_size(
-                capital=capital,
-                entry_price=live_price,
-                stop_loss_price=stop_loss_price,
-                win_rate=historical_win_rate if historical_win_rate else 0.50,
-                avg_win=historical_avg_win if historical_avg_win else 100,
-                avg_loss=historical_avg_loss if historical_avg_loss else 100,
-                slippage_percent=0.005,
-                commission_percent=0.001,
-            )
-
-            # Floor to 1 if affordable, skip if price exceeds capital
-            if qty == 0:
-                if live_price <= capital:
-                    qty = 1
-                else:
-                    print(f"[risk] price ₹{live_price:.0f} exceeds capital ₹{capital:.0f} — skip")
-                    return 0
-
-            if qty * live_price < config.MIN_TRADE_VALUE:
+            # Validate stop loss (works for both LONG and SHORT — uses abs distance)
+            stop_distance = abs(live_price - stop_loss_price)
+            if stop_distance <= 0 or stop_distance > live_price * 0.5:
+                print(
+                    f"[risk] Invalid SL: price=₹{live_price:.2f} "
+                    f"sl=₹{stop_loss_price:.2f} dist=₹{stop_distance:.2f} — skip"
+                )
                 return 0
 
+            # Cannot afford a single share
+            if live_price > capital:
+                print(f"[risk] price ₹{live_price:.0f} exceeds capital ₹{capital:.0f} — skip")
+                return 0
+
+            # 1% risk-based sizing (floor to 1)
+            risk_amount = capital * 0.01
+            qty_risk = int(risk_amount / stop_distance)
+
+            # Max 15% capital exposure per trade
+            qty_max = int((capital * 0.15) / live_price)
+
+            qty = max(1, min(qty_risk, qty_max if qty_max > 0 else 1))
+            print(
+                f"[risk] qty={qty} (risk_amt=₹{risk_amount:.0f} "
+                f"sl_dist=₹{stop_distance:.2f} cap=₹{capital:.0f})"
+            )
             return qty
         except Exception as e:
             print(f"[risk_manager.calculate_position_size] error: {e}")
