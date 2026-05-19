@@ -147,13 +147,17 @@ class TradingBrain:
             self.traded_symbols_this_cycle = set()
             self._sell_noops = []
 
+            # Step 0: EOD cleanup runs FIRST so it fires even if session limit reached
+            self._auto_cover_shorts_if_eod()
+            self._auto_close_longs_if_eod()
+            if self._is_past_ist(15, 25) and not self._session_ended:
+                self.end_session('EOD_AUTO')
+                return
+
             # Step 1
             self._check_and_close_positions()
             if self._session_ended:
                 return
-
-            # Step 1b: auto-cover shorts at/after 3:15 PM IST
-            self._auto_cover_shorts_if_eod()
 
             # Step 2
             stats_with_streak = dict(self.session_stats)
@@ -604,22 +608,47 @@ class TradingBrain:
                 data={'exit_reason': 'COVER_SHORT', 'pnl': pnl, 'pnl_percent': pnl_pct},
             )
 
+    def _is_past_ist(self, hour: int, minute: int) -> bool:
+        now = datetime.now(IST)
+        return (now.hour, now.minute) >= (hour, minute)
+
     def _auto_cover_shorts_if_eod(self) -> None:
         """Cover all open shorts at/after 3:15 PM IST."""
-        now = datetime.now(IST)
-        if not (now.hour == 15 and now.minute >= 15):
+        if not self._is_past_ist(15, 15):
             return
         open_shorts = db.get_open_shorts(self.session_id)
         if not open_shorts:
             return
-        print(f"[brain] 3:15 PM — auto-covering {len(open_shorts)} shorts")
+        print(f"[eod] 15:15 IST — covering {len(open_shorts)} open shorts")
         for s in open_shorts:
             key = f"{s.get('exchange', 'NSE')}:{s['symbol']}"
             quote = self.market_data._holdings_cache.get(key, {}) or {}
             price = quote.get('price') or quote.get('last_price') or 0
             if not price:
                 price = self.market_data.get_live_price_for_nifty50(key) or 0
-            self._cover_short(s, price)
+            try:
+                self._cover_short(s, price)
+            except Exception as e:
+                print(f"[eod] Failed to cover {s.get('symbol')}: {e}")
+
+    def _auto_close_longs_if_eod(self) -> None:
+        """Close all open longs at/after 3:20 PM IST."""
+        if not self._is_past_ist(15, 20):
+            return
+        open_longs = db.get_open_longs(self.session_id)
+        if not open_longs:
+            return
+        print(f"[eod] 15:20 IST — closing {len(open_longs)} open longs")
+        for t in open_longs:
+            key = f"{t.get('exchange', 'NSE')}:{t['symbol']}"
+            quote = self.market_data._holdings_cache.get(key, {}) or {}
+            price = quote.get('price') or quote.get('last_price') or 0
+            if not price:
+                price = self.market_data.get_live_price_for_nifty50(key) or 0
+            try:
+                self._execute_sell_by_trade(t, price, 'EOD_CLOSE')
+            except Exception as e:
+                print(f"[eod] Failed to close {t.get('symbol')}: {e}")
 
     def _check_and_close_positions(self) -> None:
         open_trades = db.get_open_trades(self.session_id)
