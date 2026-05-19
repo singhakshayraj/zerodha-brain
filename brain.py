@@ -108,6 +108,23 @@ class TradingBrain:
 
             print(f"Universe: {len(self.universe)} stocks (mode: {stock_universe})")
 
+            print("[brain] Verifying instrument tokens...")
+            bad_tokens = self.market_data.verify_instrument_tokens()
+            if bad_tokens:
+                print(f"[brain] ⚠️  {len(bad_tokens)} bad tokens detected:")
+                for symbol, token, candle_price, cached_price in bad_tokens:
+                    print(
+                        f"  {symbol}: token={token} "
+                        f"candle=₹{candle_price:.2f} "
+                        f"cached=₹{cached_price:.2f} → SKIPPING"
+                    )
+                for symbol, *_ in bad_tokens:
+                    if symbol in self.universe:
+                        del self.universe[symbol]
+                        print(f"[brain] Removed {symbol} from universe")
+            else:
+                print("[brain] ✅ All instrument tokens verified OK")
+
             print(f"Brain initialized. Session: {self.session_id}")
             return True
         except Exception as e:

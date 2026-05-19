@@ -207,8 +207,11 @@ class MarketData:
             print(f"[nifty50_price] Error for {symbol}: {e}")
         return None
 
-    def verify_instrument_tokens(self, symbol_token_map: dict) -> list:
-        """Sanity-check tokens: fetch 5min candle close and warn on >10% deviation."""
+    def verify_instrument_tokens(self, symbol_token_map: dict = None) -> list:
+        """Sanity-check tokens vs 5min candle close. Returns list of
+        (symbol, token, candle_price, cached_price) for >10% deviation."""
+        if symbol_token_map is None:
+            symbol_token_map = config.NIFTY50_INSTRUMENT_TOKENS
         mismatches = []
         for symbol, token in symbol_token_map.items():
             try:
@@ -222,13 +225,12 @@ class MarketData:
                 if cached_price and last_price:
                     deviation = abs(last_price - cached_price) / cached_price
                     if deviation > 0.10:
-                        msg = (
+                        print(
                             f"[token_verify] {symbol} token={token} "
                             f"candle=₹{last_price:.2f} cached=₹{cached_price:.2f} "
                             f"({deviation*100:.1f}% deviation)"
                         )
-                        print(msg)
-                        mismatches.append(symbol)
+                        mismatches.append((symbol, token, last_price, cached_price))
             except Exception as e:
                 print(f"[token_verify] {symbol} error: {e}")
         return mismatches
