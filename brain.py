@@ -419,6 +419,19 @@ class TradingBrain:
                 f"P&L: ₹{self.session_stats['total_pnl']:.2f}"
             )
 
+            if current_cycle == 1:
+                print("[brain] Cycle 1 complete — verifying Nifty50 tokens with live prices...")
+                bad = self.market_data.verify_instrument_tokens()
+                if bad:
+                    for symbol, token, candle, cached in bad:
+                        print(
+                            f"[brain] ⚠️  Removing {symbol} from universe "
+                            f"(token={token} candle=₹{candle:.2f} cached=₹{cached:.2f})"
+                        )
+                        self.universe.pop(symbol, None)
+                else:
+                    print("[brain] ✅ Nifty50 tokens OK after cycle 1")
+
         except TokenExpiredError:
             print("Token expired. Stopping session.")
             db.write_config('brain_status', 'TOKEN_EXPIRED')
