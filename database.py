@@ -187,14 +187,32 @@ def end_session(session_id: str, end_reason: str) -> None:
                     print(f"[database.end_session] duration calc error: {type(e).__name__}: {e}")
 
         trades = get_session_trades(session_id)
+        # Count any trade with a successful entry order as "executed"
+        executed = [t for t in trades if t.get('entry_order_id')]
         closed = [t for t in trades if t.get('status') == 'CLOSED']
-        total_trades_executed = len(closed)
+        total_trades_executed = len(executed)
         winning_trades = sum(1 for t in closed if t.get('is_winner'))
-        losing_trades = total_trades_executed - winning_trades
+        losing_trades = sum(1 for t in closed if not t.get('is_winner'))
         total_pnl = sum((t.get('pnl') or 0) for t in closed)
         total_pnl_percent = sum((t.get('pnl_percent') or 0) for t in closed)
 
-        print(f"[database.end_session] trades={total_trades_executed} wins={winning_trades} pnl={total_pnl:.2f}")
+        # Fallback: pull from session record if executed count looks wrong
+        if total_trades_executed == 0 and sess_res.data:
+            sess_full = (
+                supabase.table('trading_sessions')
+                .select('total_trades_executed,total_pnl,winning_trades')
+                .eq('id', session_id).limit(1).execute()
+            )
+            if sess_full.data:
+                row = sess_full.data[0]
+                total_trades_executed = row.get('total_trades_executed') or 0
+                total_pnl = row.get('total_pnl') or total_pnl
+                winning_trades = row.get('winning_trades') or 0
+
+        print(
+            f"[database.end_session] trades={total_trades_executed} "
+            f"wins={winning_trades} pnl={total_pnl:.2f}"
+        )
 
         updates = {
             'status': 'COMPLETED',

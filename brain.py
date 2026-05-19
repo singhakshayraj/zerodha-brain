@@ -307,14 +307,22 @@ class TradingBrain:
                     )
 
                     if signal['action'] == 'BUY' and signal['confidence'] >= config.MIN_BUY_CONFIDENCE:
-                        # If existing SHORT — cover it instead of opening long
-                        open_shorts = db.get_open_shorts(self.session_id)
+                        open_trades_now = db.get_open_trades(self.session_id)
                         short_match = next(
-                            (s for s in open_shorts if s['symbol'] == symbol), None
+                            (t for t in open_trades_now
+                             if t['symbol'] == symbol and t.get('position_type') == 'SHORT'),
+                            None,
+                        )
+                        long_match = next(
+                            (t for t in open_trades_now
+                             if t['symbol'] == symbol and t.get('position_type') != 'SHORT'),
+                            None,
                         )
                         if short_match:
                             self._cover_short(short_match, live_price)
                             self.traded_symbols_this_cycle.add(symbol)
+                        elif long_match:
+                            print(f"[brain] Already long {symbol}, skipping duplicate BUY")
                         else:
                             self._execute_buy(symbol, exchange, live_price, signal)
                             remaining_trades -= 1
@@ -426,6 +434,15 @@ class TradingBrain:
         )
 
         if result:
+            # Sanity check: executed price vs analyzed price
+            if live_price and result['price']:
+                deviation = abs(result['price'] - live_price) / live_price
+                if deviation > 0.05:
+                    print(
+                        f"[WARNING] BUY price mismatch {symbol}: "
+                        f"expected ₹{live_price:.2f} got ₹{result['price']:.2f} "
+                        f"({deviation*100:.1f}%) — possible wrong instrument token"
+                    )
             db.update_trade_entry(trade['id'], {
                 'entry_order_id': result['order_id'],
                 'entry_time': datetime.now(IST).isoformat(),
@@ -499,6 +516,14 @@ class TradingBrain:
             self.kite, symbol, exchange, quantity
         )
         if result:
+            if live_price and result['price']:
+                deviation = abs(result['price'] - live_price) / live_price
+                if deviation > 0.05:
+                    print(
+                        f"[WARNING] SHORT price mismatch {symbol}: "
+                        f"expected ₹{live_price:.2f} got ₹{result['price']:.2f} "
+                        f"({deviation*100:.1f}%) — possible wrong instrument token"
+                    )
             db.update_trade_entry(trade['id'], {
                 'entry_order_id': result['order_id'],
                 'entry_time': datetime.now(IST).isoformat(),
@@ -749,7 +774,19 @@ class TradingBrain:
         open_trades = db.get_open_trades(self.session_id)
         if open_trades:
             print(f"Squaring off {len(open_trades)} positions...")
-            self.order_manager.square_off_all(self.kite, open_trades)
+            for t in open_trades:
+                key = f"{t.get('exchange', 'NSE')}:{t['symbol']}"
+                quote = self.market_data._holdings_cache.get(key, {}) or {}
+                price = quote.get('price') or quote.get('last_price') or 0
+                if not price:
+                    price = self.market_data.get_live_price_for_nifty50(key) or 0
+
+                if t.get('position_type') == 'SHORT':
+                    print(f"[square_off] Covering short: {t['symbol']} x{t.get('quantity', 0)}")
+                    self._cover_short(t, price)
+                else:
+                    print(f"[square_off] Closing long: {t['symbol']} x{t.get('quantity', 0)}")
+                    self._execute_sell_by_trade(t, price, 'SESSION_END')
 
         db.end_session(self.session_id, reason)
         db.write_config('brain_status', 'IDLE')

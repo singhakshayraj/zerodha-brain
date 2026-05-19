@@ -88,7 +88,9 @@ NIFTY50_INSTRUMENT_TOKENS = {
     'NSE:KOTAKBANK':  492033,
     'NSE:LT':         2939649,
     'NSE:AXISBANK':   1510401,
-    'NSE:BAJFINANCE': 4268801,
+    # 'NSE:BAJFINANCE': REMOVED — token 4268801 collided with BAJAJFINSV
+    # causing order to fill at wrong instrument's price (₹926 vs ₹1749).
+    # Re-add once verified instrument_token confirmed via Kite instruments dump.
     'NSE:WIPRO':      969473,
     'NSE:HCLTECH':    1850625,
     'NSE:MARUTI':     2815745,
