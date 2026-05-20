@@ -150,6 +150,20 @@ class SignalEngine:
         confidence_boost = regime['confidence_modifier']
 
         atr = ind['atr_14'] if ind['atr_14'] else live_price * 0.008
+
+        # Sanity check: ATR should be 0.1% to 5% of price.
+        # Outside this range = bad candle data, use fallback.
+        atr_min = live_price * 0.001
+        atr_max = live_price * 0.05
+        if atr < atr_min or atr > atr_max:
+            raw_atr = atr
+            atr = live_price * 0.008
+            print(
+                f"[signal] {symbol}: ATR={raw_atr:.2f} outside "
+                f"[{atr_min:.2f}, {atr_max:.2f}] — using fallback "
+                f"{atr:.2f} (0.8% of price)"
+            )
+
         stop_loss = round(live_price - (1.2 * atr), 2)
         target = round(live_price + (2.5 * atr), 2)
         stop_loss_pct = ((live_price - stop_loss) / live_price) * 100 if live_price else 0

@@ -559,6 +559,13 @@ class TradingBrain:
         short_stop = round(live_price + (live_price - long_stop), 2)
         short_target = round(live_price - (long_target - live_price), 2)
 
+        print(
+            f"[short_calc] {symbol}: price={live_price:.2f} "
+            f"long_stop={long_stop:.2f} → short_stop={short_stop:.2f} "
+            f"stop_dist={abs(live_price - short_stop):.2f} "
+            f"short_target={short_target:.2f}"
+        )
+
         win_rate, n_trades = db.get_win_rate()
         quantity = self.risk_manager.calculate_position_size(
             capital=capital,

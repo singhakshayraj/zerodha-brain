@@ -32,10 +32,18 @@ class RiskManager:
     ) -> int:
         try:
             stop_distance = abs(live_price - stop_loss_price)
-            if stop_distance <= 0 or stop_distance > live_price * 0.5:
+            if stop_distance <= 0:
                 print(
-                    f"[risk] Invalid SL: price=₹{live_price:.2f} "
-                    f"sl=₹{stop_loss_price:.2f} dist=₹{stop_distance:.2f} — skip"
+                    f"[risk] {symbol}: SL invalid — stop_distance=0 "
+                    f"(price={live_price:.2f} == stop={stop_loss_price:.2f})"
+                )
+                return 0
+            if stop_distance > live_price * 0.5:
+                print(
+                    f"[risk] {symbol}: SL too wide — "
+                    f"stop_dist={stop_distance:.2f} > 50% of price "
+                    f"({live_price*0.5:.2f}). price={live_price:.2f} "
+                    f"stop={stop_loss_price:.2f} — likely bad ATR"
                 )
                 return 0
 
