@@ -24,6 +24,7 @@ class RiskManager:
         historical_avg_win: float = None,
         historical_avg_loss: float = None,
         n_trades: int = 0,
+        symbol: str = 'STOCK',
     ) -> int:
         try:
             stop_distance = abs(live_price - stop_loss_price)
@@ -68,6 +69,7 @@ class RiskManager:
             qty_risk = int(risk_amount / stop_distance)
             qty_max = int((capital * 0.10) / live_price)
             qty = max(1, min(qty_risk, qty_max if qty_max > 0 else 1))
+            original_qty = qty
 
             # Hard cap by absolute position value (10% capital)
             max_value = capital * 0.10
@@ -79,6 +81,20 @@ class RiskManager:
                     f"₹{max_value:.0f} → qty {qty}→{capped}"
                 )
                 qty = capped
+
+            if qty != original_qty:
+                print(
+                    f"[size] {symbol}: value-capped {original_qty}->{qty} "
+                    f"(max Rs{max_value:.0f})"
+                )
+
+            position_value = qty * live_price
+            pct_of_capital = (position_value / capital * 100) if capital else 0
+            print(
+                f"[size] {symbol}: Rs{risk_amount:.0f}/Rs{live_price:.0f} = "
+                f"qty={qty} (Rs{position_value:.0f} position, "
+                f"{pct_of_capital:.1f}% of capital)"
+            )
 
             print(
                 f"[risk] qty={qty} (risk_amt=₹{risk_amount:.0f} "

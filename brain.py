@@ -455,6 +455,7 @@ class TradingBrain:
             target_price=signal.get('target'),
             historical_win_rate=win_rate,
             n_trades=n_trades,
+            symbol=symbol,
         )
 
         if quantity <= 0:
@@ -544,6 +545,7 @@ class TradingBrain:
             target_price=short_target,
             historical_win_rate=win_rate,
             n_trades=n_trades,
+            symbol=symbol,
         )
         if quantity <= 0:
             print(f"[brain] qty=0 for SHORT {symbol}, skipping")
