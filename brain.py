@@ -127,6 +127,17 @@ class TradingBrain:
 
             print(f"Brain initialized. Session: {self.session_id}")
 
+            capital_dep = float(self.session_config.get('capitalDeployed') or 0)
+            min_capital_needed = 40 / 0.02 / 0.10  # Rs20000
+            if capital_dep and capital_dep < min_capital_needed:
+                per_trade_pct = 40 / (capital_dep * 0.10) * 100
+                print(
+                    f"[brokerage] Capital Rs{capital_dep:.0f} is low. "
+                    f"Brokerage will be {per_trade_pct:.1f}%+ per trade. "
+                    f"Recommend Rs{int(min_capital_needed)}+ for "
+                    f"brokerage < 2% per trade."
+                )
+
             win_rate, n_trades = db.get_win_rate()
             if n_trades >= 10:
                 print(

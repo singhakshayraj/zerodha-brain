@@ -7,6 +7,10 @@ from trading_principles import TradingPrinciples
 
 IST = pytz.timezone('Asia/Kolkata')
 
+BROKERAGE_PER_LEG = 20.0       # Rs20 per order (Zerodha flat MIS)
+ROUND_TRIP_BROKERAGE = 40.0    # entry + exit
+MAX_BROKERAGE_PCT = 0.02       # warn if brokerage > 2%
+
 
 class RiskManager:
 
@@ -111,6 +115,22 @@ class RiskManager:
                 f"[risk] qty={qty} (risk_amt=₹{risk_amount:.0f} "
                 f"sl_dist=₹{stop_distance:.2f} cap=₹{capital:.0f})"
             )
+
+            brokerage_pct = ROUND_TRIP_BROKERAGE / position_value if position_value else 0
+            if brokerage_pct > MAX_BROKERAGE_PCT:
+                min_pos = int(ROUND_TRIP_BROKERAGE / MAX_BROKERAGE_PCT)
+                print(
+                    f"[brokerage] WARNING {symbol}: "
+                    f"Rs{position_value:.0f} position, "
+                    f"Rs40 round-trip = {brokerage_pct*100:.1f}% cost "
+                    f"(need Rs{min_pos}+ for <2% brokerage)"
+                )
+            else:
+                print(
+                    f"[brokerage] {symbol}: Rs40/Rs{position_value:.0f} = "
+                    f"{brokerage_pct*100:.1f}% -- OK"
+                )
+
             return qty
         except Exception as e:
             print(f"[risk_manager.calculate_position_size] error: {e}")
