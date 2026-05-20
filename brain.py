@@ -126,6 +126,18 @@ class TradingBrain:
                 print("[brain] ✅ All instrument tokens verified OK")
 
             print(f"Brain initialized. Session: {self.session_id}")
+
+            win_rate, n_trades = db.get_win_rate()
+            if n_trades >= 10:
+                print(
+                    f"[kelly] ACTIVE: {n_trades} closed trades, "
+                    f"win_rate={win_rate:.1%} -> dynamic sizing enabled"
+                )
+            else:
+                print(
+                    f"[kelly] INACTIVE: {n_trades}/10 closed trades "
+                    f"-> fixed 1% sizing until {10 - n_trades} more trades close"
+                )
             return True
         except Exception as e:
             print(f"Brain initialization failed (instrument map): {e}")

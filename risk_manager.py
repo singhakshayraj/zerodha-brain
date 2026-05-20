@@ -42,6 +42,10 @@ class RiskManager:
             # Try Kelly sizing when we have ≥10 historical trades and target price
             risk_amount = 0
             used_kelly = False
+            kelly_risk_computed = 0.0
+            kelly_f = 0.0
+            b = 0.0
+            w = historical_win_rate or 0.0
             if (
                 historical_win_rate is not None
                 and target_price is not None
@@ -50,21 +54,28 @@ class RiskManager:
                 reward_distance = abs(target_price - live_price)
                 if reward_distance > 0:
                     b = reward_distance / stop_distance
-                    w = historical_win_rate
                     kelly_f = w - (1 - w) / b
                     safe_f = max(0.0, kelly_f * 0.33)
-                    kelly_risk = capital * safe_f
-                    if kelly_risk >= 1:
-                        risk_amount = kelly_risk
+                    kelly_risk_computed = capital * safe_f
+                    if kelly_risk_computed >= 1:
+                        risk_amount = kelly_risk_computed
                         used_kelly = True
-                        print(
-                            f"[kelly] win={w:.1%} b={b:.2f} kelly={kelly_f:.4f} "
-                            f"safe={safe_f:.4f} risk=₹{risk_amount:.2f}"
-                        )
 
-            if not used_kelly:
+            if used_kelly:
+                print(
+                    f"[kelly] DYNAMIC: win={w:.1%} b={b:.2f} f={kelly_f:.4f} "
+                    f"-> risk=Rs{risk_amount:.0f}"
+                )
+            else:
                 risk_amount = capital * 0.01
-                print(f"[kelly] Using fixed 1% sizing (n_trades={n_trades})")
+                reason = (
+                    f"only {n_trades}/10 trades"
+                    if n_trades < 10
+                    else "kelly_risk<1"
+                )
+                print(
+                    f"[kelly] FIXED 1%: ({reason}) -> risk=Rs{risk_amount:.0f}"
+                )
 
             qty_risk = int(risk_amount / stop_distance)
             qty_max = int((capital * 0.10) / live_price)
