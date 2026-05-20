@@ -66,8 +66,20 @@ class RiskManager:
                 print(f"[kelly] Using fixed 1% sizing (n_trades={n_trades})")
 
             qty_risk = int(risk_amount / stop_distance)
-            qty_max = int((capital * 0.15) / live_price)
+            qty_max = int((capital * 0.10) / live_price)
             qty = max(1, min(qty_risk, qty_max if qty_max > 0 else 1))
+
+            # Hard cap by absolute position value (10% capital)
+            max_value = capital * 0.10
+            position_value = qty * live_price
+            if position_value > max_value and qty > 1:
+                capped = max(1, int(max_value / live_price))
+                print(
+                    f"[risk] Capped by value: ₹{position_value:.0f} > "
+                    f"₹{max_value:.0f} → qty {qty}→{capped}"
+                )
+                qty = capped
+
             print(
                 f"[risk] qty={qty} (risk_amt=₹{risk_amount:.0f} "
                 f"sl_dist=₹{stop_distance:.2f} cap=₹{capital:.0f})"
