@@ -252,11 +252,21 @@ class TradingBrain:
                 self.session_stats['trades_executed']
             )
 
+            trades_this_cycle = 0
+            max_per_cycle = config.MAX_TRADES_PER_CYCLE
+
             cycle_start_time = time.time()
             analyzed_count = 0
 
             for key, stock in analyzable.items():
                 if remaining_trades <= 0:
+                    break
+                if trades_this_cycle >= max_per_cycle:
+                    print(
+                        f"[brain] Per-cycle limit reached "
+                        f"({trades_this_cycle}/{max_per_cycle}) "
+                        f"— deferring remaining signals to next cycle"
+                    )
                     break
 
                 symbol = stock['symbol']
@@ -374,6 +384,7 @@ class TradingBrain:
                         else:
                             self._execute_buy(symbol, exchange, live_price, signal)
                             remaining_trades -= 1
+                            trades_this_cycle += 1
                             self.traded_symbols_this_cycle.add(symbol)
 
                     elif signal['action'] == 'SELL':
@@ -411,6 +422,7 @@ class TradingBrain:
                         ):
                             self._open_short(symbol, exchange, live_price, signal)
                             remaining_trades -= 1
+                            trades_this_cycle += 1
                             self.traded_symbols_this_cycle.add(symbol)
                         else:
                             regime_short = (signal.get('regime') or 'UNK')[:4]
