@@ -6,6 +6,7 @@ import pytz
 
 import config
 import database as db
+import logger
 from kite_client import KiteClient, TokenExpiredError
 from market_data import MarketData
 from order_manager import OrderManager
@@ -127,6 +128,13 @@ class TradingBrain:
 
             print(f"Brain initialized. Session: {self.session_id}")
 
+            logger.set_context(
+                session_id=self.session_id,
+                capital=self.session_config.get('capitalDeployed', 0),
+                max_trades=self.session_config.get('maxTrades', 10),
+            )
+            logger.info(f"Session started: {self.session_id}", tag="session")
+
             capital_dep = float(self.session_config.get('capitalDeployed') or 0)
             min_capital_needed = 40 / 0.02 / 0.10  # Rs20000
             if capital_dep and capital_dep < min_capital_needed:
@@ -162,6 +170,8 @@ class TradingBrain:
             self.cycle_count += 1
             current_cycle = self.cycle_count
             print(f"\n[brain] === Cycle {current_cycle} start: {datetime.now(IST).strftime('%H:%M:%S')} ===")
+            logger.set_context(cycle=current_cycle)
+            logger.cycle(cycle_num=current_cycle, stocks=len(self.universe))
 
             # Always fetch fresh prices at cycle start
             print("[brain] Refreshing prices from Zerodha...")
@@ -364,6 +374,20 @@ class TradingBrain:
                         market_bias=signal.get('market_bias', 'NEUTRAL'),
                     )
 
+                    ind = signal.get('indicators') or {}
+                    logger.signal(
+                        symbol=symbol,
+                        action=signal['action'],
+                        confidence=signal['confidence'],
+                        regime=signal.get('regime', 'UNKNOWN'),
+                        rsi=ind.get('rsi_14'),
+                        atr=ind.get('atr_14'),
+                        live_price=live_price,
+                        stop_loss=signal.get('stop_loss'),
+                        target=signal.get('target'),
+                        risk_reward=signal.get('risk_reward_ratio'),
+                    )
+
                     if signal['action'] == 'BUY' and signal['confidence'] >= config.MIN_BUY_CONFIDENCE:
                         open_trades_now = db.get_open_trades(self.session_id)
                         short_match = next(
@@ -474,6 +498,7 @@ class TradingBrain:
 
         except Exception as e:
             print(f"Cycle error: {e}")
+            logger.error(str(e), tag="brain")
 
         finally:
             self._cycle_lock.release()
@@ -537,6 +562,13 @@ class TradingBrain:
             print(
                 f"BUY executed: {symbol} x{result['quantity']} "
                 f"@ ₹{result['price']}"
+            )
+            logger.trade(
+                symbol=symbol, side='BUY',
+                qty=result['quantity'], price=result['price'],
+                stop_loss=signal.get('stop_loss'),
+                target=signal.get('target'),
+                order_id=result['order_id'],
             )
             db.log_brain_activity(
                 session_id=self.session_id,
@@ -630,6 +662,12 @@ class TradingBrain:
             print(
                 f"SHORT opened: {symbol} x{result['quantity']} "
                 f"@ ₹{result['price']}"
+            )
+            logger.trade(
+                symbol=symbol, side='SHORT',
+                qty=result['quantity'], price=result['price'],
+                stop_loss=short_stop, target=short_target,
+                order_id=result['order_id'],
             )
             db.log_brain_activity(
                 session_id=self.session_id,
@@ -933,6 +971,17 @@ class TradingBrain:
                         'pnl_percent': pnl_pct,
                     })
 
+        logger.info(
+            f"Session ended: {reason} trades={self.session_stats['trades_executed']} "
+            f"pnl=Rs{self.session_stats['total_pnl']:.2f}",
+            tag="session",
+            reason=reason,
+            trades=self.session_stats['trades_executed'],
+            pnl=self.session_stats['total_pnl'],
+            winning_trades=self.session_stats['winning_trades'],
+            losing_trades=self.session_stats['losing_trades'],
+        )
+        logger.clear_context()
         db.end_session(self.session_id, reason)
         db.write_config('brain_status', 'IDLE')
         db.write_config('active_session_id', '')
