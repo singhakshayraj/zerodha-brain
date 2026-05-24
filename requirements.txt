@@ -3,4 +3,4 @@ requests==2.31.0
 numpy==1.26.2
 python-dotenv==1.0.0
 pytz==2023.3
-axiom-py>=1.0.0
+axiom-py>=0.12.0
