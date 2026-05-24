@@ -1,3 +1,4 @@
+import math
 from datetime import datetime
 
 import pytz
@@ -9,7 +10,7 @@ IST = pytz.timezone('Asia/Kolkata')
 
 BROKERAGE_PER_LEG = 20.0       # Rs20 per order (Zerodha flat MIS)
 ROUND_TRIP_BROKERAGE = 40.0    # entry + exit
-MAX_BROKERAGE_PCT = 0.02       # warn if brokerage > 2%
+MAX_BROKERAGE_PCT = 0.01       # warn if brokerage > 1%
 
 
 class RiskManager:
@@ -89,13 +90,16 @@ class RiskManager:
                     f"[kelly] FIXED 1%: ({reason}) -> risk=Rs{risk_amount:.0f}"
                 )
 
+            max_position_pct = config.MAX_POSITION_PERCENT
+            min_position_value = config.MIN_POSITION_VALUE
+
             qty_risk = int(risk_amount / stop_distance)
-            qty_max = int((capital * 0.10) / live_price)
+            qty_max = int((capital * max_position_pct) / live_price)
             qty = max(1, min(qty_risk, qty_max if qty_max > 0 else 1))
             original_qty = qty
 
-            # Hard cap by absolute position value (10% capital)
-            max_value = capital * 0.10
+            # Hard cap by absolute position value (max_position_pct of capital)
+            max_value = capital * max_position_pct
             position_value = qty * live_price
             if position_value > max_value and qty > 1:
                 capped = max(1, int(max_value / live_price))
@@ -110,6 +114,26 @@ class RiskManager:
                     f"[size] {symbol}: value-capped {original_qty}->{qty} "
                     f"(max Rs{max_value:.0f})"
                 )
+
+            # Enforce minimum position value (brokerage economics)
+            position_value = qty * live_price
+            if position_value < min_position_value:
+                min_qty = math.ceil(min_position_value / live_price)
+                affordable_max = int(capital * max_position_pct / live_price)
+                if min_qty <= affordable_max and (min_qty * live_price) <= capital:
+                    print(
+                        f"[size] {symbol}: Rs{position_value:.0f} below "
+                        f"min Rs{min_position_value} → qty {qty}→{min_qty} "
+                        f"(Rs{min_qty * live_price:.0f})"
+                    )
+                    qty = min_qty
+                else:
+                    print(
+                        f"[size] {symbol}: WARNING cannot reach "
+                        f"Rs{min_position_value} min within capital "
+                        f"(max affordable qty={affordable_max} = "
+                        f"Rs{affordable_max * live_price:.0f})"
+                    )
 
             position_value = qty * live_price
             pct_of_capital = (position_value / capital * 100) if capital else 0

@@ -58,6 +58,10 @@ CIRCUIT_BREAKER_CONSECUTIVE_LOSSES = 3
 # Per-cycle trade cap (spread trades across cycles, avoid burst)
 MAX_TRADES_PER_CYCLE = 3
 
+# Position sizing economics
+MAX_POSITION_PERCENT = 0.40   # max 40% of capital per trade
+MIN_POSITION_VALUE = 2000     # Rs2000 minimum (brokerage < 1%)
+
 # Trading mode — force holdings-only since /quote endpoint
 # does not work on OMS for retail authentication
 TRADING_MODE_FORCE = 'HOLDINGS_ONLY'
