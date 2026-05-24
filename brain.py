@@ -532,6 +532,8 @@ class TradingBrain:
             'stop_loss_price': signal['stop_loss'],
             'target_price': signal['target'],
             'risk_reward_ratio': signal['risk_reward_ratio'],
+            'regime': signal.get('regime'),
+            'confidence_score': signal.get('confidence'),
         })
 
         if not trade:
@@ -635,6 +637,8 @@ class TradingBrain:
             'stop_loss_price': short_stop,
             'target_price': short_target,
             'risk_reward_ratio': signal['risk_reward_ratio'],
+            'regime': signal.get('regime'),
+            'confidence_score': signal.get('confidence'),
         })
         if not trade:
             return
