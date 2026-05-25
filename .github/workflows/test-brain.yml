@@ -1,0 +1,58 @@
+name: Test zerodha-brain
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-mock pytest-cov
+
+      - name: Syntax check all Python files
+        run: |
+          python -c "
+          import ast, glob, sys
+          failed = []
+          for f in glob.glob('*.py'):
+            try:
+              ast.parse(open(f).read())
+            except SyntaxError as e:
+              failed.append(f'{f}: {e}')
+          if failed:
+            print('SYNTAX ERRORS:')
+            for f in failed: print(f)
+            sys.exit(1)
+          print(f'Syntax OK: {len(list(glob.glob(\"*.py\")))} files')
+          "
+
+      - name: Run test suite
+        env:
+          SUPABASE_URL: "https://placeholder.supabase.co"
+          SUPABASE_SERVICE_KEY: "placeholder_key_for_ci"
+          AXIOM_TOKEN: ""
+          AXIOM_DATASET: "zerodha-trading"
+        run: |
+          pytest tests/ -v --tb=short \
+            --cov=. \
+            --cov-fail-under=70 \
+            -q
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: .coverage

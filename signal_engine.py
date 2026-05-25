@@ -242,6 +242,15 @@ class SignalEngine:
             )
             confidence = adjusted_conf
 
+        # WEAK_TREND requires final (post-modifier) confidence >= 80
+        if (action == 'BUY'
+                and regime.get('regime') == 'WEAK_TREND'
+                and confidence < 80):
+            skip_reasons.append(
+                f"WEAK_TREND: post-adjustment confidence {confidence}% < 80%"
+            )
+            action = 'HOLD'
+
         return {
             'action': action,
             'confidence': confidence,

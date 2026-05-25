@@ -61,6 +61,7 @@ MAX_TRADES_PER_CYCLE = 3
 # Position sizing economics
 MAX_POSITION_PERCENT = 0.40   # max 40% of capital per trade
 MIN_POSITION_VALUE = 2000     # Rs2000 minimum (brokerage < 1%)
+KELLY_SAFETY_MULTIPLIER = 0.33  # fractional Kelly: use 33% of full Kelly
 
 # Trading mode — force holdings-only since /quote endpoint
 # does not work on OMS for retail authentication
