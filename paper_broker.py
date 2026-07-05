@@ -1,0 +1,116 @@
+"""Paper-trading execution layer.
+
+Drop-in replacement for OrderManager: identical public interface, but instead
+of placing real Kite orders it simulates fills at the LIVE last-traded price
+(via kite.get_ltp — a read-only quote call) plus configurable slippage.
+
+Everything upstream — market data, indicators, signal engine, risk manager,
+regime detector, database writes — runs unchanged, so a paper session
+exercises the full decision pipeline on real market data with zero order risk.
+
+Selected in brain.py when config.PAPER_TRADING is true.
+"""
+
+import uuid
+
+import config
+import database as db
+from kite_client import KiteClient
+
+
+def _paper_order_id() -> str:
+    return f"PAPER-{uuid.uuid4().hex[:12]}"
+
+
+class PaperBroker:
+
+    def __init__(self):
+        self.session_id = None
+
+    # ── internals ────────────────────────────────────────────────────────────
+
+    def _clean_symbol(self, symbol: str) -> str:
+        return symbol.replace('NSE:', '').replace('BSE:', '')
+
+    def _live_price(self, kite: KiteClient, symbol: str, exchange: str):
+        """Fetch real LTP for the instrument. Returns None if unavailable —
+        a paper fill without a real price would poison the dataset."""
+        instrument = f"{exchange}:{self._clean_symbol(symbol)}"
+        try:
+            data = kite.get_ltp([instrument]) or {}
+            quote = data.get(instrument) or {}
+            price = quote.get('last_price') or 0
+            return price if price > 0 else None
+        except Exception as e:
+            print(f"[PAPER] LTP fetch failed for {instrument}: {e}")
+            return None
+
+    def _fill(self, kite: KiteClient, symbol: str, exchange: str,
+              quantity: int, side: str):
+        """Simulate a MARKET fill at live LTP adjusted for slippage.
+        side: 'BUY' pays up, 'SELL' receives less — always adverse."""
+        ltp = self._live_price(kite, symbol, exchange)
+        if ltp is None:
+            print(f"[PAPER] {side} order failed for {symbol}: no live price")
+            if self.session_id:
+                try:
+                    db.log_brain_activity(
+                        self.session_id,
+                        'ORDER_FAILED',
+                        symbol=symbol,
+                        message=f'[PAPER] {side} failed: no live price',
+                        data={'paper': True},
+                    )
+                except Exception:
+                    pass
+            return None
+
+        slip = config.PAPER_SLIPPAGE_PCT / 100.0
+        price = round(ltp * (1 + slip) if side == 'BUY' else ltp * (1 - slip), 2)
+        order_id = _paper_order_id()
+
+        print(
+            f"[PAPER] {side} filled: {symbol} x{quantity} @ ₹{price} "
+            f"(ltp {ltp}, slippage {config.PAPER_SLIPPAGE_PCT}%) [{order_id}]"
+        )
+        return {
+            'order_id': order_id,
+            'status': 'COMPLETE',
+            'price': price,
+            'quantity': quantity,
+            'value': price * quantity,
+        }
+
+    # ── OrderManager-compatible interface ────────────────────────────────────
+
+    def place_buy_order(self, kite: KiteClient, symbol: str, exchange: str,
+                        quantity: int):
+        print(f"[PAPER] BUY order: {symbol} x{quantity}")
+        return self._fill(kite, symbol, exchange, quantity, 'BUY')
+
+    def place_sell_order(self, kite: KiteClient, symbol: str, exchange: str,
+                         quantity: int):
+        # No CNC safety lock needed: nothing real can be sold. The brain only
+        # calls this to close paper longs it opened itself.
+        print(f"[PAPER] SELL order: {symbol} x{quantity}")
+        return self._fill(kite, symbol, exchange, quantity, 'SELL')
+
+    def place_short_order(self, kite: KiteClient, symbol: str, exchange: str,
+                          quantity: int):
+        print(f"[PAPER] SHORT order: {symbol} x{quantity}")
+        return self._fill(kite, symbol, exchange, quantity, 'SELL')
+
+    def cover_short_order(self, kite: KiteClient, symbol: str, exchange: str,
+                          quantity: int):
+        print(f"[PAPER] COVER order: {symbol} x{quantity}")
+        return self._fill(kite, symbol, exchange, quantity, 'BUY')
+
+    def square_off_all(self, kite: KiteClient, open_trades: list) -> None:
+        print(f"[PAPER] Squaring off {len(open_trades)} open positions")
+        for trade in open_trades:
+            self.place_sell_order(
+                kite,
+                trade['symbol'],
+                trade['exchange'],
+                trade['quantity'],
+            )

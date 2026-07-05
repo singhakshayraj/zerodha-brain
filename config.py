@@ -21,6 +21,11 @@ HEARTBEAT_INTERVAL_SECONDS = 60
 MARKET_CONTEXT_INTERVAL_SECONDS = 900  # 15 minutes
 BRAIN_VERSION = '1.0.0'
 
+# Paper trading: real market data + real decisions, simulated fills.
+# No Kite orders are ever placed when true. See paper_broker.py.
+PAPER_TRADING = os.getenv('PAPER_TRADING', 'false').strip().lower() == 'true'
+PAPER_SLIPPAGE_PCT = float(os.getenv('PAPER_SLIPPAGE_PCT', '0.05'))  # adverse fill %
+
 # Risk settings
 MAX_RISK_PER_TRADE_PERCENT = 1.0  # 1% of capital per trade
 MAX_POSITION_SIZE_PERCENT = 20.0  # max 20% capital in one stock

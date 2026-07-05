@@ -10,6 +10,7 @@ import logger
 from kite_client import KiteClient, TokenExpiredError
 from market_data import MarketData
 from order_manager import OrderManager
+from paper_broker import PaperBroker
 from risk_manager import RiskManager
 from signal_engine import SignalEngine
 from trading_principles import TradingPrinciples
@@ -24,7 +25,13 @@ class TradingBrain:
         self.market_data = None
         self.signal_engine = SignalEngine()
         self.risk_manager = RiskManager()
-        self.order_manager = OrderManager()
+        # Paper mode swaps ONLY the execution layer — decisions, risk and DB
+        # writes run identically against real market data.
+        if config.PAPER_TRADING:
+            print("[BRAIN] PAPER TRADING mode — no real orders will be placed")
+            self.order_manager = PaperBroker()
+        else:
+            self.order_manager = OrderManager()
         self.session_config = None
         self.session_id = None
         self.session_stats = {

@@ -4,6 +4,7 @@ from datetime import datetime
 
 import pytz
 
+import config
 import database as db
 from brain import TradingBrain
 from risk_manager import RiskManager
@@ -105,6 +106,11 @@ def run():
                     session_config['sessionId'] = session_id
 
                     db.write_config('brain_status', 'RUNNING')
+                    # Dashboard reads this to label paper vs real sessions.
+                    db.write_config(
+                        'paper_mode',
+                        'true' if config.PAPER_TRADING else 'false',
+                    )
 
                     brain = TradingBrain()
                     initialized = brain.initialize(token, session_config)
