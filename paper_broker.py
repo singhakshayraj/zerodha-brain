@@ -22,6 +22,30 @@ def _paper_order_id() -> str:
     return f"PAPER-{uuid.uuid4().hex[:12]}"
 
 
+def _zerodha_intraday_charges(side: str, price: float, quantity: int) -> float:
+    """Real Zerodha equity intraday (MIS) charges for one order leg, in ₹.
+
+    Without these, paper P&L overstates the edge — for intraday, transaction
+    costs are often the difference between a profitable and losing strategy.
+
+    Schedule (NSE equity intraday, as of 2025):
+      brokerage: min(₹20, 0.03% of turnover) per executed order
+      STT:       0.025% on the SELL side only
+      exchange:  0.00297% of turnover (NSE)
+      SEBI:      0.0001% of turnover
+      GST:       18% on (brokerage + exchange + SEBI)
+      stamp:     0.003% on the BUY side only
+    """
+    turnover = price * quantity
+    brokerage = min(20.0, turnover * 0.0003)
+    stt = turnover * 0.00025 if side == 'SELL' else 0.0
+    exchange = turnover * 0.0000297
+    sebi = turnover * 0.000001
+    gst = 0.18 * (brokerage + exchange + sebi)
+    stamp = turnover * 0.00003 if side == 'BUY' else 0.0
+    return round(brokerage + stt + exchange + sebi + gst + stamp, 2)
+
+
 class PaperBroker:
 
     def __init__(self):
@@ -66,12 +90,20 @@ class PaperBroker:
             return None
 
         slip = config.PAPER_SLIPPAGE_PCT / 100.0
-        price = round(ltp * (1 + slip) if side == 'BUY' else ltp * (1 - slip), 2)
+        price = ltp * (1 + slip) if side == 'BUY' else ltp * (1 - slip)
+
+        # Fold real transaction charges into the fill price adversely
+        # (charges/share on top of slippage), so they flow through
+        # entry_price/exit_price into P&L without any schema change.
+        charges = _zerodha_intraday_charges(side, price, quantity)
+        per_share = charges / quantity if quantity else 0.0
+        price = round(price + per_share if side == 'BUY' else price - per_share, 2)
         order_id = _paper_order_id()
 
         print(
             f"[PAPER] {side} filled: {symbol} x{quantity} @ ₹{price} "
-            f"(ltp {ltp}, slippage {config.PAPER_SLIPPAGE_PCT}%) [{order_id}]"
+            f"(ltp {ltp}, slippage {config.PAPER_SLIPPAGE_PCT}%, "
+            f"charges ₹{charges}) [{order_id}]"
         )
         return {
             'order_id': order_id,
