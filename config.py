@@ -10,6 +10,16 @@ SUPABASE_SERVICE_KEY = os.getenv('SUPABASE_SERVICE_KEY')
 # Zerodha
 KITE_BASE_URL = 'https://kite.zerodha.com/oms'
 
+# Kite auto-login (token_refresher.py). All three must be set to enable;
+# otherwise the manual token-paste flow is the only source of enc_token.
+KITE_USER_ID = os.getenv('KITE_USER_ID')
+KITE_PASSWORD = os.getenv('KITE_PASSWORD')
+KITE_TOTP_SECRET = os.getenv('KITE_TOTP_SECRET')
+# Old tokens expire ~6:00 AM IST; refresh daily at 6:30 so a live token is
+# always in place well before the 9:15 open.
+TOKEN_REFRESH_HOUR_IST = 6
+TOKEN_REFRESH_MINUTE_IST = 30
+
 # Market timing (IST)
 MARKET_OPEN_HOUR = 9
 MARKET_OPEN_MINUTE = 15

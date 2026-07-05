@@ -4,6 +4,7 @@ numpy==1.26.2
 python-dotenv==1.0.0
 pytz==2023.3
 axiom-py==0.12.0
+pyotp==2.9.0
 
 # dev / CI
 pytest>=8.0.0

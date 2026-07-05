@@ -6,6 +6,7 @@ import pytz
 
 import config
 import database as db
+import token_refresher
 from brain import TradingBrain
 from risk_manager import RiskManager
 
@@ -59,6 +60,8 @@ def run():
     while True:
         try:
             _set_heartbeat('ONLINE', 0, 'Waiting for START command')
+            # Daily 6:30 IST token refresh — no-op unless KITE_* creds set.
+            token_refresher.maybe_daily_refresh()
             command = db.get_brain_command()
 
             if command == 'START':
@@ -76,6 +79,10 @@ def run():
 
                     print(f"[SCHEDULER] Token exists: {bool(token)}")
                     print(f"[SCHEDULER] Session config: {session_config}")
+
+                    if not token:
+                        print("[SCHEDULER] No token found — attempting auto-refresh")
+                        token = token_refresher.refresh_enc_token()
 
                     if not token:
                         print("[SCHEDULER] No token found")
