@@ -59,6 +59,29 @@ def get_brain_command() -> str:
     return result if result else 'IDLE'
 
 
+def has_session_today() -> bool:
+    """True if any session was created today (IST trading day).
+    Fails closed (True) so autopilot never double-starts on a DB error."""
+    try:
+        import pytz
+        ist = pytz.timezone('Asia/Kolkata')
+        now_ist = datetime.now(ist)
+        day_start_utc = ist.localize(
+            datetime(now_ist.year, now_ist.month, now_ist.day)
+        ).astimezone(timezone.utc)
+        res = (
+            supabase.table('trading_sessions')
+            .select('id')
+            .gte('created_at', day_start_utc.isoformat())
+            .limit(1)
+            .execute()
+        )
+        return bool(res.data)
+    except Exception as e:
+        print(f"[database.has_session_today] error: {e}")
+        return True
+
+
 def get_session_config():
     raw = get_config('session_config')
     if not raw:
@@ -448,6 +471,20 @@ def log_decision(
     except Exception as e:
         print(f"[log_decision] error: {e}")
         print(f"[log_decision] symbol={symbol}")
+
+
+def log_quote_snapshot(session_id: str, cycle: int, prices: dict) -> None:
+    """One row per cycle: jsonb map of symbol -> LTP for the scanned
+    universe, so training can reconstruct what the brain saw."""
+    try:
+        supabase.table('quote_snapshots').insert({
+            'session_id': session_id,
+            'cycle': int(cycle),
+            'prices': prices,
+        }).execute()
+        print(f"[log_quote_snapshot] OK cycle={cycle} symbols={len(prices)}")
+    except Exception as e:
+        print(f"[log_quote_snapshot] error: {e}")
 
 
 # --- BRAIN ACTIVITY ---

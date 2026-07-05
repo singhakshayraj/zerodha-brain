@@ -221,7 +221,7 @@ class RiskManager:
             return False
 
         today_str = now_ist.strftime('%Y-%m-%d')
-        if today_str in config.NSE_HOLIDAYS_2025:
+        if today_str in config.NSE_HOLIDAYS:
             return False
 
         market_open = now_ist.replace(

@@ -20,6 +20,11 @@ KITE_TOTP_SECRET = os.getenv('KITE_TOTP_SECRET')
 TOKEN_REFRESH_HOUR_IST = 6
 TOKEN_REFRESH_MINUTE_IST = 30
 
+# Autopilot: self-start a session each trading day at 09:30 IST without a
+# dashboard START. Fires at most once per day — any session already created
+# today (manual stop, loss limit, token expiry) suppresses it.
+AUTOPILOT = os.getenv('AUTOPILOT', 'false').strip().lower() == 'true'
+
 # Market timing (IST)
 MARKET_OPEN_HOUR = 9
 MARKET_OPEN_MINUTE = 15
@@ -82,6 +87,28 @@ KELLY_SAFETY_MULTIPLIER = 0.33  # fractional Kelly: use 33% of full Kelly
 # does not work on OMS for retail authentication
 TRADING_MODE_FORCE = 'HOLDINGS_ONLY'
 
+# NSE 2026 holidays (equity segment; cross-checked cleartax + groww
+# against the NSE circular, 2026-07-06). Nov 8 Diwali Muhurat is a Sunday —
+# weekend check covers it.
+NSE_HOLIDAYS_2026 = [
+    '2026-01-15',  # Maharashtra municipal elections (one-off)
+    '2026-01-26',  # Republic Day
+    '2026-03-03',  # Holi
+    '2026-03-26',  # Shri Ram Navami
+    '2026-03-31',  # Shri Mahavir Jayanti
+    '2026-04-03',  # Good Friday
+    '2026-04-14',  # Dr Ambedkar Jayanti
+    '2026-05-01',  # Maharashtra Day
+    '2026-05-28',  # Bakri Id
+    '2026-06-26',  # Muharram
+    '2026-09-14',  # Ganesh Chaturthi
+    '2026-10-02',  # Gandhi Jayanti
+    '2026-10-20',  # Dussehra
+    '2026-11-10',  # Diwali Balipratipada
+    '2026-11-24',  # Prakash Gurpurb
+    '2026-12-25',  # Christmas
+]
+
 # NSE 2025 holidays (hardcoded)
 NSE_HOLIDAYS_2025 = [
     '2025-01-26',  # Republic Day
@@ -98,6 +125,9 @@ NSE_HOLIDAYS_2025 = [
     '2025-11-05',  # Prakash Gurpurb
     '2025-12-25',  # Christmas
 ]
+
+# Combined lookup used by risk_manager.is_market_open()
+NSE_HOLIDAYS = set(NSE_HOLIDAYS_2025) | set(NSE_HOLIDAYS_2026)
 
 NIFTY50_INSTRUMENT_TOKENS = {
     'NSE:RELIANCE':   738561,

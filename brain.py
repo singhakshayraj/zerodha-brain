@@ -237,6 +237,15 @@ class TradingBrain:
             print(f"[brain] Price snapshot at {price_time.strftime('%H:%M:%S')} "
                   f"— {len(prices_snapshot)} stocks")
 
+            db.log_quote_snapshot(
+                session_id=self.session_id,
+                cycle=current_cycle,
+                prices={
+                    key: (q.get('price') or q.get('last_price') or 0)
+                    for key, q in prices_snapshot.items()
+                },
+            )
+
             analyzable = {
                 key: data for key, data in self.universe.items()
                 if key in prices_snapshot
@@ -310,12 +319,30 @@ class TradingBrain:
                         key, interval='60minute', days=20
                     )
 
-                    if not candles_15min:
-                        continue
-
                     quote = prices_snapshot.get(key) or {}
                     live_price = quote.get('price') or quote.get('last_price') or 0
-                    if not live_price:
+
+                    # Data-gap skips are decisions too — log them so the
+                    # dataset can tell "brain held" from "brain saw nothing".
+                    data_gap = None
+                    if not candles_15min:
+                        data_gap = 'No 15-minute candle data'
+                    elif not live_price:
+                        data_gap = 'No live price in quote snapshot'
+
+                    if data_gap:
+                        db.log_decision(
+                            session_id=self.session_id,
+                            symbol=symbol,
+                            signal='SKIP',
+                            confidence=0,
+                            indicators={},
+                            reasons=[],
+                            skip_reasons=[data_gap],
+                            live_price=live_price,
+                            nifty_level=nifty_level or 0,
+                            time_bucket=time_bucket,
+                        )
                         continue
 
                     analyzed_count += 1

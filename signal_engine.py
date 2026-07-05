@@ -28,6 +28,8 @@ class SignalEngine:
         )
 
         if not regime['can_trade']:
+            # Still snapshot indicators — training data needs to see what
+            # the brain saw even when the regime blocked trading.
             return {
                 'action': 'HOLD',
                 'confidence': 0,
@@ -36,7 +38,7 @@ class SignalEngine:
                 'stop_loss': round(live_price * 0.98, 2),
                 'target': round(live_price * 1.02, 2),
                 'risk_reward_ratio': 1.0,
-                'indicators': {},
+                'indicators': run_all_indicators(candles_15min) if candles_15min else {},
                 'regime': regime['regime'],
                 'market_bias': regime.get('market_bias', 'NEUTRAL'),
             }

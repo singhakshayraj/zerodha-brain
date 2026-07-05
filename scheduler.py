@@ -43,6 +43,33 @@ def _heartbeat_thread() -> None:
         time.sleep(30)
 
 
+def _should_autostart() -> bool:
+    """Autopilot gate: trading day, inside the 09:30-15:20 window, and no
+    session created yet today. Any session today — manual stop, loss limit,
+    token expiry — suppresses restart until tomorrow."""
+    if not config.AUTOPILOT:
+        return False
+
+    now = datetime.now(IST)
+    if now.weekday() > 4 or now.strftime('%Y-%m-%d') in config.NSE_HOLIDAYS:
+        return False
+
+    start = now.replace(
+        hour=config.MARKET_START_TRADING_HOUR,
+        minute=config.MARKET_START_TRADING_MINUTE,
+        second=0, microsecond=0,
+    )
+    close = now.replace(
+        hour=config.MARKET_CLOSE_HOUR,
+        minute=config.MARKET_CLOSE_MINUTE,
+        second=0, microsecond=0,
+    )
+    if not (start <= now < close):
+        return False
+
+    return not db.has_session_today()
+
+
 def run():
     global _is_trading
 
@@ -63,6 +90,11 @@ def run():
             # Daily 6:30 IST token refresh — no-op unless KITE_* creds set.
             token_refresher.maybe_daily_refresh()
             command = db.get_brain_command()
+
+            if command != 'START' and not _is_trading and _should_autostart():
+                print("[AUTOPILOT] Trading day, 09:30 window, no session yet — self-starting")
+                db.write_config('brain_status', 'START')
+                command = 'START'
 
             if command == 'START':
                 if _is_trading:
