@@ -20,6 +20,29 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# --- ERROR BUDGET ---
+# Consecutive control-plane failures. The heartbeat thread reports DEGRADED
+# past the threshold so the watchdog can alert on partial DB failures that
+# don't stop the heartbeat itself (errors otherwise only reach the logs).
+
+_consecutive_failures = 0
+DEGRADED_THRESHOLD = 5
+
+
+def _record_failure() -> None:
+    global _consecutive_failures
+    _consecutive_failures += 1
+
+
+def _record_success() -> None:
+    global _consecutive_failures
+    _consecutive_failures = 0
+
+
+def health_degraded() -> bool:
+    return _consecutive_failures >= DEGRADED_THRESHOLD
+
+
 # --- CONFIG ---
 
 def get_config(key: str):
@@ -37,7 +60,12 @@ def get_config_strict(key: str):
     None — callers that treat None as a state change (e.g. the scheduler's
     active_session_id re-verification) would end a healthy session on a single
     transient Supabase error. Use this where that distinction matters."""
-    res = supabase.table('app_config').select('value').eq('key', key).limit(1).execute()
+    try:
+        res = supabase.table('app_config').select('value').eq('key', key).limit(1).execute()
+    except Exception:
+        _record_failure()
+        raise
+    _record_success()
     if res.data and len(res.data) > 0:
         val = res.data[0].get('value')
         print(f"[database.get_config] key={key} found")
@@ -58,9 +86,11 @@ def write_config(key: str, value: str) -> None:
                 'updated_at': _now_iso(),
             }
             supabase.table('app_config').upsert(payload).execute()
+            _record_success()
             print(f"[database.write_config] OK key={key}")
             return
         except Exception as e:
+            _record_failure()
             print(
                 f"[database.write_config] error key={key} "
                 f"(attempt {attempt + 1}/3): {type(e).__name__}: {e}"

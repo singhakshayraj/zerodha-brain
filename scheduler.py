@@ -83,6 +83,12 @@ def _heartbeat_thread() -> None:
         try:
             with _heartbeat_lock:
                 s, c, m = _heartbeat_status, _heartbeat_cycle, _heartbeat_message
+            # Error budget: repeated control-plane failures surface as
+            # DEGRADED so the external watchdog alerts even while the
+            # heartbeat write itself still succeeds.
+            if db.health_degraded() and s in ('ONLINE', 'RUNNING'):
+                s = 'DEGRADED'
+                m = f"{m} | control-plane DB errors ≥{db.DEGRADED_THRESHOLD} consecutive"
             db.update_heartbeat(s, c, m)
         except Exception as e:
             print(f"[HEARTBEAT] error: {e}")
