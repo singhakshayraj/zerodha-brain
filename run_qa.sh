@@ -20,4 +20,4 @@ export SUPABASE_SERVICE_KEY="$SIM_SUPABASE_SERVICE_KEY"
 
 echo "[QA] Brain starting against SIM Supabase (fbfluafzxgynasvuryiu)"
 echo "[QA] QA_MODE=true PAPER_TRADING=true — synthetic market, paper fills"
-exec python3 main.py
+exec python3 -u main.py
