@@ -574,7 +574,8 @@ class TradingBrain:
             return
 
         result = self.order_manager.place_buy_order(
-            self.kite, symbol, exchange, quantity
+            self.kite, symbol, exchange, quantity,
+            **({'hint_price': live_price} if config.PAPER_TRADING else {})
         )
 
         if result:
@@ -678,7 +679,8 @@ class TradingBrain:
             return
 
         result = self.order_manager.place_short_order(
-            self.kite, symbol, exchange, quantity
+            self.kite, symbol, exchange, quantity,
+            **({'hint_price': live_price} if config.PAPER_TRADING else {})
         )
         if result:
             if live_price and result['price']:
@@ -735,7 +737,8 @@ class TradingBrain:
             return
 
         result = self.order_manager.cover_short_order(
-            self.kite, symbol, exchange, qty
+            self.kite, symbol, exchange, qty,
+            **({'hint_price': current_price} if config.PAPER_TRADING else {})
         )
         if result:
             entry_value = trade.get('entry_value') or 0
@@ -871,6 +874,7 @@ class TradingBrain:
             trade['symbol'],
             trade['exchange'],
             trade['quantity'],
+            **({'hint_price': current_price} if config.PAPER_TRADING else {})
         )
 
         if result:

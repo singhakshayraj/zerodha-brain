@@ -70,10 +70,18 @@ class PaperBroker:
             return None
 
     def _fill(self, kite: KiteClient, symbol: str, exchange: str,
-              quantity: int, side: str):
+              quantity: int, side: str, hint_price: float = None):
         """Simulate a MARKET fill at live LTP adjusted for slippage.
-        side: 'BUY' pays up, 'SELL' receives less — always adverse."""
+        side: 'BUY' pays up, 'SELL' receives less — always adverse.
+
+        hint_price: the live price the brain already fetched when it made the
+        decision (holdings cache / candle close). Used when the LTP quote
+        endpoint is unavailable — /quote does not work with retail enctoken
+        auth (see TRADING_MODE_FORCE in config.py), so without this fallback
+        every paper fill fails."""
         ltp = self._live_price(kite, symbol, exchange)
+        if ltp is None and hint_price and hint_price > 0:
+            ltp = hint_price
         if ltp is None:
             print(f"[PAPER] {side} order failed for {symbol}: no live price")
             if self.session_id:
@@ -116,26 +124,26 @@ class PaperBroker:
     # ── OrderManager-compatible interface ────────────────────────────────────
 
     def place_buy_order(self, kite: KiteClient, symbol: str, exchange: str,
-                        quantity: int):
+                        quantity: int, hint_price: float = None):
         print(f"[PAPER] BUY order: {symbol} x{quantity}")
-        return self._fill(kite, symbol, exchange, quantity, 'BUY')
+        return self._fill(kite, symbol, exchange, quantity, 'BUY', hint_price)
 
     def place_sell_order(self, kite: KiteClient, symbol: str, exchange: str,
-                         quantity: int):
+                         quantity: int, hint_price: float = None):
         # No CNC safety lock needed: nothing real can be sold. The brain only
         # calls this to close paper longs it opened itself.
         print(f"[PAPER] SELL order: {symbol} x{quantity}")
-        return self._fill(kite, symbol, exchange, quantity, 'SELL')
+        return self._fill(kite, symbol, exchange, quantity, 'SELL', hint_price)
 
     def place_short_order(self, kite: KiteClient, symbol: str, exchange: str,
-                          quantity: int):
+                          quantity: int, hint_price: float = None):
         print(f"[PAPER] SHORT order: {symbol} x{quantity}")
-        return self._fill(kite, symbol, exchange, quantity, 'SELL')
+        return self._fill(kite, symbol, exchange, quantity, 'SELL', hint_price)
 
     def cover_short_order(self, kite: KiteClient, symbol: str, exchange: str,
-                          quantity: int):
+                          quantity: int, hint_price: float = None):
         print(f"[PAPER] COVER order: {symbol} x{quantity}")
-        return self._fill(kite, symbol, exchange, quantity, 'BUY')
+        return self._fill(kite, symbol, exchange, quantity, 'BUY', hint_price)
 
     def square_off_all(self, kite: KiteClient, open_trades: list) -> None:
         print(f"[PAPER] Squaring off {len(open_trades)} open positions")
