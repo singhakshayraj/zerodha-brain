@@ -184,6 +184,21 @@ def run():
                             db.write_config('brain_status', 'IDLE')
                             break
 
+                        # A STOP can be overwritten by a quick START while we
+                        # sleep between cycles (single mutable command key) —
+                        # observed live 2026-07-06: stop→start within seconds
+                        # left the brain trading a ghost session the dashboard
+                        # couldn't see. Re-verify we're still the active one.
+                        active_id = db.get_config('active_session_id')
+                        if active_id != session_id:
+                            print(
+                                f"[SCHEDULER] Session {session_id} no longer "
+                                f"active (active={active_id!r}) — ending"
+                            )
+                            brain.end_session('EXTERNAL_STOP')
+                            db.write_config('brain_status', 'IDLE')
+                            break
+
                         _set_heartbeat(
                             'RUNNING',
                             brain.cycle_count,
