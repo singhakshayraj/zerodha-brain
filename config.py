@@ -69,6 +69,20 @@ GIT_SHA = _resolve_git_sha()
 RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', '1.0'))
 DAILY_STOP_R = float(os.getenv('DAILY_STOP_R', '3'))
 
+# Trend-day tells (ENGINEERING_SPEC REQ-052, §3). Computed + logged on every
+# decision during the paper run (non-gating); entry-gating flips on later.
+TREND_TELLS_REQUIRED = int(os.getenv('TREND_TELLS_REQUIRED', '3'))   # of 4
+VWAP_PERSISTENCE_FRAC = float(os.getenv('VWAP_PERSISTENCE_FRAC', '0.7'))
+RANGE_EXPANSION_THRESHOLD = float(os.getenv('RANGE_EXPANSION_THRESHOLD', '0.6'))
+
+# Data-quality gate (REQ-050 step 0). Stale-quote ceiling; default 2× the
+# 300s poll interval.
+STALE_QUOTE_MAX_S = int(os.getenv('STALE_QUOTE_MAX_S', '600'))
+
+# In-play engine (REQ §2.1/M3). Top-N by opening-range RVOL, locked 09:30.
+INPLAY_CAP = int(os.getenv('INPLAY_CAP', '10'))
+RVOL_THRESHOLD = float(os.getenv('RVOL_THRESHOLD', '2.0'))
+
 # Paper trading: real market data + real decisions, simulated fills.
 # No Kite orders are ever placed when true. See paper_broker.py.
 PAPER_TRADING = os.getenv('PAPER_TRADING', 'false').strip().lower() == 'true'

@@ -734,6 +734,57 @@ def update_stock_score(symbol: str, is_winner: bool, pnl: float) -> None:
         print(f"[database.update_stock_score] error {symbol}: {type(e).__name__}: {e}")
 
 
+# --- M3 DATA LAYER (level pack, profiles, in-play) ---
+
+def upsert_level_pack(row: dict) -> None:
+    try:
+        supabase.table('level_pack').upsert(
+            row, on_conflict='symbol,date').execute()
+        print(f"[level_pack] upsert {row.get('symbol')} {row.get('date')}")
+    except Exception as e:
+        print(f"[database.upsert_level_pack] error {row.get('symbol')}: {e}")
+
+
+def upsert_stock_profile(row: dict) -> None:
+    try:
+        supabase.table('stock_profile').upsert(
+            row, on_conflict='symbol,asof_date').execute()
+        print(f"[stock_profile] upsert {row.get('symbol')} {row.get('asof_date')}")
+    except Exception as e:
+        print(f"[database.upsert_stock_profile] error {row.get('symbol')}: {e}")
+
+
+def lock_inplay_list(date: str, ranked: list) -> int:
+    """Write the day's in-play set (idempotent per date+symbol)."""
+    written = 0
+    for c in ranked:
+        try:
+            supabase.table('inplay_list').upsert({
+                'date': date,
+                'rank': c.get('rank'),
+                'symbol': c.get('symbol'),
+                'or_rvol': c.get('or_rvol'),
+                'gap_pct': c.get('gap_pct'),
+                'or_high': c.get('or_high'),
+                'or_low': c.get('or_low'),
+            }, on_conflict='date,symbol').execute()
+            written += 1
+        except Exception as e:
+            print(f"[database.lock_inplay_list] error {c.get('symbol')}: {e}")
+    print(f"[inplay] locked {written} symbols for {date}")
+    return written
+
+
+def get_inplay_symbols(date: str) -> list:
+    try:
+        res = (supabase.table('inplay_list').select('symbol')
+               .eq('date', date).order('rank').execute())
+        return [r['symbol'] for r in (res.data or [])]
+    except Exception as e:
+        print(f"[database.get_inplay_symbols] error: {e}")
+        return []
+
+
 def add_holdings_to_universe(holdings: list) -> None:
     for h in holdings:
         try:

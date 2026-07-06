@@ -5,8 +5,10 @@ from datetime import datetime
 import pytz
 
 import config
+import data_quality
 import database as db
 import logger
+import trend_tells
 from kite_client import KiteClient, TokenExpiredError
 from market_data import MarketData
 from order_manager import OrderManager
@@ -40,6 +42,64 @@ def _derive_reason_code(signal: dict) -> str:
         if 'nifty in downtrend' in r or 'nifty in uptrend' in r:
             return 'NIFTY_DIRECTION_BLOCK'
     return 'HOLD_OTHER'
+
+
+def _dates_in(candles: list) -> list:
+    """Ordered unique trade-dates present in a candle list (timestamps look
+    like '2026-07-07T09:15:00+0530')."""
+    seen = []
+    for c in candles or []:
+        ts = c.get('timestamp') or ''
+        day = ts[:10]
+        if day and (not seen or seen[-1] != day):
+            seen.append(day)
+    return seen
+
+
+def _compute_trend_tells(signal: dict, candles_5min: list, live_price: float) -> dict:
+    """Best-effort trend-tell snapshot for logging (REQ-052). Never raises —
+    a data gap just means more tells abstain. Non-gating during the paper
+    run; the result rides along in the decision row for later validation."""
+    try:
+        action = signal.get('action')
+        direction = 'UP' if action == 'BUY' else 'DOWN' if action == 'SELL' else None
+        if direction is None and candles_5min:
+            # derive a direction from short-run momentum so HOLD rows still
+            # carry a comparable snapshot
+            first, last = candles_5min[0]['close'], candles_5min[-1]['close']
+            direction = 'UP' if last >= first else 'DOWN'
+
+        days = _dates_in(candles_5min)
+        today = days[-1] if days else None
+        today_candles = [c for c in (candles_5min or [])
+                         if (c.get('timestamp') or '')[:10] == today] if today else []
+        prior_candles = [c for c in (candles_5min or [])
+                         if (c.get('timestamp') or '')[:10] != today] if today else []
+
+        today_open = today_candles[0]['open'] if today_candles else None
+        prev_close = prior_candles[-1]['close'] if prior_candles else None
+
+        # avg prior-session range across the prior dates present
+        prior_ranges = []
+        for d in days[:-1]:
+            day_c = [c for c in candles_5min if (c.get('timestamp') or '')[:10] == d]
+            r = trend_tells.session_range(day_c)
+            if r is not None:
+                prior_ranges.append(r)
+        avg_range = sum(prior_ranges) / len(prior_ranges) if prior_ranges else None
+
+        return trend_tells.evaluate(
+            direction=direction or 'UP',
+            candles_5min=today_candles or candles_5min,
+            prev_close=prev_close, today_open=today_open,
+            current_price=live_price,
+            today_range=trend_tells.session_range(today_candles or candles_5min),
+            avg_range=avg_range,
+            # breadth/sector unavailable with retail enctoken → abstain
+        )
+    except Exception as e:
+        print(f"[trend_tells] compute failed (non-fatal): {e}")
+        return {}
 
 
 def _r_multiple(trade: dict, pnl: float):
@@ -435,6 +495,27 @@ class TradingBrain:
                         )
                         continue
 
+                    # REQ-050 step 0: quarantine bad data before it can
+                    # become a trade. Cross-check the live price against the
+                    # latest candle close; a >20% gap is almost always a
+                    # wrong token or corrupt quote, not a real move.
+                    last_close = (candles_15min[-1]['close']
+                                  if candles_15min else None)
+                    dq_ok, dq_reason = data_quality.check_quote(
+                        live_price, last_candle_close=last_close)
+                    if not dq_ok:
+                        print(f"[dq] QUARANTINE {symbol}: {dq_reason} "
+                              f"(price=₹{live_price} close=₹{last_close})")
+                        db.log_decision(
+                            session_id=self.session_id, symbol=symbol,
+                            signal='SKIP', confidence=0, indicators={},
+                            reasons=[], skip_reasons=[dq_reason],
+                            live_price=live_price, nifty_level=nifty_level or 0,
+                            time_bucket=time_bucket, reason_code=dq_reason,
+                            config_hash=self.config_hash, git_sha=config.GIT_SHA,
+                        )
+                        continue
+
                     analyzed_count += 1
                     stock_time = time.time() - stock_start
                     if stock_time > 2:
@@ -499,6 +580,8 @@ class TradingBrain:
                         reason_code=_derive_reason_code(signal),
                         config_hash=self.config_hash,
                         git_sha=config.GIT_SHA,
+                        trend_tells=_compute_trend_tells(
+                            signal, candles_5min or [], live_price),
                     )
 
                     ind = signal.get('indicators') or {}
