@@ -164,24 +164,33 @@ def run():
                     interval = session_config.get('tradeIntervalSeconds', 300)
                     print(f"Brain running. Interval: {interval}s")
 
+                    def _end(reason: str, call_end_session: bool = True) -> None:
+                        # The brain owns the whole session teardown: square-off
+                        # + stats via end_session, then release the pointers the
+                        # dashboard keys off. Leaving active_session_id set
+                        # after MARKET_CLOSED/loss-limit ends caused stale
+                        # "running" UIs and resurrection bugs.
+                        if call_end_session:
+                            brain.end_session(reason)
+                        db.write_config('active_session_id', '')
+                        db.write_config('brain_status', 'IDLE')
+
                     while True:
                         command = db.get_brain_command()
 
                         if command == 'STOP':
                             print("STOP command received")
-                            brain.end_session('MANUAL_STOP')
-                            db.write_config('brain_status', 'IDLE')
+                            _end('MANUAL_STOP')
                             break
 
                         if not risk_manager.is_market_open():
                             print("Market closed. Ending session.")
-                            brain.end_session('MARKET_CLOSED')
-                            db.write_config('brain_status', 'IDLE')
+                            _end('MARKET_CLOSED')
                             break
 
                         if brain._session_ended:
                             print("[SCHEDULER] Brain ended session internally.")
-                            db.write_config('brain_status', 'IDLE')
+                            _end('INTERNAL', call_end_session=False)
                             break
 
                         # A STOP can be overwritten by a quick START while we
@@ -195,8 +204,7 @@ def run():
                                 f"[SCHEDULER] Session {session_id} no longer "
                                 f"active (active={active_id!r}) — ending"
                             )
-                            brain.end_session('EXTERNAL_STOP')
-                            db.write_config('brain_status', 'IDLE')
+                            _end('EXTERNAL_STOP')
                             break
 
                         _set_heartbeat(
@@ -209,8 +217,19 @@ def run():
 
                         brain.run_cycle()
 
-                        print(f"Sleeping {interval}s until next cycle...")
-                        time.sleep(interval)
+                        # Sleep in short slices so a STOP is obeyed in seconds,
+                        # not at the next 5-minute cycle boundary — the blind
+                        # 300s sleep was the race window behind the lost-STOP
+                        # ghost session.
+                        slept = 0
+                        while slept < interval:
+                            time.sleep(min(10, interval - slept))
+                            slept += 10
+                            cmd = db.get_brain_command()
+                            active_now = db.get_config('active_session_id')
+                            if cmd == 'STOP' or active_now != session_id:
+                                print(f"[SCHEDULER] Wake early: cmd={cmd} active={active_now!r}")
+                                break
 
                 finally:
                     _is_trading = False
