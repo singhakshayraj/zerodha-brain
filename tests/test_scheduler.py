@@ -33,7 +33,7 @@ def _run_scheduler(commands, token='tok', session_config=_UNSET,
     scheduler._is_trading = False  # reset global
 
     if session_config is _UNSET:
-        session_config = {'capitalDeployed': 10000, 'tradeIntervalSeconds': 1}
+        session_config = {'capitalDeployed': 10000, 'maxLossPercent': 5, 'tradeIntervalSeconds': 1}
     if session_row is _UNSET:
         session_row = {'id': 'sess-sch-001'}
     if brain is _UNSET:
@@ -154,7 +154,7 @@ def test_running_command_resumes_existing_session_without_duplicating():
 
     with patch('scheduler.db.get_brain_command', side_effect=get_cmd), \
          patch('scheduler.db.get_enc_token', return_value='tok'), \
-         patch('scheduler.db.get_session_config', return_value={'capitalDeployed': 10000, 'tradeIntervalSeconds': 1}), \
+         patch('scheduler.db.get_session_config', return_value={'capitalDeployed': 10000, 'maxLossPercent': 5, 'tradeIntervalSeconds': 1}), \
          patch('scheduler.db.get_config', side_effect=get_config_side_effect), \
          patch('scheduler.db.get_session_by_id', return_value=existing_session), \
          patch('scheduler.db.create_session') as mock_create, \
@@ -182,7 +182,7 @@ def test_start_command_with_no_existing_session_creates_new_one():
 
     with patch('scheduler.db.get_brain_command', side_effect=['START', 'STOP', KeyboardInterrupt]), \
          patch('scheduler.db.get_enc_token', return_value='tok'), \
-         patch('scheduler.db.get_session_config', return_value={'capitalDeployed': 10000, 'tradeIntervalSeconds': 1}), \
+         patch('scheduler.db.get_session_config', return_value={'capitalDeployed': 10000, 'maxLossPercent': 5, 'tradeIntervalSeconds': 1}), \
          patch('scheduler.db.get_config', side_effect=get_config_side_effect), \
          patch('scheduler.db.get_session_by_id', return_value=None), \
          patch('scheduler.db.create_session', return_value={'id': 'new-sess-1'}) as mock_create, \

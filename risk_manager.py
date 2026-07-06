@@ -188,6 +188,20 @@ class RiskManager:
             unrealized = session_stats.get('unrealized_pnl', 0) or 0
             loss_check_pnl = total_pnl + min(0.0, unrealized)
 
+            # Operational daily stop (REQ-003): DAILY_STOP_R × R fires
+            # BEFORE the session floor on any normal day. R =
+            # risk_per_trade_pct of capital. The floor (maxLossPercent,
+            # checked below) firing first means this stop failed = incident.
+            r_inr = capital * config.RISK_PER_TRADE_PCT / 100
+            daily_stop_inr = config.DAILY_STOP_R * r_inr
+            if loss_check_pnl <= -daily_stop_inr:
+                return {
+                    'can_trade': False,
+                    'reason': f'DAILY_STOP_3R: P&L ₹{loss_check_pnl:.2f} '
+                              f'breached -{config.DAILY_STOP_R}R '
+                              f'(-₹{daily_stop_inr:.2f})',
+                }
+
             check = TradingPrinciples.should_continue_trading(
                 current_session_pnl=loss_check_pnl,
                 session_capital=capital,

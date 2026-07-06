@@ -135,6 +135,16 @@ def evaluate(state: dict, now_ist: datetime) -> list:
                 f"⚠️ Brain reports {hb.get('status')}: {hb.get('message')}",
             ))
 
+    # REQ-072: code changed under a running session (push during market
+    # hours). Dedup key includes the incident text, so each distinct
+    # incident alerts once regardless of the 30-min window.
+    incident = state.get('deploy_incident')
+    if incident:
+        alerts.append((
+            f"deploy-incident-{incident[:40]}",
+            f"⚠️ Deploy during session (REQ-072): {incident}",
+        ))
+
     if state.get('brain_status') == 'TOKEN_EXPIRED':
         alerts.append((
             'token-expired',
@@ -171,12 +181,13 @@ def fetch_state(sb) -> dict:
     try:
         res = (
             sb.table('app_config').select('key,value')
-            .in_('key', ['brain_status', 'active_session_id'])
+            .in_('key', ['brain_status', 'active_session_id', 'deploy_incident'])
             .execute()
         )
         cfg = {r['key']: r['value'] for r in (res.data or [])}
         state['brain_status'] = cfg.get('brain_status')
         state['active_session_id'] = cfg.get('active_session_id') or None
+        state['deploy_incident'] = cfg.get('deploy_incident') or None
     except Exception as e:
         print(f"[watchdog] config fetch failed: {e}")
 
@@ -216,7 +227,16 @@ def main():
             now_ist = datetime.now(IST)
             state = fetch_state(sb)
             for alert_key, message in evaluate(state, now_ist):
-                send_alert(alert_key, message)
+                sent = send_alert(alert_key, message)
+                # Deploy incidents are one-shot: consume the flag once
+                # alerted so it doesn't re-fire every dedup window.
+                if sent and alert_key.startswith('deploy-incident-'):
+                    try:
+                        sb.table('app_config').upsert(
+                            {'key': 'deploy_incident', 'value': ''}
+                        ).execute()
+                    except Exception as e:
+                        print(f"[watchdog] failed to clear deploy_incident: {e}")
         except Exception as e:
             print(f"[watchdog] loop error: {e}")
         time.sleep(CHECK_INTERVAL_SECONDS)

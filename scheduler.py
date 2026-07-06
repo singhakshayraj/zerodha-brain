@@ -55,6 +55,53 @@ def _session_still_active(session_id: str) -> bool:
     return True
 
 
+def _config_from_session_row(row: dict) -> dict:
+    """Rebuild the effective session config from the immutable session row.
+    On resume this — not the mutable session_config app_config key — is the
+    source of truth, so a mid-session config write can never change a
+    running session's tunables (REQ-004/031)."""
+    return {
+        'capitalDeployed': float(row.get('capital_deployed') or 0),
+        'maxTrades': int(row.get('max_trades') or 25),
+        'maxLossPercent': float(row.get('max_loss_percent') or 5),
+        'maxProfitPercent': float(row.get('max_profit_percent') or 15),
+        'tradeIntervalSeconds': int(row.get('trade_interval_seconds') or 300),
+        'stockUniverse': str(row.get('stock_universe') or 'BOTH'),
+    }
+
+
+def _validate_session_config(cfg: dict) -> str:
+    """REQ-005 sanity checks at load. Returns an error string, or '' if OK."""
+    capital = float(cfg.get('capitalDeployed') or 0)
+    max_loss_pct = float(cfg.get('maxLossPercent') or 0)
+
+    if capital <= 0:
+        return f"capitalDeployed must be > 0 (got {capital})"
+
+    # The operational 3R stop must sit inside the floor, or the floor would
+    # fire first on a normal day (REQ-003 inverts: floor firing = incident).
+    daily_stop_pct = config.DAILY_STOP_R * config.RISK_PER_TRADE_PCT
+    if max_loss_pct < daily_stop_pct:
+        return (
+            f"maxLossPercent {max_loss_pct}% is inside the operational "
+            f"daily stop ({config.DAILY_STOP_R}R = {daily_stop_pct}%) — "
+            f"floor must be the outer boundary"
+        )
+
+    # Minimum position size must not force per-trade risk above budget.
+    # Conservative assumption: a stop ~2% away from entry on a min-size
+    # position; that risk must fit in risk_per_trade_pct of capital.
+    min_pos_risk = config.MIN_POSITION_VALUE * 0.02
+    risk_budget = capital * config.RISK_PER_TRADE_PCT / 100
+    if min_pos_risk > risk_budget:
+        return (
+            f"capital ₹{capital:.0f} too small: min position "
+            f"₹{config.MIN_POSITION_VALUE} at a 2% stop risks "
+            f"₹{min_pos_risk:.0f} > per-trade budget ₹{risk_budget:.0f}"
+        )
+    return ''
+
+
 def _handle_sigterm(signum, frame):
     # Railway redeploy/restart. Exit fast WITHOUT tearing the session down:
     # the replacement process sees status RUNNING and resumes it. Squaring
@@ -209,7 +256,38 @@ def run():
                     if is_resume:
                         session_id = existing_id
                         print(f"[SCHEDULER] Resuming existing RUNNING session {session_id} (brain restart)")
+                        # Immutable config: rebuild from the session row, not
+                        # the mutable session_config key (REQ-004/031).
+                        session_config = _config_from_session_row(existing)
+                        session_config['configHash'] = existing.get('config_hash')
+
+                        # REQ-072 deploy-freeze guard: a resume under a
+                        # different SHA means code changed mid-session
+                        # (push during market hours). Resume anyway — safety
+                        # first — but raise a watchdog-visible incident.
+                        old_sha = existing.get('git_sha')
+                        if old_sha and old_sha != config.GIT_SHA:
+                            msg = (
+                                f"code changed mid-session: {old_sha} -> "
+                                f"{config.GIT_SHA} (session {session_id})"
+                            )
+                            print(f"[SCHEDULER] REQ-072 INCIDENT: {msg}")
+                            db.write_config(
+                                'deploy_incident',
+                                f"{datetime.now(IST).isoformat()} {msg}",
+                            )
+                            db.log_brain_activity(
+                                session_id, 'ERROR',
+                                message=f"[REQ-072] {msg}",
+                            )
                     else:
+                        err = _validate_session_config(session_config)
+                        if err:
+                            print(f"[SCHEDULER] Config sanity check FAILED: {err}")
+                            _set_heartbeat('ERROR', 0, f"Config rejected: {err}")
+                            db.write_config('brain_status', 'IDLE')
+                            time.sleep(30)
+                            continue
                         print("[SCHEDULER] Creating session in DB...")
                         session = db.create_session(session_config)
 
@@ -222,6 +300,7 @@ def run():
 
                         session_id = session['id']
                         print(f"[SCHEDULER] Session ready: {session_id}")
+                        session_config['configHash'] = session.get('config_hash')
                         db.write_config('active_session_id', session_id)
 
                     session_config['sessionId'] = session_id

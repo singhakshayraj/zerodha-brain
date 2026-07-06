@@ -1,3 +1,4 @@
+import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
@@ -172,6 +173,8 @@ ALLOWED_SESSION_COLUMNS = {
     'trade_interval_seconds',
     'stock_universe',
     'status',
+    'config_hash',
+    'git_sha',
 }
 
 
@@ -190,6 +193,14 @@ def get_session_by_id(session_id: str):
         return None
 
 
+def config_hash(session_config: dict) -> str:
+    """Stable hash of the session's effective config (REQ-004): canonical
+    JSON, sorted keys, 12 hex chars. Logged on the session row and every
+    decision row so any mid-experiment tunable change is visible in data."""
+    canonical = json.dumps(session_config, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:12]
+
+
 def create_session(session_config: dict):
     try:
         print(f"[DB] Raw config received: {session_config}")
@@ -204,6 +215,13 @@ def create_session(session_config: dict):
             'stock_universe': str(session_config.get('stockUniverse', 'BOTH')),
             'status': 'RUNNING',
         }
+
+        # Hash the NORMALIZED tunables (not the raw payload) so a config
+        # rebuilt from this row on resume hashes identically (REQ-004/031).
+        data['config_hash'] = config_hash(
+            {k: v for k, v in data.items() if k != 'status'}
+        )
+        data['git_sha'] = config.GIT_SHA
 
         # Defensive sanitize: drop any key not in whitelist
         data = {k: v for k, v in data.items() if k in ALLOWED_SESSION_COLUMNS}

@@ -18,6 +18,43 @@ from trading_principles import TradingPrinciples
 IST = pytz.timezone('Asia/Kolkata')
 
 
+def _derive_reason_code(signal: dict) -> str:
+    """Machine-readable code for why a decision was NOT an entry
+    (ENGINEERING_SPEC REQ-050). Derived from the engine's free-text
+    skip_reasons — first match wins, mirroring the engine's own ordering.
+    Entries (BUY/SELL) get no code."""
+    if signal.get('action') in ('BUY', 'SELL'):
+        return None
+    for reason in signal.get('skip_reasons') or []:
+        r = reason.lower()
+        if 'choppy' in r:
+            return 'REGIME_CHOPPY'
+        if 'regime' in r and 'not suitable' in r:
+            return 'REGIME_UNSUITABLE'
+        if 'weak_trend' in r:
+            return 'WEAK_TREND_CONFIDENCE'
+        if 'r:r' in r or 'risk' in r and 'reward' in r:
+            return 'RR_BELOW_MIN'
+        if 'below thresholds' in r:
+            return 'LOW_CONFIDENCE'
+        if 'nifty in downtrend' in r or 'nifty in uptrend' in r:
+            return 'NIFTY_DIRECTION_BLOCK'
+    return 'HOLD_OTHER'
+
+
+def _r_multiple(trade: dict, pnl: float):
+    """Signed R-multiple: pnl / (entry-to-stop risk in ₹) — REQ-061. The
+    unit every spec metric (expectancy, PF, daily 3R stop) is defined in.
+    None when the trade has no usable stop/entry (can't divide by zero)."""
+    entry = trade.get('entry_price')
+    stop = trade.get('stop_loss_price')
+    qty = trade.get('quantity') or 0
+    if not entry or not stop or qty <= 0:
+        return None  # a None stop must not read as stop=0 (bogus huge risk)
+    risk_inr = abs(entry - stop) * qty
+    return round(pnl / risk_inr, 3) if risk_inr > 0 else None
+
+
 class TradingBrain:
 
     def __init__(self):
@@ -34,6 +71,7 @@ class TradingBrain:
             self.order_manager = OrderManager()
         self.session_config = None
         self.session_id = None
+        self.config_hash = None
         self.session_stats = {
             'trades_executed': 0,
             'total_pnl': 0.0,
@@ -95,6 +133,7 @@ class TradingBrain:
             self.market_data = MarketData(self.kite)
             self.session_config = session_config
             self.session_id = session_config.get('sessionId')
+            self.config_hash = session_config.get('configHash')
 
             try:
                 print("Building instrument map...")
@@ -387,6 +426,12 @@ class TradingBrain:
                             live_price=live_price,
                             nifty_level=nifty_level or 0,
                             time_bucket=time_bucket,
+                            reason_code=(
+                                'DATA_GAP_CANDLES' if not candles_15min
+                                else 'DATA_GAP_PRICE'
+                            ),
+                            config_hash=self.config_hash,
+                            git_sha=config.GIT_SHA,
                         )
                         continue
 
@@ -451,6 +496,9 @@ class TradingBrain:
                         risk_reward=signal.get('risk_reward_ratio'),
                         regime=signal.get('regime', 'UNKNOWN'),
                         market_bias=signal.get('market_bias', 'NEUTRAL'),
+                        reason_code=_derive_reason_code(signal),
+                        config_hash=self.config_hash,
+                        git_sha=config.GIT_SHA,
                     )
 
                     ind = signal.get('indicators') or {}
@@ -799,6 +847,7 @@ class TradingBrain:
                 'exit_reason': 'COVER_SHORT',
                 'pnl': pnl,
                 'pnl_percent': pnl_pct,
+                'r_multiple': _r_multiple(trade, pnl),
             })
             db.update_stock_score(symbol, is_winner=pnl > 0, pnl=pnl)
             self.session_stats['total_pnl'] += pnl
@@ -968,6 +1017,7 @@ class TradingBrain:
                 'exit_reason': exit_reason,
                 'pnl': pnl,
                 'pnl_percent': pnl_pct,
+                'r_multiple': _r_multiple(trade, pnl),
             })
 
             db.update_stock_score(trade['symbol'], is_winner=pnl > 0, pnl=pnl)
@@ -1095,6 +1145,7 @@ class TradingBrain:
                         'exit_reason': 'SQUARE_OFF_FAILED',
                         'pnl': pnl,
                         'pnl_percent': pnl_pct,
+                        'r_multiple': _r_multiple(t, pnl),
                     })
 
         logger.info(

@@ -41,6 +41,34 @@ HEARTBEAT_INTERVAL_SECONDS = 60
 MARKET_CONTEXT_INTERVAL_SECONDS = 900  # 15 minutes
 BRAIN_VERSION = '1.0.0'
 
+
+def _resolve_git_sha() -> str:
+    """Deployed SHA for decision-row traceability (ENGINEERING_SPEC REQ-020,
+    REQ-072). Railway injects RAILWAY_GIT_COMMIT_SHA on repo deploys; local
+    runs fall back to git; tarball deploys report 'unknown'."""
+    sha = os.getenv('RAILWAY_GIT_COMMIT_SHA') or os.getenv('GIT_SHA')
+    if sha:
+        return sha[:12]
+    try:
+        import subprocess
+        return subprocess.run(
+            ['git', 'rev-parse', '--short=12', 'HEAD'],
+            capture_output=True, text=True, timeout=5,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        ).stdout.strip() or 'unknown'
+    except Exception:
+        return 'unknown'
+
+
+GIT_SHA = _resolve_git_sha()
+
+# Risk units (ENGINEERING_SPEC §3). R = risk_per_trade_pct of capital.
+# Operational daily stop is DAILY_STOP_R * R — it must fire BEFORE the
+# session floor (maxLossPercent) on any normal day; the floor firing first
+# is an incident (REQ-003).
+RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', '1.0'))
+DAILY_STOP_R = float(os.getenv('DAILY_STOP_R', '3'))
+
 # Paper trading: real market data + real decisions, simulated fills.
 # No Kite orders are ever placed when true. See paper_broker.py.
 PAPER_TRADING = os.getenv('PAPER_TRADING', 'false').strip().lower() == 'true'
