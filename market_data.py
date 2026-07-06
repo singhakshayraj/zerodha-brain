@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import pytz
 
 import config
-from kite_client import KiteClient
+from kite_client import KiteClient, TokenExpiredError
 
 INDEX_BLOCKLIST = ('NIFTY', 'SENSEX', 'BANKNIFTY', 'FINNIFTY')
 
@@ -62,6 +62,8 @@ class MarketData:
             self._holdings_cache_time = now
             print(f"[market_data] Cached {len(self._holdings_cache)} holdings")
             return True
+        except TokenExpiredError:
+            raise
         except Exception as e:
             print(f"[market_data] Holdings cache error: {e}")
             return False
@@ -98,6 +100,10 @@ class MarketData:
             self._candle_cache[cache_key] = candles
             self._candle_cache_time[cache_key] = now
             return candles
+        except TokenExpiredError:
+            # Must propagate: swallowing it turned an expired token into
+            # universal empty-candle SKIPs — a silent stall (REQ-083).
+            raise
         except Exception as e:
             print(f"[market_data.get_candles] error for {symbol}: {e}")
             return self._candle_cache.get(cache_key, [])
@@ -134,6 +140,8 @@ class MarketData:
                 for c in candles_raw
                 if len(c) >= 6
             ]
+        except TokenExpiredError:
+            raise
         except Exception as e:
             print(f"[market_data._get_historical] failed: {e}")
             return []
@@ -203,6 +211,8 @@ class MarketData:
                     'instrument_token': token,
                 }
                 return last_price
+        except TokenExpiredError:
+            raise
         except Exception as e:
             print(f"[nifty50_price] Error for {symbol}: {e}")
         return None
@@ -231,6 +241,8 @@ class MarketData:
                             f"({deviation*100:.1f}% deviation)"
                         )
                         mismatches.append((symbol, token, last_price, cached_price))
+            except TokenExpiredError:
+                raise
             except Exception as e:
                 print(f"[token_verify] {symbol} error: {e}")
         return mismatches

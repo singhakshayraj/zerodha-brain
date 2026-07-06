@@ -10,6 +10,7 @@ Implements only the surface the brain actually touches:
   _get('/instruments/historical/<token>/<interval>', ...)
 """
 
+import os
 import random
 import time
 from datetime import datetime, timedelta
@@ -17,6 +18,7 @@ from datetime import datetime, timedelta
 import pytz
 
 import config
+from kite_client import KiteAPIError, TokenExpiredError
 
 IST = pytz.timezone('Asia/Kolkata')
 
@@ -35,7 +37,44 @@ class FakeKiteClient:
         }
         self._state = {}  # symbol -> {'price','trend','vol','base'}
         self._seed = int(time.time())
-        print(f"[QA] FakeKiteClient active — synthetic market, seed={self._seed}")
+        # Chaos fault injection (REQ-083). QA_FAULT="kind@N": after N market
+        # data fetches, start injecting the fault. Kinds:
+        #   token_expiry@N        raise TokenExpiredError once N reached
+        #   network_drop@N        raise KiteAPIError for a burst then recover
+        #   network_drop_hard@N   raise KiteAPIError permanently from N on
+        self._fault_kind, self._fault_after = self._parse_fault()
+        self._fetches = 0
+        print(
+            f"[QA] FakeKiteClient active — synthetic market, seed={self._seed}"
+            + (f", fault={self._fault_kind}@{self._fault_after}" if self._fault_kind else "")
+        )
+
+    @staticmethod
+    def _parse_fault():
+        spec = os.getenv('QA_FAULT', '').strip()
+        if not spec or '@' not in spec:
+            return None, 0
+        kind, _, n = spec.partition('@')
+        try:
+            return kind, int(n)
+        except ValueError:
+            return None, 0
+
+    def _maybe_fault(self):
+        if not self._fault_kind:
+            return
+        self._fetches += 1
+        if self._fetches < self._fault_after:
+            return
+        n = self._fetches - self._fault_after
+        if self._fault_kind == 'token_expiry':
+            raise TokenExpiredError("[QA_FAULT] injected token expiry")
+        if self._fault_kind == 'network_drop':
+            # transient: fail a 3-fetch burst, then recover
+            if n < 3:
+                raise KiteAPIError("[QA_FAULT] injected transient network drop")
+        if self._fault_kind == 'network_drop_hard':
+            raise KiteAPIError("[QA_FAULT] injected sustained network drop")
 
     # ── price engine ─────────────────────────────────────────────────────────
 
@@ -120,6 +159,7 @@ class FakeKiteClient:
         return {'user_id': 'QA0000', 'user_name': 'QA Harness'}
 
     def get_ltp(self, symbols: list) -> dict:
+        self._maybe_fault()
         out = {}
         for instrument in symbols:
             sym = instrument if instrument.startswith('NSE:') else f'NSE:{instrument}'
@@ -132,6 +172,7 @@ class FakeKiteClient:
 
     def _get(self, path: str, params: dict = None, raw: bool = False):
         if '/instruments/historical/' in path:
+            self._maybe_fault()
             parts = path.strip('/').split('/')
             token = int(parts[2])
             interval = parts[3]

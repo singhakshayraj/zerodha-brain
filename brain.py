@@ -583,6 +583,11 @@ class TradingBrain:
 
                     time.sleep(0.5)
 
+                except TokenExpiredError:
+                    # Must reach the cycle-level handler (below) to end the
+                    # session + raise the durable token incident — otherwise
+                    # it looks like a per-symbol data gap and stalls silently.
+                    raise
                 except Exception as e:
                     print(f"Error analyzing {symbol}: {e}")
                     continue
@@ -620,12 +625,27 @@ class TradingBrain:
 
         except TokenExpiredError:
             print("Token expired. Stopping session.")
+            # Durable incident flag: end_session writes brain_status=IDLE at
+            # its end, so a transient TOKEN_EXPIRED status would be gone
+            # before the watchdog's next poll. This flag survives for the
+            # watchdog to alert on + consume (REQ-071 P1 / REQ-083).
+            db.write_config(
+                'token_incident',
+                f"{datetime.now(IST).isoformat()} token expired mid-session "
+                f"(session {self.session_id})",
+            )
             db.write_config('brain_status', 'TOKEN_EXPIRED')
             self.end_session('TOKEN_EXPIRED')
 
         except Exception as e:
             print(f"Cycle error: {e}")
             logger.error(str(e), tag="brain")
+            # Feed the error budget: a sustained data/network fault (not a
+            # one-off) trips DEGRADED via the heartbeat thread → watchdog
+            # alert, instead of dying quietly in the logs (REQ-083).
+            db._record_failure()
+        else:
+            db._record_success()
 
         finally:
             self._cycle_lock.release()

@@ -183,7 +183,7 @@ def test_watchdog_alerts_on_deploy_incident():
         'trades_today': 2,
         'deploy_incident': '2026-07-07T11:58:00 code changed abc -> def',
     }
-    keys = [k for k, _ in watchdog.evaluate(state, midday)]
+    keys = [k for _, k, _ in watchdog.evaluate(state, midday)]
     assert any(k.startswith('deploy-incident-') for k in keys)
 
 

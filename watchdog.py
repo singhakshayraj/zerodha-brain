@@ -43,22 +43,32 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 _last_sent = {}
 
 
-def send_alert(key: str, message: str, now_ts: float = None) -> bool:
-    """Send one deduplicated alert. Returns True if actually sent."""
+# Alert tiers (REQ-071). P1 halt-class → immediate push; P2 degraded →
+# push, tagged for triage; P3 info → log/dashboard only, never paged.
+P1, P2, P3 = 'P1', 'P2', 'P3'
+_TELEGRAM_TIERS = {P1, P2}
+
+
+def send_alert(key: str, message: str, now_ts: float = None,
+               tier: str = P1) -> bool:
+    """Send one deduplicated alert. Returns True if actually sent (fired),
+    regardless of channel — P3 fires to the log only."""
     now_ts = now_ts if now_ts is not None else time.time()
     last = _last_sent.get(key)
     if last is not None and now_ts - last < ALERT_REPEAT_SECONDS:
         return False
     _last_sent[key] = now_ts
 
-    print(f"[watchdog] ALERT {key}: {message}")
+    print(f"[watchdog] [{tier}] {key}: {message}")
+    if tier not in _TELEGRAM_TIERS:
+        return True  # P3: dashboard/log only
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         print("[watchdog] (Telegram not configured — printed only)")
         return True
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={'chat_id': TELEGRAM_CHAT_ID, 'text': message},
+            json={'chat_id': TELEGRAM_CHAT_ID, 'text': f"[{tier}] {message}"},
             timeout=10,
         ).raise_for_status()
     except Exception as e:
@@ -82,7 +92,8 @@ def in_market_hours(now_ist: datetime) -> bool:
 
 
 def evaluate(state: dict, now_ist: datetime) -> list:
-    """Pure check logic → list of (key, message). state:
+    """Pure check logic → list of (tier, key, message). Tiers per REQ-071:
+    P1 halt-class, P2 degraded, P3 info. state:
     heartbeat: {'last_ping': iso str, 'status': str, 'message': str} | None
     brain_status: str | None
     trades_today: int | None   (None = query failed, skip that check)
@@ -98,9 +109,27 @@ def evaluate(state: dict, now_ist: datetime) -> list:
     # 08:45–09:10 token reminder (once per day via dedup key with date)
     if (8 * 60 + 45) <= m < (9 * 60 + 10):
         alerts.append((
-            f"token-reminder-{day}",
+            P2, f"token-reminder-{day}",
             "🔑 Reminder: paste today's enc_token into the dashboard "
             "before 09:15 IST (market opens soon).",
+        ))
+
+    # Token/deploy incidents are durable flags the brain leaves; they must
+    # alert even outside market hours (a redeploy or expiry can land at the
+    # boundary) — evaluated before the market-hours gate.
+    token_incident = state.get('token_incident')
+    if token_incident:
+        alerts.append((
+            P1, f"token-incident-{token_incident[:40]}",
+            f"🚨 enc_token EXPIRED mid-session — session ended. Paste a fresh "
+            f"token and restart. ({token_incident})",
+        ))
+
+    incident = state.get('deploy_incident')
+    if incident:
+        alerts.append((
+            P1, f"deploy-incident-{incident[:40]}",
+            f"⚠️ Deploy during session (REQ-072): {incident}",
         ))
 
     if not in_market_hours(now_ist):
@@ -109,7 +138,7 @@ def evaluate(state: dict, now_ist: datetime) -> list:
     hb = state.get('heartbeat')
     if hb is None:
         alerts.append((
-            'heartbeat-missing',
+            P1, 'heartbeat-missing',
             '🚨 CRITICAL: no brain heartbeat row readable — brain may be '
             'down or DB unreachable.',
         ))
@@ -123,7 +152,7 @@ def evaluate(state: dict, now_ist: datetime) -> list:
             age = None
         if age is None or age > HEARTBEAT_STALE_SECONDS:
             alerts.append((
-                'heartbeat-stale',
+                P1, 'heartbeat-stale',
                 f"🚨 CRITICAL: brain heartbeat stale "
                 f"({'unreadable' if age is None else f'{int(age)}s old'}) "
                 f"during market hours — brain is down or hung. "
@@ -131,23 +160,13 @@ def evaluate(state: dict, now_ist: datetime) -> list:
             ))
         elif hb.get('status') in ('ERROR', 'DEGRADED'):
             alerts.append((
-                f"heartbeat-{hb.get('status', '').lower()}",
+                P2, f"heartbeat-{hb.get('status', '').lower()}",
                 f"⚠️ Brain reports {hb.get('status')}: {hb.get('message')}",
             ))
 
-    # REQ-072: code changed under a running session (push during market
-    # hours). Dedup key includes the incident text, so each distinct
-    # incident alerts once regardless of the 30-min window.
-    incident = state.get('deploy_incident')
-    if incident:
-        alerts.append((
-            f"deploy-incident-{incident[:40]}",
-            f"⚠️ Deploy during session (REQ-072): {incident}",
-        ))
-
     if state.get('brain_status') == 'TOKEN_EXPIRED':
         alerts.append((
-            'token-expired',
+            P1, 'token-expired',
             '🚨 enc_token EXPIRED mid-day — session ended. Paste a fresh '
             'token and restart from the dashboard.',
         ))
@@ -160,7 +179,7 @@ def evaluate(state: dict, now_ist: datetime) -> list:
         and trades_today == 0
     ):
         alerts.append((
-            f"zero-trades-{day}",
+            P2, f"zero-trades-{day}",
             '⚠️ Session active but ZERO trades logged by 11:00 IST — '
             'check the dashboard (signals may all be HOLD, or something '
             'is silently wrong).',
@@ -181,13 +200,15 @@ def fetch_state(sb) -> dict:
     try:
         res = (
             sb.table('app_config').select('key,value')
-            .in_('key', ['brain_status', 'active_session_id', 'deploy_incident'])
+            .in_('key', ['brain_status', 'active_session_id',
+                         'deploy_incident', 'token_incident'])
             .execute()
         )
         cfg = {r['key']: r['value'] for r in (res.data or [])}
         state['brain_status'] = cfg.get('brain_status')
         state['active_session_id'] = cfg.get('active_session_id') or None
         state['deploy_incident'] = cfg.get('deploy_incident') or None
+        state['token_incident'] = cfg.get('token_incident') or None
     except Exception as e:
         print(f"[watchdog] config fetch failed: {e}")
 
@@ -220,23 +241,29 @@ def main():
         f"[watchdog] started {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')} "
         f"telegram={'ON' if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID else 'OFF (print only)'}"
     )
-    send_alert('watchdog-start', '👀 Watchdog online.')
+    send_alert('watchdog-start', '👀 Watchdog online.', tier=P3)
+
+    # Durable one-shot flags: consume once alerted so they don't re-fire
+    # every dedup window. Maps a dedup-key prefix → app_config key to clear.
+    one_shot = {'deploy-incident-': 'deploy_incident',
+                'token-incident-': 'token_incident'}
 
     while True:
         try:
             now_ist = datetime.now(IST)
             state = fetch_state(sb)
-            for alert_key, message in evaluate(state, now_ist):
-                sent = send_alert(alert_key, message)
-                # Deploy incidents are one-shot: consume the flag once
-                # alerted so it doesn't re-fire every dedup window.
-                if sent and alert_key.startswith('deploy-incident-'):
-                    try:
-                        sb.table('app_config').upsert(
-                            {'key': 'deploy_incident', 'value': ''}
-                        ).execute()
-                    except Exception as e:
-                        print(f"[watchdog] failed to clear deploy_incident: {e}")
+            for tier, alert_key, message in evaluate(state, now_ist):
+                sent = send_alert(alert_key, message, tier=tier)
+                if not sent:
+                    continue
+                for prefix, cfg_key in one_shot.items():
+                    if alert_key.startswith(prefix):
+                        try:
+                            sb.table('app_config').upsert(
+                                {'key': cfg_key, 'value': ''}
+                            ).execute()
+                        except Exception as e:
+                            print(f"[watchdog] failed to clear {cfg_key}: {e}")
         except Exception as e:
             print(f"[watchdog] loop error: {e}")
         time.sleep(CHECK_INTERVAL_SECONDS)

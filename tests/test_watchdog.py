@@ -42,7 +42,7 @@ def _state(**over):
 
 
 def _keys(alerts):
-    return [k for k, _ in alerts]
+    return [k for _, k, _ in alerts]
 
 
 # --- calendar gating ---
@@ -129,10 +129,11 @@ def test_trades_query_failed_skips_check():
 
 def test_send_alert_dedups_within_window():
     watchdog._last_sent.clear()
-    assert watchdog.send_alert('k1', 'msg', now_ts=1000.0) is True
-    assert watchdog.send_alert('k1', 'msg', now_ts=1100.0) is False
+    assert watchdog.send_alert('k1', 'msg', now_ts=1000.0, tier=watchdog.P3) is True
+    assert watchdog.send_alert('k1', 'msg', now_ts=1100.0, tier=watchdog.P3) is False
     assert watchdog.send_alert(
-        'k1', 'msg', now_ts=1000.0 + watchdog.ALERT_REPEAT_SECONDS + 1) is True
+        'k1', 'msg', now_ts=1000.0 + watchdog.ALERT_REPEAT_SECONDS + 1,
+        tier=watchdog.P3) is True
 
 
 # --- error budget → DEGRADED ---
