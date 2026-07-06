@@ -46,6 +46,31 @@ BRAIN_VERSION = '1.0.0'
 PAPER_TRADING = os.getenv('PAPER_TRADING', 'false').strip().lower() == 'true'
 PAPER_SLIPPAGE_PCT = float(os.getenv('PAPER_SLIPPAGE_PCT', '0.05'))  # adverse fill %
 
+# ── Startup interlocks ──────────────────────────────────────────────────────
+# Both failure modes here are one env-var typo away and catastrophic:
+#   1. QA_MODE against the production DB writes synthetic-market garbage into
+#      the real dataset with every market-hours gate bypassed.
+#   2. PAPER_TRADING unset/false silently swaps PaperBroker for OrderManager
+#      and places REAL Kite orders with REAL money.
+# Refuse to boot instead. Called from main.py (not at import time, so unit
+# tests can import config without a full env).
+_PROD_DB_REF = 'gilmuwmtdpjccibfhqtx'  # zerodha-trader (production project)
+
+
+def assert_safe_boot() -> None:
+    if QA_MODE and SUPABASE_URL and _PROD_DB_REF in SUPABASE_URL:
+        raise RuntimeError(
+            'QA_MODE=true with the PRODUCTION Supabase project. '
+            'QA runs only against the sim project — fix SUPABASE_URL or unset QA_MODE.'
+        )
+
+    if not PAPER_TRADING and os.getenv('REAL_TRADING_CONFIRM') != 'I-UNDERSTAND-REAL-MONEY':
+        raise RuntimeError(
+            'PAPER_TRADING is not true. Real order placement requires the extra '
+            "env var REAL_TRADING_CONFIRM='I-UNDERSTAND-REAL-MONEY' as a second "
+            'interlock. Set PAPER_TRADING=true for the paper run.'
+        )
+
 # Risk settings
 MAX_RISK_PER_TRADE_PERCENT = 1.0  # 1% of capital per trade
 MAX_POSITION_SIZE_PERCENT = 20.0  # max 20% capital in one stock

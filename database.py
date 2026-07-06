@@ -24,30 +24,51 @@ def _now_iso() -> str:
 
 def get_config(key: str):
     try:
-        res = supabase.table('app_config').select('value').eq('key', key).limit(1).execute()
-        if res.data and len(res.data) > 0:
-            val = res.data[0].get('value')
-            print(f"[database.get_config] key={key} found")
-            return val
-        print(f"[database.get_config] key={key} not found")
-        return None
+        return get_config_strict(key)
     except Exception as e:
         print(f"[database.get_config] error key={key}: {type(e).__name__}: {e}")
         return None
 
 
+def get_config_strict(key: str):
+    """Like get_config but RAISES on query failure instead of returning None.
+
+    get_config collapses "key missing/empty" and "query failed" into the same
+    None — callers that treat None as a state change (e.g. the scheduler's
+    active_session_id re-verification) would end a healthy session on a single
+    transient Supabase error. Use this where that distinction matters."""
+    res = supabase.table('app_config').select('value').eq('key', key).limit(1).execute()
+    if res.data and len(res.data) > 0:
+        val = res.data[0].get('value')
+        print(f"[database.get_config] key={key} found")
+        return val
+    print(f"[database.get_config] key={key} not found")
+    return None
+
+
 def write_config(key: str, value: str) -> None:
-    try:
-        payload = {
-            'key': key,
-            'value': value,
-            'updated_at': _now_iso(),
-        }
-        supabase.table('app_config').upsert(payload).execute()
-        print(f"[database.write_config] OK key={key}")
-    except Exception as e:
-        print(f"[database.write_config] error key={key}: {type(e).__name__}: {e}")
-        print(f"[database.write_config] payload: {{'key': '{key}', 'value': '{value}'}}")
+    # Retried: these keys ARE the control plane (brain_status,
+    # active_session_id). A silently dropped write during teardown leaves a
+    # half-ended session the dashboard still sees as running.
+    for attempt in range(3):
+        try:
+            payload = {
+                'key': key,
+                'value': value,
+                'updated_at': _now_iso(),
+            }
+            supabase.table('app_config').upsert(payload).execute()
+            print(f"[database.write_config] OK key={key}")
+            return
+        except Exception as e:
+            print(
+                f"[database.write_config] error key={key} "
+                f"(attempt {attempt + 1}/3): {type(e).__name__}: {e}"
+            )
+            if attempt < 2:
+                import time
+                time.sleep(2 * (attempt + 1))
+    print(f"[database.write_config] GAVE UP key={key} value={value[:100]!r}")
 
 
 def get_enc_token():
@@ -234,7 +255,17 @@ def end_session(session_id: str, end_reason: str) -> None:
         winning_trades = sum(1 for t in closed if (t.get('pnl') or 0) > 0)
         losing_trades = sum(1 for t in closed if (t.get('pnl') or 0) <= 0)
         total_pnl = sum((t.get('pnl') or 0) for t in closed)
-        total_pnl_percent = sum((t.get('pnl_percent') or 0) for t in closed)
+        # P&L as % of session capital — summing per-trade percentages (each
+        # against its own position value) produced a meaningless number.
+        cap_res = (
+            supabase.table('trading_sessions')
+            .select('capital_deployed')
+            .eq('id', session_id)
+            .limit(1)
+            .execute()
+        )
+        capital = (cap_res.data[0].get('capital_deployed') or 0) if cap_res.data else 0
+        total_pnl_percent = (total_pnl / capital * 100) if capital else 0
 
         # Fallback for trade COUNT only (not pnl)
         if total_trades_executed == 0:
@@ -321,6 +352,38 @@ def close_trade(trade_id: str, exit_data: dict) -> None:
         print(f"[database.close_trade] OK")
     except Exception as e:
         print(f"[database.close_trade] error trade={trade_id}: {type(e).__name__}: {e}")
+
+
+def cleanup_unfilled_trades(session_id: str) -> int:
+    """Void OPEN trades in THIS session that never got a fill (entry_price
+    NULL). Happens when the process dies between create_trade and the order
+    result landing. Left alone, a resumed session hits them every cycle in
+    _check_and_close_positions with quantity=None → TypeError → the whole
+    cycle aborts forever while the heartbeat stays green."""
+    try:
+        res = (
+            supabase.table('trades')
+            .select('id,symbol')
+            .eq('session_id', session_id)
+            .eq('status', 'OPEN')
+            .is_('entry_price', 'null')
+            .execute()
+        )
+        unfilled = res.data or []
+        if not unfilled:
+            return 0
+        print(f"[database.cleanup_unfilled_trades] voiding {len(unfilled)} unfilled OPEN trades")
+        for t in unfilled:
+            supabase.table('trades').update({
+                'status': 'CLOSED',
+                'exit_reason': 'UNFILLED_VOID',
+                'pnl': 0,
+                'pnl_percent': 0,
+            }).eq('id', t['id']).execute()
+        return len(unfilled)
+    except Exception as e:
+        print(f"[database.cleanup_unfilled_trades] error: {e}")
+        return 0
 
 
 def cleanup_stale_open_trades(current_session_id: str) -> int:

@@ -64,6 +64,21 @@ class TradingBrain:
         self.session_stats['total_pnl'] = sum((t.get('pnl') or 0) for t in closed)
         self.session_stats['winning_trades'] = sum(1 for t in closed if (t.get('pnl') or 0) > 0)
         self.session_stats['losing_trades'] = sum(1 for t in closed if (t.get('pnl') or 0) <= 0)
+
+        # Rebuild the circuit-breaker streak too — resetting it to zero on
+        # every restart gave a session with 2 straight stop-losses a free
+        # pass. Mirror the live counter's semantics: stop-losses extend the
+        # streak, a target hit resets it, other exits don't touch it.
+        # get_session_trades returns newest-first.
+        streak = 0
+        for t in closed:
+            reason = t.get('exit_reason')
+            if reason == 'STOP_LOSS_HIT':
+                streak += 1
+            elif reason == 'TARGET_HIT':
+                break
+        self.consecutive_losses = streak
+
         print(
             f"[BRAIN] Resumed stats for session {session_id}: "
             f"{self.session_stats}"
@@ -106,6 +121,10 @@ class TradingBrain:
 
             # Cleanup stale OPEN trades from prior sessions (prevents ghost positions)
             db.cleanup_stale_open_trades(self.session_id)
+            # Void unfilled OPEN rows in THIS session (process died between
+            # create_trade and the fill) — with quantity NULL they crash
+            # _check_and_close_positions every cycle after a resume.
+            db.cleanup_unfilled_trades(self.session_id)
 
             # Propagate session_id to order_manager for safety logging
             self.order_manager.session_id = self.session_id
@@ -244,6 +263,7 @@ class TradingBrain:
             # Step 2
             stats_with_streak = dict(self.session_stats)
             stats_with_streak['consecutive_losses'] = self.consecutive_losses
+            stats_with_streak['unrealized_pnl'] = self._unrealized_pnl()
             limits = self.risk_manager.check_session_limits(
                 stats_with_streak, self.session_config
             )
@@ -794,6 +814,33 @@ class TradingBrain:
                 data={'exit_reason': 'COVER_SHORT', 'pnl': pnl, 'pnl_percent': pnl_pct},
             )
 
+    def _unrealized_pnl(self) -> float:
+        """Mark-to-market P&L of open positions from the cycle's price
+        cache. session_stats['total_pnl'] is realized-only, so an open
+        position bleeding past the max-loss limit went undetected until its
+        own stop closed it."""
+        total = 0.0
+        try:
+            for t in db.get_open_trades(self.session_id):
+                entry_value = t.get('entry_value') or 0
+                qty = t.get('quantity') or 0
+                if not entry_value or qty <= 0:
+                    continue
+                key = f"{t.get('exchange', 'NSE')}:{t['symbol']}"
+                quote = self.market_data._holdings_cache.get(key, {}) or {}
+                price = quote.get('price') or quote.get('last_price') or 0
+                if not price:
+                    continue
+                current_value = price * qty
+                if t.get('position_type') == 'SHORT':
+                    total += entry_value - current_value
+                else:
+                    total += current_value - entry_value
+        except Exception as e:
+            print(f"[brain] _unrealized_pnl error (treating as 0): {e}")
+            return 0.0
+        return total
+
     def _is_past_ist(self, hour: int, minute: int) -> bool:
         now = datetime.now(IST)
         return (now.hour, now.minute) >= (hour, minute)
@@ -894,11 +941,17 @@ class TradingBrain:
                 return
 
     def _execute_sell_by_trade(self, trade: dict, current_price: float, exit_reason: str) -> None:
+        qty = trade.get('quantity') or 0
+        if qty <= 0:
+            # Unfilled/corrupt row — a None quantity here used to TypeError
+            # inside the broker and abort the whole cycle.
+            print(f"[brain] Skipping exit for {trade.get('symbol')}: quantity={trade.get('quantity')!r}")
+            return
         result = self.order_manager.place_sell_order(
             self.kite,
             trade['symbol'],
             trade['exchange'],
-            trade['quantity'],
+            qty,
             **({'hint_price': current_price} if config.PAPER_TRADING else {})
         )
 
@@ -947,7 +1000,13 @@ class TradingBrain:
         exit_reason: str,
     ) -> None:
         open_trades = db.get_open_trades(self.session_id)
-        trade = next((t for t in open_trades if t['symbol'] == symbol), None)
+        # LONG rows only — matching by symbol alone could grab a SHORT row
+        # and "sell" it again if long+short ever coexist (e.g. two instances).
+        trade = next(
+            (t for t in open_trades
+             if t['symbol'] == symbol and t.get('position_type') != 'SHORT'),
+            None,
+        )
         if trade:
             self._execute_sell_by_trade(trade, live_price, exit_reason)
 

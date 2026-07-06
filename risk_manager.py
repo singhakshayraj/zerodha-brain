@@ -182,8 +182,14 @@ class RiskManager:
                 'consecutive_losses', self.consecutive_losses
             )
 
+            # Loss limit is mark-to-market, conservatively: open losses count
+            # against it, open gains don't buy headroom. Profit target stays
+            # realized-only so a paper gain can't end the session early.
+            unrealized = session_stats.get('unrealized_pnl', 0) or 0
+            loss_check_pnl = total_pnl + min(0.0, unrealized)
+
             check = TradingPrinciples.should_continue_trading(
-                current_session_pnl=total_pnl,
+                current_session_pnl=loss_check_pnl,
                 session_capital=capital,
                 max_loss_percent=max_loss_percent,
                 consecutive_losses=consecutive_losses,
