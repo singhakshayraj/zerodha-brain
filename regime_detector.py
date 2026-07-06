@@ -26,6 +26,12 @@ class RegimeDetector:
         minute = now.minute
         time_minutes = hour * 60 + minute
 
+        # QA rehearsals run off-hours — pretend it's mid-morning so the
+        # intraday clock gates (opening window, last-30-min, lunch) don't
+        # block every synthetic signal.
+        if config.QA_MODE:
+            time_minutes = 11 * 60
+
         start_min = (
             config.MARKET_START_TRADING_HOUR * 60
             + config.MARKET_START_TRADING_MINUTE

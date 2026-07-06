@@ -215,6 +215,10 @@ class RiskManager:
             return {'can_trade': False, 'reason': f'ERROR: {e}'}
 
     def is_market_open(self) -> bool:
+        # QA rehearsals run at any hour against the synthetic market.
+        if config.QA_MODE:
+            return True
+
         now_ist = datetime.now(IST)
 
         if now_ist.weekday() > 4:

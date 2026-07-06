@@ -51,7 +51,12 @@ class TradingBrain:
 
     def initialize(self, token: str, session_config: dict) -> bool:
         try:
-            self.kite = KiteClient(token)
+            if config.QA_MODE:
+                from qa_market import FakeKiteClient
+                print("[BRAIN] QA MODE — synthetic market, no Kite calls at all")
+                self.kite = FakeKiteClient()
+            else:
+                self.kite = KiteClient(token)
             self.market_data = MarketData(self.kite)
             self.session_config = session_config
             self.session_id = session_config.get('sessionId')

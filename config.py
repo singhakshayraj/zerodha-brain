@@ -25,6 +25,11 @@ TOKEN_REFRESH_MINUTE_IST = 30
 # today (manual stop, loss limit, token expiry) suppresses it.
 AUTOPILOT = os.getenv('AUTOPILOT', 'false').strip().lower() == 'true'
 
+# QA mode: synthetic market (qa_market.FakeKiteClient) + market-hours bypass,
+# so the full production code path can be rehearsed off-hours against the sim
+# Supabase project. Never enable on the production Railway service.
+QA_MODE = os.getenv('QA_MODE', 'false').strip().lower() == 'true'
+
 # Market timing (IST)
 MARKET_OPEN_HOUR = 9
 MARKET_OPEN_MINUTE = 15

@@ -107,6 +107,8 @@ def run():
                     print("START command received")
 
                     token = db.get_enc_token()
+                    if config.QA_MODE and not token:
+                        token = 'QA-DUMMY'  # FakeKiteClient never uses it
                     session_config = db.get_session_config()
 
                     print(f"[SCHEDULER] Token exists: {bool(token)}")
