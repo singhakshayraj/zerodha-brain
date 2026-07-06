@@ -605,6 +605,35 @@ def test_end_session_squares_off_all_positions():
     assert 't2' in cover_calls
 
 
+# ---- resume_stats (brain-restart mid-session) --------------------------------
+
+def test_resume_stats_rebuilds_from_closed_trades():
+    brain = _make_brain()
+    trades = [
+        {'status': 'CLOSED', 'entry_price': 100, 'pnl': 50.0},
+        {'status': 'CLOSED', 'entry_price': 100, 'pnl': -20.0},
+        {'status': 'OPEN', 'entry_price': 100, 'pnl': None},
+        {'status': 'CANCELLED', 'entry_price': None, 'pnl': None},
+    ]
+    with patch('brain.db.get_session_trades', return_value=trades) as mock_get:
+        brain.resume_stats('sess-test-001')
+
+    mock_get.assert_called_once_with('sess-test-001')
+    assert brain.session_stats['trades_executed'] == 3  # all with entry_price set
+    assert brain.session_stats['total_pnl'] == 30.0
+    assert brain.session_stats['winning_trades'] == 1
+    assert brain.session_stats['losing_trades'] == 1
+
+
+def test_resume_stats_empty_session_stays_zeroed():
+    brain = _make_brain()
+    with patch('brain.db.get_session_trades', return_value=[]):
+        brain.resume_stats('sess-test-001')
+
+    assert brain.session_stats['trades_executed'] == 0
+    assert brain.session_stats['total_pnl'] == 0.0
+
+
 # ---- initialize -------------------------------------------------------------
 
 def test_initialize_removes_bad_token():

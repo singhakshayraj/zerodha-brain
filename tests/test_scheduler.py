@@ -129,6 +129,79 @@ def test_session_ended_exits_without_run_cycle():
     brain.run_cycle.assert_not_called()
 
 
+# --- brain restart mid-session: resume, don't duplicate (silent-failure fix) ---
+
+def test_running_command_resumes_existing_session_without_duplicating():
+    """A fresh process reading command=='RUNNING' (brain restart mid-session,
+    e.g. Railway redeploy) must resume the already-active session rather than
+    creating a second one or idling forever with the old session stuck."""
+    brain = _make_brain()
+    existing_session = {'id': 'existing-sess-999', 'status': 'RUNNING'}
+
+    import scheduler
+    scheduler._is_trading = False
+    cmds = ['RUNNING', 'STOP']
+
+    def get_cmd():
+        if cmds:
+            return cmds.pop(0)
+        raise KeyboardInterrupt
+
+    def get_config_side_effect(key):
+        if key == 'active_session_id':
+            return 'existing-sess-999'
+        return None
+
+    with patch('scheduler.db.get_brain_command', side_effect=get_cmd), \
+         patch('scheduler.db.get_enc_token', return_value='tok'), \
+         patch('scheduler.db.get_session_config', return_value={'capitalDeployed': 10000, 'tradeIntervalSeconds': 1}), \
+         patch('scheduler.db.get_config', side_effect=get_config_side_effect), \
+         patch('scheduler.db.get_session_by_id', return_value=existing_session), \
+         patch('scheduler.db.create_session') as mock_create, \
+         patch('scheduler.db.write_config'), \
+         patch('scheduler.db.update_heartbeat'), \
+         patch('scheduler.risk_manager.is_market_open', return_value=True), \
+         patch('scheduler.TradingBrain', return_value=brain), \
+         patch('scheduler.time.sleep'):
+        try:
+            scheduler.run()
+        except (KeyboardInterrupt, StopIteration):
+            pass
+
+    mock_create.assert_not_called()
+    brain.resume_stats.assert_called_once_with('existing-sess-999')
+
+
+def test_start_command_with_no_existing_session_creates_new_one():
+    """Plain START with nothing active still creates a session normally —
+    the resume path must not interfere with the ordinary first-start flow."""
+    brain = _make_brain()
+
+    def get_config_side_effect(key):
+        return None  # no active_session_id set yet
+
+    with patch('scheduler.db.get_brain_command', side_effect=['START', 'STOP', KeyboardInterrupt]), \
+         patch('scheduler.db.get_enc_token', return_value='tok'), \
+         patch('scheduler.db.get_session_config', return_value={'capitalDeployed': 10000, 'tradeIntervalSeconds': 1}), \
+         patch('scheduler.db.get_config', side_effect=get_config_side_effect), \
+         patch('scheduler.db.get_session_by_id', return_value=None), \
+         patch('scheduler.db.create_session', return_value={'id': 'new-sess-1'}) as mock_create, \
+         patch('scheduler.db.write_config'), \
+         patch('scheduler.db.update_heartbeat'), \
+         patch('scheduler.risk_manager.is_market_open', return_value=True), \
+         patch('scheduler.TradingBrain', return_value=brain), \
+         patch('scheduler.time.sleep'):
+        import scheduler
+        scheduler._is_trading = False
+        try:
+            scheduler.run()
+        except (KeyboardInterrupt, StopIteration):
+            pass
+
+    mock_create.assert_called_once()
+    brain.resume_stats.assert_not_called()
+
+
 # --- Exception in outer loop → logs error, continues ---
 
 def test_exception_in_main_loop_logs_error(capsys):

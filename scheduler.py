@@ -91,12 +91,21 @@ def run():
             token_refresher.maybe_daily_refresh()
             command = db.get_brain_command()
 
-            if command != 'START' and not _is_trading and _should_autostart():
+            if command not in ('START', 'RUNNING') and not _is_trading and _should_autostart():
                 print("[AUTOPILOT] Trading day, 09:30 window, no session yet — self-starting")
                 db.write_config('brain_status', 'START')
                 command = 'START'
 
-            if command == 'START':
+            # brain_status flips START -> RUNNING right after session creation
+            # and stays RUNNING for the rest of the session — it is never set
+            # back to START. A brain restart (crash, Railway redeploy) mid-
+            # session is therefore a fresh process reading command=='RUNNING',
+            # which used to match neither branch: the brain would idle forever
+            # while the old session sat stuck RUNNING with no new trades — a
+            # silent failure indistinguishable from normal operation on the
+            # dashboard. Treat RUNNING the same as START, and resume the
+            # existing session instead of creating a duplicate.
+            if command in ('START', 'RUNNING'):
                 if _is_trading:
                     print("[SCHEDULER] Already trading, ignoring START")
                     time.sleep(5)
@@ -104,7 +113,7 @@ def run():
 
                 _is_trading = True
                 try:
-                    print("START command received")
+                    print(f"{command} command received")
 
                     token = db.get_enc_token()
                     if config.QA_MODE and not token:
@@ -130,19 +139,28 @@ def run():
                         time.sleep(30)
                         continue
 
-                    print("[SCHEDULER] Creating session in DB...")
-                    session = db.create_session(session_config)
+                    existing_id = db.get_config('active_session_id')
+                    existing = db.get_session_by_id(existing_id) if existing_id else None
 
-                    if not session:
-                        print("[SCHEDULER] CRITICAL: Session creation failed")
-                        _set_heartbeat('ERROR', 0, 'DB session creation failed')
-                        db.write_config('brain_status', 'IDLE')
-                        time.sleep(30)
-                        continue
+                    is_resume = bool(existing and existing.get('status') == 'RUNNING')
 
-                    session_id = session['id']
-                    print(f"[SCHEDULER] Session ready: {session_id}")
-                    db.write_config('active_session_id', session_id)
+                    if is_resume:
+                        session_id = existing_id
+                        print(f"[SCHEDULER] Resuming existing RUNNING session {session_id} (brain restart)")
+                    else:
+                        print("[SCHEDULER] Creating session in DB...")
+                        session = db.create_session(session_config)
+
+                        if not session:
+                            print("[SCHEDULER] CRITICAL: Session creation failed")
+                            _set_heartbeat('ERROR', 0, 'DB session creation failed')
+                            db.write_config('brain_status', 'IDLE')
+                            time.sleep(30)
+                            continue
+
+                        session_id = session['id']
+                        print(f"[SCHEDULER] Session ready: {session_id}")
+                        db.write_config('active_session_id', session_id)
 
                     session_config['sessionId'] = session_id
 
@@ -155,6 +173,8 @@ def run():
 
                     brain = TradingBrain()
                     initialized = brain.initialize(token, session_config)
+                    if initialized and is_resume:
+                        brain.resume_stats(session_id)
 
                     if not initialized:
                         print("Brain initialization failed")

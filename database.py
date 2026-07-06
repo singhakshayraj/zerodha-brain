@@ -124,6 +124,21 @@ ALLOWED_SESSION_COLUMNS = {
 }
 
 
+def get_session_by_id(session_id: str):
+    try:
+        res = (
+            supabase.table('trading_sessions')
+            .select('*')
+            .eq('id', session_id)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0] if res.data else None
+    except Exception as e:
+        print(f"[database.get_session_by_id] error: {e}")
+        return None
+
+
 def create_session(session_config: dict):
     try:
         print(f"[DB] Raw config received: {session_config}")

@@ -49,6 +49,26 @@ class TradingBrain:
         self.cycle_count = 0
         self._cycle_lock = threading.Lock()
 
+    def resume_stats(self, session_id: str) -> None:
+        """Rebuild in-memory session_stats from already-recorded trades.
+
+        A fresh TradingBrain always starts at zero — fine for a genuinely
+        new session, but wrong when the scheduler is resuming a RUNNING
+        session after a brain restart (crash, redeploy): without this,
+        loss/profit limits silently reset to zero and a session already
+        near its max-loss threshold gets a free pass on every restart."""
+        trades = db.get_session_trades(session_id)
+        closed = [t for t in trades if t.get('status') == 'CLOSED']
+        executed = [t for t in trades if t.get('entry_price') is not None]
+        self.session_stats['trades_executed'] = len(executed)
+        self.session_stats['total_pnl'] = sum((t.get('pnl') or 0) for t in closed)
+        self.session_stats['winning_trades'] = sum(1 for t in closed if (t.get('pnl') or 0) > 0)
+        self.session_stats['losing_trades'] = sum(1 for t in closed if (t.get('pnl') or 0) <= 0)
+        print(
+            f"[BRAIN] Resumed stats for session {session_id}: "
+            f"{self.session_stats}"
+        )
+
     def initialize(self, token: str, session_config: dict) -> bool:
         try:
             if config.QA_MODE:
