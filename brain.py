@@ -5,6 +5,7 @@ from datetime import datetime
 import pytz
 
 import config
+import data_jobs
 import data_quality
 import database as db
 import event_calendar
@@ -277,6 +278,11 @@ class TradingBrain:
             else:
                 print("[brain] ✅ All instrument tokens verified OK")
 
+            # M3: build today's level pack now — the only moment a valid
+            # token is guaranteed (see data_jobs module docstring). Prior-day
+            # data, so building post-open loses nothing. Idempotent.
+            data_jobs.maybe_build_level_pack(self.market_data, self.universe)
+
             print(f"Brain initialized. Session: {self.session_id}")
 
             logger.set_context(
@@ -347,6 +353,10 @@ class TradingBrain:
 
             self.traded_symbols_this_cycle = set()
             self._sell_noops = []
+
+            # M3: lock the in-play list at the first cycle past 09:30
+            # (idempotent; non-gating — recorded for M4/M5, not enforced).
+            data_jobs.maybe_lock_inplay(self.market_data, self.universe)
 
             # Step 0: EOD cleanup runs FIRST so it fires even if session limit reached
             self._auto_cover_shorts_if_eod()

@@ -775,6 +775,28 @@ def lock_inplay_list(date: str, ranked: list) -> int:
     return written
 
 
+def level_pack_exists(date: str) -> bool:
+    """Fails closed (True) — a DB error must not trigger a rebuild storm."""
+    try:
+        res = (supabase.table('level_pack').select('id')
+               .eq('date', date).limit(1).execute())
+        return bool(res.data)
+    except Exception as e:
+        print(f"[database.level_pack_exists] error: {e}")
+        return True
+
+
+def inplay_locked(date: str) -> bool:
+    """Fails closed (True) — same rationale."""
+    try:
+        res = (supabase.table('inplay_list').select('id')
+               .eq('date', date).limit(1).execute())
+        return bool(res.data)
+    except Exception as e:
+        print(f"[database.inplay_locked] error: {e}")
+        return True
+
+
 def get_inplay_symbols(date: str) -> list:
     try:
         res = (supabase.table('inplay_list').select('symbol')
