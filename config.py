@@ -103,6 +103,15 @@ INDEX_HEAVYWEIGHTS = {
     'ITC', 'LT', 'AXISBANK', 'KOTAKBANK', 'SBIN', 'BHARTIARTL',
 }
 
+# Level filter + level-anchored stops (REQ §5 steps 6–7). Flag-gated the same
+# way as time-stop/event-day: computed + logged as a counterfactual on every
+# decision, but only affect entries/stops when enabled — so the level pack's
+# effect can be measured before it changes trade construction.
+LEVEL_FILTER_ENABLED = os.getenv('LEVEL_FILTER_ENABLED', 'false').strip().lower() == 'true'
+LEVEL_STOPS_ENABLED = os.getenv('LEVEL_STOPS_ENABLED', 'false').strip().lower() == 'true'
+LEVEL_PROXIMITY_BLOCK_R = float(os.getenv('LEVEL_PROXIMITY_BLOCK_R', '0.5'))
+LEVEL_STOP_BUFFER_FRAC = float(os.getenv('LEVEL_STOP_BUFFER_FRAC', '0.25'))  # × ATR
+
 # Paper trading: real market data + real decisions, simulated fills.
 # No Kite orders are ever placed when true. See paper_broker.py.
 PAPER_TRADING = os.getenv('PAPER_TRADING', 'false').strip().lower() == 'true'

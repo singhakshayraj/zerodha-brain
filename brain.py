@@ -9,6 +9,7 @@ import data_jobs
 import data_quality
 import database as db
 import event_calendar
+import levels
 import logger
 import trend_tells
 from kite_client import KiteClient, TokenExpiredError
@@ -104,6 +105,33 @@ def _compute_trend_tells(signal: dict, candles_5min: list, live_price: float) ->
         return {}
 
 
+def _level_context(pack: dict, signal: dict, live_price: float) -> dict:
+    """Level snapshot + filter/anchor counterfactual for one decision
+    (REQ-020 level snapshot, §5 steps 6–7). Never raises — missing level
+    pack just yields an empty snapshot. Returns the snapshot; caller decides
+    whether to ACT on it (flag-gated)."""
+    try:
+        lv = levels.relevant_levels(pack)
+        action = signal.get('action')
+        direction = 'UP' if action == 'BUY' else 'DOWN' if action == 'SELL' else None
+        snap = {'levels_count': len(lv)}
+        if not lv or direction is None or not live_price:
+            return snap
+
+        atr = (signal.get('indicators') or {}).get('atr_14') or 0
+        cur_stop = signal.get('stop_loss') or 0
+        r_value = abs(live_price - cur_stop) if cur_stop else None
+
+        filt = levels.level_filter(live_price, direction, r_value, lv)
+        anchored = levels.anchored_stop_target(live_price, direction, lv, atr)
+        snap['filter'] = filt
+        snap['anchored'] = anchored
+        return snap
+    except Exception as e:
+        print(f"[levels] context failed (non-fatal): {e}")
+        return {}
+
+
 def _r_multiple(trade: dict, pnl: float):
     """Signed R-multiple: pnl / (entry-to-stop risk in ₹) — REQ-061. The
     unit every spec metric (expectancy, PF, daily 3R stop) is defined in.
@@ -146,6 +174,7 @@ class TradingBrain:
         self._nifty50_cache = None
         self._session_ended = False
         self.universe = {}
+        self.level_packs = {}   # 'NSE:SYMBOL' -> today's level_pack row
         self.cycle_count = 0
         self._cycle_lock = threading.Lock()
 
@@ -282,6 +311,10 @@ class TradingBrain:
             # token is guaranteed (see data_jobs module docstring). Prior-day
             # data, so building post-open loses nothing. Idempotent.
             data_jobs.maybe_build_level_pack(self.market_data, self.universe)
+            # Load it back for the level filter / anchored stops (§5 6–7).
+            today = datetime.now(IST).strftime('%Y-%m-%d')
+            self.level_packs = db.get_level_pack_map(today)
+            print(f"[levels] Loaded level packs for {len(self.level_packs)} symbols")
 
             print(f"Brain initialized. Session: {self.session_id}")
 
@@ -577,6 +610,12 @@ class TradingBrain:
                         },
                     )
 
+                    # Level snapshot + filter/anchor counterfactual (REQ-020,
+                    # §5 6–7). Computed for every decision; acted on only when
+                    # the flags are enabled (below).
+                    level_snap = _level_context(
+                        self.level_packs.get(key), signal, live_price)
+
                     db.log_decision(
                         session_id=self.session_id,
                         symbol=symbol,
@@ -599,7 +638,39 @@ class TradingBrain:
                         trend_tells=_compute_trend_tells(
                             signal, candles_5min or [], live_price),
                         event_policy=event_pol,
+                        level_snapshot=level_snap,
                     )
+
+                    # Level-anchored stops (§5 step 7, flag-gated): replace the
+                    # ATR stop/target with structure before sizing + execution.
+                    if (config.LEVEL_STOPS_ENABLED
+                            and signal['action'] in ('BUY', 'SELL')
+                            and level_snap.get('anchored')):
+                        a = level_snap['anchored']
+                        print(f"[levels] {symbol} anchored stop/target: "
+                              f"{signal['stop_loss']}/{signal['target']} → "
+                              f"{a['stop']}/{a['target']} (RR {a['rr']})")
+                        signal['stop_loss'] = a['stop']
+                        signal['target'] = a['target']
+                        signal['risk_reward_ratio'] = a['rr']
+
+                    # Level filter (§5 step 6, flag-gated): reject entries with
+                    # a wall within block_r × R in the profit direction.
+                    if (config.LEVEL_FILTER_ENABLED
+                            and signal['action'] in ('BUY', 'SELL')
+                            and level_snap.get('filter')
+                            and not level_snap['filter']['ok']):
+                        print(f"[levels] {symbol} entry blocked by level filter: "
+                              f"wall {level_snap['filter']['blocking_level']} "
+                              f"@ {level_snap['filter']['distance_r']}R")
+                        db.log_brain_activity(
+                            session_id=self.session_id,
+                            activity_type='LEVEL_BLOCK', symbol=symbol,
+                            message=f"level within "
+                                    f"{level_snap['filter']['distance_r']}R",
+                            data=level_snap['filter'],
+                        )
+                        continue
 
                     # Event-day gate (flag-off by default): stand aside on
                     # heavyweights at monthly expiry / results-day symbols;

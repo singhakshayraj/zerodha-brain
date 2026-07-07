@@ -797,6 +797,17 @@ def inplay_locked(date: str) -> bool:
         return True
 
 
+def get_level_pack_map(date: str) -> dict:
+    """All of today's level_pack rows keyed by symbol (for in-brain lookup)."""
+    try:
+        res = (supabase.table('level_pack').select('*')
+               .eq('date', date).execute())
+        return {r['symbol']: r for r in (res.data or [])}
+    except Exception as e:
+        print(f"[database.get_level_pack_map] error: {e}")
+        return {}
+
+
 def get_inplay_symbols(date: str) -> list:
     try:
         res = (supabase.table('inplay_list').select('symbol')
