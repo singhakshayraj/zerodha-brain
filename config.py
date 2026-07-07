@@ -83,6 +83,26 @@ STALE_QUOTE_MAX_S = int(os.getenv('STALE_QUOTE_MAX_S', '600'))
 INPLAY_CAP = int(os.getenv('INPLAY_CAP', '10'))
 RVOL_THRESHOLD = float(os.getenv('RVOL_THRESHOLD', '2.0'))
 
+# Time-stop exit (REQ-051, §4.2/4.3c): a position that has neither hit its
+# stop nor target within this many minutes is dead money — cut it. Shorts
+# get a tighter clock. Flag-gated: computed + logged always, but only
+# ACTS on exits when enabled, so it can be validated before it changes
+# in-flight trade outcomes.
+TIME_STOP_MIN = int(os.getenv('TIME_STOP_MIN', '40'))
+TIME_STOP_MIN_SHORT = int(os.getenv('TIME_STOP_MIN_SHORT', '25'))
+TIME_STOP_ENABLED = os.getenv('TIME_STOP_ENABLED', 'false').strip().lower() == 'true'
+
+# Event-day policy (REQ-053): weekly expiry = Tuesday, monthly = last
+# Tuesday. On event days, stand aside on index heavyweights / results-day
+# symbols. Flag-gated the same way — the policy is logged on every decision,
+# but only blocks entries when enabled.
+EVENT_DAY_ENABLED = os.getenv('EVENT_DAY_ENABLED', 'false').strip().lower() == 'true'
+# Index heavyweights to stand aside on during expiry (pin/whipsaw risk).
+INDEX_HEAVYWEIGHTS = {
+    'HDFCBANK', 'ICICIBANK', 'RELIANCE', 'INFY', 'TCS',
+    'ITC', 'LT', 'AXISBANK', 'KOTAKBANK', 'SBIN', 'BHARTIARTL',
+}
+
 # Paper trading: real market data + real decisions, simulated fills.
 # No Kite orders are ever placed when true. See paper_broker.py.
 PAPER_TRADING = os.getenv('PAPER_TRADING', 'false').strip().lower() == 'true'

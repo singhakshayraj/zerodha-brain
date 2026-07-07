@@ -7,6 +7,7 @@ import pytz
 import config
 import data_quality
 import database as db
+import event_calendar
 import logger
 import trend_tells
 from kite_client import KiteClient, TokenExpiredError
@@ -531,6 +532,11 @@ class TradingBrain:
                     nifty_change = nifty['change_percent'] if nifty else 0.0
                     nifty_dir = nifty['direction'] if nifty else 'SIDEWAYS'
 
+                    # Event-day policy (REQ-053) — computed for logging on
+                    # every decision; only gates entries when enabled.
+                    event_pol = event_calendar.policy(
+                        datetime.now(IST).date(), symbol)
+
                     signal = self.signal_engine.generate_signal(
                         candles_5min=candles_5min or [],
                         candles_15min=candles_15min,
@@ -582,7 +588,30 @@ class TradingBrain:
                         git_sha=config.GIT_SHA,
                         trend_tells=_compute_trend_tells(
                             signal, candles_5min or [], live_price),
+                        event_policy=event_pol,
                     )
+
+                    # Event-day gate (flag-off by default): stand aside on
+                    # heavyweights at monthly expiry / results-day symbols;
+                    # raise the confidence bar on weekly expiry.
+                    if config.EVENT_DAY_ENABLED and signal['action'] in ('BUY', 'SELL'):
+                        ep = event_pol['policy']
+                        blocked = None
+                        if ep == event_calendar.STAND_ASIDE:
+                            blocked = 'EVENT_STAND_ASIDE'
+                        elif (ep == event_calendar.RAISE_BAR
+                              and signal['confidence'] < config.MIN_BUY_CONFIDENCE + 10):
+                            blocked = 'EVENT_RAISE_BAR'
+                        if blocked:
+                            print(f"[event] {symbol} entry blocked: {blocked} "
+                                  f"({event_pol['reasons']})")
+                            db.log_brain_activity(
+                                session_id=self.session_id,
+                                activity_type='EVENT_BLOCK', symbol=symbol,
+                                message=f"{blocked}: {event_pol['reasons']}",
+                                data=event_pol,
+                            )
+                            continue
 
                     ind = signal.get('indicators') or {}
                     logger.signal(
@@ -993,6 +1022,21 @@ class TradingBrain:
             return 0.0
         return total
 
+    def _minutes_open(self, trade: dict):
+        """Minutes since entry, from entry_time. None if unparseable (an
+        unfilled/corrupt row must not read as age 0 and trigger nothing, nor
+        as huge and trigger a spurious exit)."""
+        raw = trade.get('entry_time')
+        if not raw:
+            return None
+        try:
+            entry = datetime.fromisoformat(str(raw))
+            if entry.tzinfo is None:
+                entry = IST.localize(entry)
+            return (datetime.now(IST) - entry).total_seconds() / 60.0
+        except Exception:
+            return None
+
     def _is_past_ist(self, hour: int, minute: int) -> bool:
         now = datetime.now(IST)
         return (now.hour, now.minute) >= (hour, minute)
@@ -1078,6 +1122,33 @@ class TradingBrain:
                     self.consecutive_losses = 0
                 if should_exit:
                     self._execute_sell_by_trade(trade, current_price, exit_reason)
+
+            # Time-stop (REQ-051): only if stop/target did NOT already fire,
+            # preserving the stop→target→time-stop priority. Flag-gated so it
+            # can be observed before it changes trade outcomes.
+            if not should_exit:
+                mins = self._minutes_open(trade)
+                limit = (config.TIME_STOP_MIN_SHORT if is_short
+                         else config.TIME_STOP_MIN)
+                if mins is not None and mins >= limit:
+                    if config.TIME_STOP_ENABLED:
+                        print(f"[time_stop] {trade['symbol']} open {mins:.0f}m "
+                              f">= {limit}m — cutting (dead money)")
+                        if is_short:
+                            self._cover_short(trade, current_price)
+                        else:
+                            self._execute_sell_by_trade(trade, current_price, 'TIME_STOP')
+                    else:
+                        # Observability: record that the time-stop WOULD have
+                        # fired, so its impact can be measured before enabling.
+                        db.log_brain_activity(
+                            session_id=self.session_id,
+                            activity_type='TIME_STOP_WOULD_FIRE',
+                            symbol=trade['symbol'],
+                            message=f"time-stop would cut {trade['symbol']} "
+                                    f"({mins:.0f}m >= {limit}m) — disabled",
+                            data={'minutes_open': round(mins, 1), 'limit': limit},
+                        )
 
             if self.consecutive_losses >= config.CIRCUIT_BREAKER_CONSECUTIVE_LOSSES:
                 print(
