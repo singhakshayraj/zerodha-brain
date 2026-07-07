@@ -9,8 +9,10 @@ import data_jobs
 import data_quality
 import database as db
 import event_calendar
+import inplay
 import levels
 import logger
+import orb
 import trend_tells
 from kite_client import KiteClient, TokenExpiredError
 from market_data import MarketData
@@ -616,6 +618,12 @@ class TradingBrain:
                     level_snap = _level_context(
                         self.level_packs.get(key), signal, live_price)
 
+                    # ORB archetype counterfactual (§5 step 5A). Opening-range
+                    # stats from the symbol's own 5-min candles; logged on
+                    # every decision, promotes a HOLD only when enabled.
+                    or_stats = inplay.opening_range_stats(candles_5min or [])
+                    orb_snap = orb.orb_signal(live_price, or_stats)
+
                     db.log_decision(
                         session_id=self.session_id,
                         symbol=symbol,
@@ -639,7 +647,34 @@ class TradingBrain:
                             signal, candles_5min or [], live_price),
                         event_policy=event_pol,
                         level_snapshot=level_snap,
+                        orb=orb_snap,
                     )
+
+                    # ORB promotion (§5 step 5A, flag-gated): when the
+                    # indicator engine held but a clean opening-range breakout
+                    # fired, take the ORB entry. Placed BEFORE the level
+                    # override so anchored stops still apply to ORB trades.
+                    if (config.ORB_ENABLED
+                            and signal['action'] == 'HOLD'
+                            and orb_snap['action'] in ('BUY', 'SELL')
+                            and orb_snap['confidence'] >= config.ORB_MIN_CONFIDENCE):
+                        print(f"[orb] {symbol} promoting HOLD → {orb_snap['action']} "
+                              f"(conf {orb_snap['confidence']}, "
+                              f"break {orb_snap['break_strength']}× range)")
+                        signal['action'] = orb_snap['action']
+                        signal['confidence'] = orb_snap['confidence']
+                        signal['stop_loss'] = orb_snap['stop_loss']
+                        signal['target'] = orb_snap['target']
+                        signal['risk_reward_ratio'] = orb_snap['risk_reward_ratio']
+                        signal['archetype'] = 'ORB'
+                        signal.setdefault('reasons', []).extend(orb_snap['reasons'])
+                        db.log_brain_activity(
+                            session_id=self.session_id,
+                            activity_type='ORB_ENTRY', symbol=symbol,
+                            message=f"ORB {orb_snap['action']} @ ₹{live_price} "
+                                    f"(OR {orb_snap['or_low']}–{orb_snap['or_high']})",
+                            data=orb_snap,
+                        )
 
                     # Level-anchored stops (§5 step 7, flag-gated): replace the
                     # ATR stop/target with structure before sizing + execution.
@@ -763,6 +798,11 @@ class TradingBrain:
                         ) or (
                             signal.get('regime') == 'WEAK_TREND'
                             and signal['confidence'] >= 75
+                        ) or (
+                            # ORB breakdown short (no regime — breakout IS the
+                            # thesis); only reachable when ORB_ENABLED promoted it.
+                            signal.get('archetype') == 'ORB'
+                            and signal['confidence'] >= config.ORB_MIN_CONFIDENCE
                         ):
                             self._open_short(symbol, exchange, live_price, signal)
                             remaining_trades -= 1

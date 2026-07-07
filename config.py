@@ -112,6 +112,15 @@ LEVEL_STOPS_ENABLED = os.getenv('LEVEL_STOPS_ENABLED', 'false').strip().lower() 
 LEVEL_PROXIMITY_BLOCK_R = float(os.getenv('LEVEL_PROXIMITY_BLOCK_R', '0.5'))
 LEVEL_STOP_BUFFER_FRAC = float(os.getenv('LEVEL_STOP_BUFFER_FRAC', '0.25'))  # × ATR
 
+# ORB archetype (REQ §5 step 5A). Second entry archetype — opening-range
+# breakout. Flag-gated like the rest: the ORB signal is computed + logged on
+# every decision as a counterfactual; only promotes a HOLD to an entry when
+# enabled, so its edge can be measured before it changes the trade mix.
+ORB_ENABLED = os.getenv('ORB_ENABLED', 'false').strip().lower() == 'true'
+ORB_BREAK_BUFFER_FRAC = float(os.getenv('ORB_BREAK_BUFFER_FRAC', '0.05'))  # × OR range
+# >= MIN_BUY_CONFIDENCE so a promoted ORB long clears the downstream BUY gate.
+ORB_MIN_CONFIDENCE = int(os.getenv('ORB_MIN_CONFIDENCE', '70'))
+
 # Paper trading: real market data + real decisions, simulated fills.
 # No Kite orders are ever placed when true. See paper_broker.py.
 PAPER_TRADING = os.getenv('PAPER_TRADING', 'false').strip().lower() == 'true'
