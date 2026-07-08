@@ -121,6 +121,14 @@ ORB_BREAK_BUFFER_FRAC = float(os.getenv('ORB_BREAK_BUFFER_FRAC', '0.05'))  # × 
 # >= MIN_BUY_CONFIDENCE so a promoted ORB long clears the downstream BUY gate.
 ORB_MIN_CONFIDENCE = int(os.getenv('ORB_MIN_CONFIDENCE', '70'))
 
+# Market-direction gate. The real universe-breadth direction is ALWAYS
+# computed and logged on every decision (fixing the dead SIDEWAYS stub in
+# the dataset). This flag controls only whether it FEEDS the signal engine's
+# buy/sell permission — default off so today's data stays comparable to the
+# SIDEWAYS-fed baseline until we validate the effect, then flip with the
+# other strategy flags.
+MARKET_DIRECTION_ENABLED = os.getenv('MARKET_DIRECTION_ENABLED', 'false').strip().lower() == 'true'
+
 # Paper trading: real market data + real decisions, simulated fills.
 # No Kite orders are ever placed when true. See paper_broker.py.
 PAPER_TRADING = os.getenv('PAPER_TRADING', 'false').strip().lower() == 'true'

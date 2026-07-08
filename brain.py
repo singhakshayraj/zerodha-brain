@@ -61,7 +61,8 @@ def _dates_in(candles: list) -> list:
     return seen
 
 
-def _compute_trend_tells(signal: dict, candles_5min: list, live_price: float) -> dict:
+def _compute_trend_tells(signal: dict, candles_5min: list, live_price: float,
+                         market_ctx: dict = None) -> dict:
     """Best-effort trend-tell snapshot for logging (REQ-052). Never raises —
     a data gap just means more tells abstain. Non-gating during the paper
     run; the result rides along in the decision row for later validation."""
@@ -100,7 +101,15 @@ def _compute_trend_tells(signal: dict, candles_5min: list, live_price: float) ->
             current_price=live_price,
             today_range=trend_tells.session_range(today_candles or candles_5min),
             avg_range=avg_range,
-            # breadth/sector unavailable with retail enctoken → abstain
+            # breadth now available from universe context; sector still absent
+            # so breadth_sector uses breadth-vs-direction agreement as a proxy
+            advancers=(market_ctx or {}).get('advancers'),
+            decliners=(market_ctx or {}).get('decliners'),
+            sector_aligned=(
+                None if not market_ctx or market_ctx.get('breadth') is None
+                else (market_ctx['direction'] == 'BULLISH' and direction == 'UP')
+                     or (market_ctx['direction'] == 'BEARISH' and direction == 'DOWN')
+            ),
         )
     except Exception as e:
         print(f"[trend_tells] compute failed (non-fatal): {e}")
@@ -172,12 +181,16 @@ class TradingBrain:
         }
         self.traded_symbols_this_cycle = set()
         self._time_stop_logged = set()  # trade ids with a WOULD_FIRE row
+        self._decision_ts = None        # REQ-073 decision→order clock
         self.last_context_log = None
         self.consecutive_losses = 0
         self._nifty50_cache = None
         self._session_ended = False
         self.universe = {}
         self.level_packs = {}   # 'NSE:SYMBOL' -> today's level_pack row
+        self.market_ctx = {'level': 0, 'change_percent': 0.0,
+                           'direction': 'SIDEWAYS', 'advancers': 0,
+                           'decliners': 0, 'breadth': None}
         self.cycle_count = 0
         self._cycle_lock = threading.Lock()
 
@@ -456,10 +469,17 @@ class TradingBrain:
                         f"({holdings_count} holdings, {nifty_count} nifty50)",
             )
 
-            # Step 4
-            nifty = self.market_data.get_nifty_level()
+            # Step 4 — real market context from universe breadth (replaces
+            # the dead SIDEWAYS stub). Always computed + logged; feeds the
+            # signal engine only when MARKET_DIRECTION_ENABLED.
+            self.market_ctx = self._market_context()
+            nifty = self.market_ctx
             nifty_level = nifty['level'] if nifty else None
             time_bucket = self.risk_manager.get_time_bucket()
+            print(f"[market_ctx] dir={nifty['direction']} "
+                  f"chg={nifty['change_percent']}% "
+                  f"breadth={nifty['advancers']}/{nifty['decliners']} "
+                  f"(feed={'ON' if config.MARKET_DIRECTION_ENABLED else 'OFF'})")
 
             # Step 5
             self._maybe_log_market_context(nifty, time_bucket)
@@ -575,8 +595,15 @@ class TradingBrain:
                         message=f"Analyzing {symbol} @ ₹{live_price}",
                     )
 
-                    nifty_change = nifty['change_percent'] if nifty else 0.0
-                    nifty_dir = nifty['direction'] if nifty else 'SIDEWAYS'
+                    # Gated feed: when off, pass the neutral values the engine
+                    # has always seen (keeps the run comparable); the real
+                    # context is still logged on the decision below.
+                    if config.MARKET_DIRECTION_ENABLED and nifty:
+                        nifty_change = nifty['change_percent']
+                        nifty_dir = nifty['direction']
+                    else:
+                        nifty_change = 0.0
+                        nifty_dir = 'SIDEWAYS'
 
                     # Event-day policy (REQ-053) — computed for logging on
                     # every decision; only gates entries when enabled.
@@ -592,6 +619,8 @@ class TradingBrain:
                         nifty_direction=nifty_dir,
                         nifty_change_percent=nifty_change,
                     )
+                    # REQ-073: decision→order latency clock starts here.
+                    self._decision_ts = time.perf_counter()
 
                     db.log_brain_activity(
                         session_id=self.session_id,
@@ -645,10 +674,19 @@ class TradingBrain:
                         config_hash=self.config_hash,
                         git_sha=config.GIT_SHA,
                         trend_tells=_compute_trend_tells(
-                            signal, candles_5min or [], live_price),
+                            signal, candles_5min or [], live_price,
+                            market_ctx=self.market_ctx),
                         event_policy=event_pol,
                         level_snapshot=level_snap,
                         orb=orb_snap,
+                        market_context={
+                            'direction': self.market_ctx['direction'],
+                            'change_percent': self.market_ctx['change_percent'],
+                            'advancers': self.market_ctx['advancers'],
+                            'decliners': self.market_ctx['decliners'],
+                            'breadth': self.market_ctx['breadth'],
+                            'fed_to_engine': config.MARKET_DIRECTION_ENABLED,
+                        },
                     )
 
                     # ORB promotion (§5 step 5A, flag-gated): when the
@@ -941,6 +979,7 @@ class TradingBrain:
                 'entry_price': result['price'],
                 'quantity': result['quantity'],
                 'entry_value': result['value'],
+                'decision_to_order_ms': self._decision_latency_ms(),
             })
             self.session_stats['trades_executed'] += 1
             print(
@@ -1044,6 +1083,7 @@ class TradingBrain:
                 'entry_price': result['price'],
                 'quantity': result['quantity'],
                 'entry_value': result['value'],
+                'decision_to_order_ms': self._decision_latency_ms(),
             })
             self.session_stats['trades_executed'] += 1
             print(
@@ -1116,6 +1156,58 @@ class TradingBrain:
                 message=f"COVER {symbol} — P&L: ₹{pnl:.2f}",
                 data={'exit_reason': 'COVER_SHORT', 'pnl': pnl, 'pnl_percent': pnl_pct},
             )
+
+    def _decision_latency_ms(self):
+        """ms from the entry decision to this order (REQ-073). None if no
+        clock was started (e.g. exits, which don't originate from a cycle
+        decision)."""
+        if self._decision_ts is None:
+            return None
+        return round((time.perf_counter() - self._decision_ts) * 1000, 1)
+
+    def _market_context(self) -> dict:
+        """Real market direction + breadth from the universe itself: each
+        stock's day change = (live − prior-day close) computed from the
+        level pack's PDC and the live price. Retail enctoken can't read the
+        Nifty index (/quote disabled), so get_nifty_level was stubbed to a
+        constant SIDEWAYS — the dead input behind 2026-07-08's shorts into a
+        rising tape. This reconstructs the same signal from data we already
+        have, and yields breadth for the trend-tells breadth_sector tell.
+
+        Returns {level, change_percent, direction, advancers, decliners,
+        breadth}. Never raises."""
+        try:
+            changes = []
+            advancers = decliners = 0
+            for key, data in self.universe.items():
+                pack = self.level_packs.get(key)
+                pdc = (pack or {}).get('pdc')
+                quote = self.market_data._holdings_cache.get(key, {}) or {}
+                live = quote.get('price') or quote.get('last_price') or 0
+                if not pdc or pdc <= 0 or not live:
+                    continue
+                pct = (live - float(pdc)) / float(pdc) * 100
+                changes.append(pct)
+                if pct > 0:
+                    advancers += 1
+                elif pct < 0:
+                    decliners += 1
+            if not changes:
+                return {'level': 0, 'change_percent': 0.0,
+                        'direction': 'SIDEWAYS', 'advancers': 0,
+                        'decliners': 0, 'breadth': None}
+            avg = sum(changes) / len(changes)
+            direction = ('BULLISH' if avg >= 0.5 else
+                         'BEARISH' if avg <= -0.5 else 'SIDEWAYS')
+            breadth = advancers / (advancers + decliners) if (advancers + decliners) else None
+            return {'level': 0, 'change_percent': round(avg, 3),
+                    'direction': direction, 'advancers': advancers,
+                    'decliners': decliners,
+                    'breadth': round(breadth, 3) if breadth is not None else None}
+        except Exception as e:
+            print(f"[market_ctx] failed (non-fatal): {e}")
+            return {'level': 0, 'change_percent': 0.0, 'direction': 'SIDEWAYS',
+                    'advancers': 0, 'decliners': 0, 'breadth': None}
 
     def _unrealized_pnl(self) -> float:
         """Mark-to-market P&L of open positions from the cycle's price
