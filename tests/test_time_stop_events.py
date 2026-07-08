@@ -97,6 +97,8 @@ def _brain_with_one_open(entry_minutes_ago, position_type='LONG'):
     b = _brain()
     b.session_id = 's1'
     b.consecutive_losses = 0
+    b._session_ended = False
+    b._time_stop_logged = set()
     entry = (datetime.now(IST) - timedelta(minutes=entry_minutes_ago)).isoformat()
     trade = {
         'id': 't1', 'symbol': 'INFY', 'exchange': 'NSE',
@@ -105,7 +107,8 @@ def _brain_with_one_open(entry_minutes_ago, position_type='LONG'):
         'quantity': 10, 'entry_value': 1000,
     }
     b.market_data = MagicMock()
-    b.market_data.get_live_quotes_batch.return_value = {'NSE:INFY': {'last_price': 100}}
+    b.market_data.get_fresh_close.return_value = 100
+    b.market_data._holdings_cache = {}
     return b, trade
 
 

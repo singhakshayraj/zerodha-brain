@@ -25,6 +25,11 @@ _is_trading = False
 # RUNNING session and double-trade it.
 INSTANCE_ID = uuid.uuid4().hex
 
+# (session_id, sha) pairs this process has already reported as REQ-072
+# incidents — a failing resume + autopilot retry loop must not re-report
+# the same incident every pass (2026-07-08: one incident spammed for an hour).
+_reported_deploy_incidents = set()
+
 
 def _lock_lost() -> bool:
     """True only on POSITIVE evidence a newer instance claimed the lock.
@@ -271,15 +276,22 @@ def run():
                                 f"code changed mid-session: {old_sha} -> "
                                 f"{config.GIT_SHA} (session {session_id})"
                             )
-                            print(f"[SCHEDULER] REQ-072 INCIDENT: {msg}")
-                            db.write_config(
-                                'deploy_incident',
-                                f"{datetime.now(IST).isoformat()} {msg}",
-                            )
-                            db.log_brain_activity(
-                                session_id, 'ERROR',
-                                message=f"[REQ-072] {msg}",
-                            )
+                            # Once per (session, sha) pair per process. On
+                            # 2026-07-08 a failing resume + autopilot retry
+                            # loop re-entered this path every ~40s, re-writing
+                            # the incident and spamming the feed for an hour.
+                            dedup_key = (session_id, config.GIT_SHA)
+                            if dedup_key not in _reported_deploy_incidents:
+                                _reported_deploy_incidents.add(dedup_key)
+                                print(f"[SCHEDULER] REQ-072 INCIDENT: {msg}")
+                                db.write_config(
+                                    'deploy_incident',
+                                    f"{datetime.now(IST).isoformat()} {msg}",
+                                )
+                                db.log_brain_activity(
+                                    session_id, 'ERROR',
+                                    message=f"[REQ-072] {msg}",
+                                )
                     else:
                         err = _validate_session_config(session_config)
                         if err:
@@ -391,9 +403,23 @@ def run():
                         # 300s sleep was the race window behind the lost-STOP
                         # ghost session.
                         slept = 0
+                        tick = 0
                         while slept < interval:
                             time.sleep(min(10, interval - slept))
                             slept += 10
+                            tick += 1
+
+                            # Intra-cycle stop/target enforcement (~every
+                            # 30s). Cycle-boundary-only checks let stops fill
+                            # at −2.78R instead of ≈−1R (2026-07-08 data).
+                            if tick % 3 == 0:
+                                try:
+                                    brain.check_open_exits()
+                                except Exception as e:
+                                    print(f"[SCHEDULER] exit check error: {e}")
+                                if brain._session_ended:
+                                    break  # circuit breaker fired mid-slice
+
                             cmd = db.get_brain_command()
                             if (
                                 cmd == 'STOP'

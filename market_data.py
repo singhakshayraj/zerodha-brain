@@ -196,6 +196,39 @@ class MarketData:
             print(f"[market_data.get_live_quotes_batch] error: {e}")
             return out
 
+    def get_fresh_close(self, symbol: str):
+        """FRESH latest 5-min close, bypassing the candle TTL cache.
+
+        Exit checks need current prices: get_candles' 300s TTL meant a
+        stop could only be noticed one full cycle late — 2026-07-08 data
+        showed stopped longs filling at −2.78R instead of ≈−1R purely from
+        this latency. Only used for the few OPEN positions, so the extra
+        API calls are negligible."""
+        token = self._instrument_cache.get(symbol)
+        if not token:
+            q = self._holdings_cache.get(symbol)
+            token = q.get('instrument_token') if q else None
+        if not token:
+            return None
+        try:
+            candles = self._get_historical(token, '5minute', days=1)
+            if not candles:
+                return None
+            last_close = candles[-1]['close']
+            # keep caches coherent with the fresher data
+            cache_key = f'{symbol}_5minute'
+            self._candle_cache[cache_key] = candles
+            self._candle_cache_time[cache_key] = time.time()
+            if symbol in self._holdings_cache:
+                self._holdings_cache[symbol]['price'] = last_close
+                self._holdings_cache[symbol]['last_price'] = last_close
+            return last_close
+        except TokenExpiredError:
+            raise
+        except Exception as e:
+            print(f"[market_data.get_fresh_close] {symbol}: {e}")
+            return None
+
     def get_live_price_for_nifty50(self, symbol: str):
         """Fetch last close from most recent 5-min candle for Nifty50 stocks."""
         token = self._instrument_cache.get(symbol, 0)

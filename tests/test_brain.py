@@ -43,6 +43,7 @@ def _make_brain():
     brain.market_data.get_candles.return_value = []
     brain.market_data.verify_instrument_tokens.return_value = []
     brain.market_data.get_live_quotes_batch.return_value = {}
+    brain.market_data.get_fresh_close.return_value = None
     brain.market_data.refresh_holdings_cache.return_value = True
     brain.market_data.get_live_price_for_nifty50.return_value = 1350.0
     brain.signal_engine = MagicMock()
@@ -459,9 +460,7 @@ def test_check_and_close_long_stop_hit():
         'position_type': 'LONG', 'quantity': 2,
         'stop_loss_price': 2400.0, 'target_price': 2600.0, 'entry_value': 5000.0,
     }
-    brain.market_data.get_live_quotes_batch.return_value = {
-        'NSE:RELIANCE': {'last_price': 2390.0}
-    }
+    brain.market_data.get_fresh_close.return_value = 2390.0
     sell_called = []
 
     with patch('brain.db.get_open_trades', return_value=[trade]):
@@ -482,9 +481,7 @@ def test_check_and_close_long_target_hit():
         'position_type': 'LONG', 'quantity': 1,
         'stop_loss_price': 3300.0, 'target_price': 3700.0, 'entry_value': 3500.0,
     }
-    brain.market_data.get_live_quotes_batch.return_value = {
-        'NSE:TCS': {'last_price': 3750.0}
-    }
+    brain.market_data.get_fresh_close.return_value = 3750.0
     sell_called = []
 
     with patch('brain.db.get_open_trades', return_value=[trade]):
@@ -505,9 +502,7 @@ def test_check_and_close_short_stop_hit():
         'position_type': 'SHORT', 'quantity': 3,
         'stop_loss_price': 1500.0, 'target_price': 1400.0, 'entry_value': 4350.0,
     }
-    brain.market_data.get_live_quotes_batch.return_value = {
-        'NSE:INFY': {'last_price': 1510.0}
-    }
+    brain.market_data.get_fresh_close.return_value = 1510.0
     cover_called = []
 
     with patch('brain.db.get_open_trades', return_value=[trade]):
@@ -528,9 +523,7 @@ def test_check_and_close_short_target_hit():
         'position_type': 'SHORT', 'quantity': 5,
         'stop_loss_price': 470.0, 'target_price': 430.0, 'entry_value': 2250.0,
     }
-    brain.market_data.get_live_quotes_batch.return_value = {
-        'NSE:WIPRO': {'last_price': 425.0}
-    }
+    brain.market_data.get_fresh_close.return_value = 425.0
     cover_called = []
 
     with patch('brain.db.get_open_trades', return_value=[trade]):
@@ -552,9 +545,7 @@ def test_check_and_close_circuit_breaker():
         'position_type': 'LONG', 'quantity': 4,
         'stop_loss_price': 490.0, 'target_price': 550.0, 'entry_value': 2000.0,
     }
-    brain.market_data.get_live_quotes_batch.return_value = {
-        'NSE:SBIN': {'last_price': 480.0}
-    }
+    brain.market_data.get_fresh_close.return_value = 480.0
     end_called = []
 
     with patch('brain.db.get_open_trades', return_value=[trade]):

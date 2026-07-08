@@ -171,6 +171,7 @@ class TradingBrain:
             'losing_trades': 0,
         }
         self.traded_symbols_this_cycle = set()
+        self._time_stop_logged = set()  # trade ids with a WOULD_FIRE row
         self.last_context_log = None
         self.consecutive_losses = 0
         self._nifty50_cache = None
@@ -1200,89 +1201,125 @@ class TradingBrain:
             except Exception as e:
                 print(f"[eod] Failed to close {t.get('symbol')}: {e}")
 
+    def _exit_price_for(self, trade: dict):
+        """Freshest price available for an exit decision: TTL-bypassing
+        candle close first (the cached quote is up to a full cycle stale —
+        the −2.78R stop fills of 2026-07-08), holdings cache as fallback."""
+        key = f"{trade.get('exchange', 'NSE')}:{trade['symbol']}"
+        price = self.market_data.get_fresh_close(key)
+        if price:
+            return price
+        quote = self.market_data._holdings_cache.get(key, {}) or {}
+        return quote.get('price') or quote.get('last_price') or 0
+
+    def _evaluate_exit(self, trade: dict, current_price: float) -> bool:
+        """Stop → target → time-stop for ONE open trade, priority order
+        (REQ-051). Returns True if the position was exited. May end the
+        session via the circuit breaker."""
+        should_exit = False
+        exit_reason = None
+        is_short = trade.get('position_type') == 'SHORT'
+
+        if is_short:
+            # For shorts: stop ABOVE entry, target BELOW entry
+            if current_price >= trade['stop_loss_price']:
+                should_exit, exit_reason = True, 'STOP_LOSS_HIT'
+                self.consecutive_losses += 1
+            elif current_price <= trade['target_price']:
+                should_exit, exit_reason = True, 'TARGET_HIT'
+                self.consecutive_losses = 0
+            if should_exit:
+                self._cover_short(trade, current_price)
+        else:
+            if current_price <= trade['stop_loss_price']:
+                should_exit, exit_reason = True, 'STOP_LOSS_HIT'
+                self.consecutive_losses += 1
+            elif current_price >= trade['target_price']:
+                should_exit, exit_reason = True, 'TARGET_HIT'
+                self.consecutive_losses = 0
+            if should_exit:
+                self._execute_sell_by_trade(trade, current_price, exit_reason)
+
+        # Time-stop (REQ-051): only if stop/target did NOT fire, preserving
+        # the stop→target→time-stop priority. Flag-gated.
+        if not should_exit:
+            mins = self._minutes_open(trade)
+            limit = (config.TIME_STOP_MIN_SHORT if is_short
+                     else config.TIME_STOP_MIN)
+            if mins is not None and mins >= limit:
+                if config.TIME_STOP_ENABLED:
+                    print(f"[time_stop] {trade['symbol']} open {mins:.0f}m "
+                          f">= {limit}m — cutting (dead money)")
+                    if is_short:
+                        self._cover_short(trade, current_price)
+                    else:
+                        self._execute_sell_by_trade(trade, current_price, 'TIME_STOP')
+                    should_exit = True
+                elif trade['id'] not in self._time_stop_logged:
+                    # Would-fire counterfactual, once per trade — exit checks
+                    # now run every ~30s and this would spam otherwise.
+                    self._time_stop_logged.add(trade['id'])
+                    db.log_brain_activity(
+                        session_id=self.session_id,
+                        activity_type='TIME_STOP_WOULD_FIRE',
+                        symbol=trade['symbol'],
+                        message=f"time-stop would cut {trade['symbol']} "
+                                f"({mins:.0f}m >= {limit}m) — disabled",
+                        data={'minutes_open': round(mins, 1), 'limit': limit},
+                    )
+
+        if self.consecutive_losses >= config.CIRCUIT_BREAKER_CONSECUTIVE_LOSSES:
+            print(
+                "CIRCUIT BREAKER: 3 consecutive losses. "
+                "Stopping session to protect capital."
+            )
+            db.update_heartbeat(
+                'RUNNING',
+                self.session_stats['trades_executed'],
+                'CIRCUIT BREAKER: 3 consecutive losses — stopping',
+            )
+            self.end_session('CIRCUIT_BREAKER')
+        return should_exit
+
     def _check_and_close_positions(self) -> None:
         open_trades = db.get_open_trades(self.session_id)
         if not open_trades:
             return
-
-        symbols = [f"{t['exchange']}:{t['symbol']}" for t in open_trades]
-        quotes = self.market_data.get_live_quotes_batch(symbols)
-
         for trade in open_trades:
-            key = f"{trade['exchange']}:{trade['symbol']}"
-            quote_data = quotes.get(key, {}) or {}
-            current_price = quote_data.get('last_price', 0)
-
+            current_price = self._exit_price_for(trade)
             if not current_price:
                 continue
-
-            should_exit = False
-            exit_reason = None
-            is_short = trade.get('position_type') == 'SHORT'
-
-            if is_short:
-                # For shorts: stop ABOVE entry, target BELOW entry
-                if current_price >= trade['stop_loss_price']:
-                    should_exit = True
-                    exit_reason = 'STOP_LOSS_HIT'
-                    self.consecutive_losses += 1
-                elif current_price <= trade['target_price']:
-                    should_exit = True
-                    exit_reason = 'TARGET_HIT'
-                    self.consecutive_losses = 0
-                if should_exit:
-                    self._cover_short(trade, current_price)
-            else:
-                if current_price <= trade['stop_loss_price']:
-                    should_exit = True
-                    exit_reason = 'STOP_LOSS_HIT'
-                    self.consecutive_losses += 1
-                elif current_price >= trade['target_price']:
-                    should_exit = True
-                    exit_reason = 'TARGET_HIT'
-                    self.consecutive_losses = 0
-                if should_exit:
-                    self._execute_sell_by_trade(trade, current_price, exit_reason)
-
-            # Time-stop (REQ-051): only if stop/target did NOT already fire,
-            # preserving the stop→target→time-stop priority. Flag-gated so it
-            # can be observed before it changes trade outcomes.
-            if not should_exit:
-                mins = self._minutes_open(trade)
-                limit = (config.TIME_STOP_MIN_SHORT if is_short
-                         else config.TIME_STOP_MIN)
-                if mins is not None and mins >= limit:
-                    if config.TIME_STOP_ENABLED:
-                        print(f"[time_stop] {trade['symbol']} open {mins:.0f}m "
-                              f">= {limit}m — cutting (dead money)")
-                        if is_short:
-                            self._cover_short(trade, current_price)
-                        else:
-                            self._execute_sell_by_trade(trade, current_price, 'TIME_STOP')
-                    else:
-                        # Observability: record that the time-stop WOULD have
-                        # fired, so its impact can be measured before enabling.
-                        db.log_brain_activity(
-                            session_id=self.session_id,
-                            activity_type='TIME_STOP_WOULD_FIRE',
-                            symbol=trade['symbol'],
-                            message=f"time-stop would cut {trade['symbol']} "
-                                    f"({mins:.0f}m >= {limit}m) — disabled",
-                            data={'minutes_open': round(mins, 1), 'limit': limit},
-                        )
-
-            if self.consecutive_losses >= config.CIRCUIT_BREAKER_CONSECUTIVE_LOSSES:
-                print(
-                    "CIRCUIT BREAKER: 3 consecutive losses. "
-                    "Stopping session to protect capital."
-                )
-                db.update_heartbeat(
-                    'RUNNING',
-                    self.session_stats['trades_executed'],
-                    'CIRCUIT BREAKER: 3 consecutive losses — stopping',
-                )
-                self.end_session('CIRCUIT_BREAKER')
+            self._evaluate_exit(trade, current_price)
+            if self._session_ended:
                 return
+
+    def check_open_exits(self) -> None:
+        """Intra-cycle stop/target enforcement — called from the scheduler's
+        10s slice loop (~every 30s). The 2026-07-08 session showed stops
+        detected only at cycle boundaries fill at −2.78R instead of ≈−1R;
+        this closes that latency gap. Never raises — token expiry ends the
+        session exactly like the cycle handler does."""
+        if self._session_ended:
+            return
+        # skip if a cycle is mid-flight (single-threaded scheduler makes
+        # this rare; belt-and-suspenders for future concurrency)
+        if not self._cycle_lock.acquire(blocking=False):
+            return
+        try:
+            self._check_and_close_positions()
+        except TokenExpiredError:
+            print("Token expired (intra-cycle exit check). Stopping session.")
+            db.write_config(
+                'token_incident',
+                f"{datetime.now(IST).isoformat()} token expired mid-session "
+                f"(session {self.session_id})",
+            )
+            db.write_config('brain_status', 'TOKEN_EXPIRED')
+            self.end_session('TOKEN_EXPIRED')
+        except Exception as e:
+            print(f"[brain] intra-cycle exit check failed (non-fatal): {e}")
+        finally:
+            self._cycle_lock.release()
 
     def _execute_sell_by_trade(self, trade: dict, current_price: float, exit_reason: str) -> None:
         qty = trade.get('quantity') or 0
