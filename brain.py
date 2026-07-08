@@ -288,26 +288,39 @@ class TradingBrain:
             print(f"Added {len(self.universe)} holdings to universe")
 
             stock_universe = session_config.get('stockUniverse', 'HOLDINGS')
+            # NIFTY50/OPEN_MARKET = top-50 only. BOTH = top-50 + Next-50 —
+            # these used to be identical (both just added NIFTY50), which
+            # made the universe-breadth experiment axis a no-op.
+            token_sources = []
             if stock_universe in ('BOTH', 'OPEN_MARKET', 'NIFTY50'):
+                token_sources.append(('nifty50', config.NIFTY50_INSTRUMENT_TOKENS))
+            if stock_universe == 'BOTH':
+                token_sources.append(('nifty_next50', config.NIFTY_NEXT50_INSTRUMENT_TOKENS))
+            for source_label, token_map in token_sources:
                 added = 0
-                for sym, token in config.NIFTY50_INSTRUMENT_TOKENS.items():
+                for sym, token in token_map.items():
                     if sym not in self.universe:
                         parts = sym.split(':', 1)
                         self.universe[sym] = {
                             'symbol': parts[1],
                             'exchange': parts[0],
                             'instrument_token': token,
-                            'source': 'nifty50',
+                            'source': source_label,
                         }
                         if token > 0:
                             self.market_data._instrument_cache[sym] = token
                         added += 1
-                print(f"Added {added} Nifty50 stocks to universe")
+                print(f"Added {added} {source_label} stocks to universe")
 
             print(f"Universe: {len(self.universe)} stocks (mode: {stock_universe})")
 
             print("[brain] Verifying instrument tokens...")
-            bad_tokens = self.market_data.verify_instrument_tokens()
+            index_map = {
+                sym: data['instrument_token']
+                for sym, data in self.universe.items()
+                if data.get('source') in ('nifty50', 'nifty_next50')
+            }
+            bad_tokens = self.market_data.verify_instrument_tokens(index_map)
             if bad_tokens:
                 print(f"[brain] ⚠️  {len(bad_tokens)} bad tokens detected:")
                 for symbol, token, candle_price, cached_price in bad_tokens:
@@ -883,8 +896,13 @@ class TradingBrain:
             )
 
             if current_cycle == 1:
-                print("[brain] Cycle 1 complete — verifying Nifty50 tokens with live prices...")
-                bad = self.market_data.verify_instrument_tokens()
+                print("[brain] Cycle 1 complete — verifying index tokens with live prices...")
+                index_map = {
+                    sym: data['instrument_token']
+                    for sym, data in self.universe.items()
+                    if data.get('source') in ('nifty50', 'nifty_next50')
+                }
+                bad = self.market_data.verify_instrument_tokens(index_map)
                 if bad:
                     for symbol, token, candle, cached in bad:
                         print(

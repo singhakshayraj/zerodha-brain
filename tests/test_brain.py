@@ -664,3 +664,68 @@ def test_initialize_removes_bad_token():
 
     assert result is True
     assert 'NSE:RELIANCE' not in brain.universe
+
+
+def _init_with_universe(stock_universe):
+    """Run brain.initialize() with a given stockUniverse and return the brain."""
+    from brain import TradingBrain
+    brain = TradingBrain()
+    session_config = {
+        'capitalDeployed': 10000.0,
+        'maxTrades': 10,
+        'maxLossPercent': 5.0,
+        'maxProfitPercent': 15.0,
+        'tradeIntervalSeconds': 300,
+        'stockUniverse': stock_universe,
+        'sessionId': 'sess-init-test',
+    }
+
+    mock_kite = MagicMock()
+    mock_kite.get_holdings.return_value = []
+    mock_kite.get_instruments.side_effect = Exception("unavailable")
+
+    mock_md = MagicMock()
+    mock_md._holdings_cache = {}
+    mock_md._instrument_cache = {}
+    mock_md.verify_instrument_tokens.return_value = []
+    mock_md.refresh_holdings_cache.return_value = True
+
+    with patch('brain.KiteClient', return_value=mock_kite):
+        with patch('brain.MarketData', return_value=mock_md):
+            with patch('brain.db.cleanup_stale_open_trades'):
+                with patch('brain.db.add_holdings_to_universe'):
+                    with patch('brain.db.get_win_rate', return_value=(0.5, 5)):
+                        with patch('brain.db.write_config'):
+                            with patch('brain.logger.set_context'):
+                                with patch('brain.logger.info'):
+                                    brain.initialize('fake-token', session_config)
+    return brain, mock_md
+
+
+def test_initialize_nifty50_excludes_next50_stocks():
+    brain, mock_md = _init_with_universe('NIFTY50')
+    assert 'NSE:RELIANCE' in brain.universe          # NIFTY50
+    assert 'NSE:DMART' not in brain.universe          # NIFTY Next 50 only
+    assert brain.universe['NSE:RELIANCE']['source'] == 'nifty50'
+    # verify_instrument_tokens is called with only what was actually added
+    called_map = mock_md.verify_instrument_tokens.call_args[0][0]
+    assert 'NSE:RELIANCE' in called_map
+    assert 'NSE:DMART' not in called_map
+
+
+def test_initialize_both_includes_next50_stocks():
+    brain, mock_md = _init_with_universe('BOTH')
+    assert 'NSE:RELIANCE' in brain.universe           # NIFTY50
+    assert 'NSE:DMART' in brain.universe              # NIFTY Next 50
+    assert brain.universe['NSE:DMART']['source'] == 'nifty_next50'
+    called_map = mock_md.verify_instrument_tokens.call_args[0][0]
+    assert 'NSE:RELIANCE' in called_map
+    assert 'NSE:DMART' in called_map
+
+
+def test_initialize_holdings_only_adds_no_index_stocks():
+    brain, mock_md = _init_with_universe('HOLDINGS')
+    assert 'NSE:RELIANCE' not in brain.universe
+    assert 'NSE:DMART' not in brain.universe
+    called_map = mock_md.verify_instrument_tokens.call_args[0][0]
+    assert called_map == {}
