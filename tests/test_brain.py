@@ -548,14 +548,22 @@ def test_check_and_close_circuit_breaker():
     brain.market_data.get_fresh_close.return_value = 480.0
     end_called = []
 
+    # The streak is now owned by _record_close_outcome, fired from the close
+    # path — so the mocked sell must record the realized loss like the real
+    # one would, otherwise the counter never advances.
+    def _sell(t, price, reason):
+        brain._record_close_outcome(t['symbol'], -25.0)
+
     with patch('brain.db.get_open_trades', return_value=[trade]):
         with patch('brain.db.end_session'):
             with patch('brain.db.write_config'):
                 with patch('brain.db.update_heartbeat'):
-                    with patch.object(brain, '_execute_sell_by_trade'):
-                        with patch.object(brain, 'end_session',
-                                          side_effect=lambda r: end_called.append(r)):
-                            brain._check_and_close_positions()
+                    with patch('brain.db.log_brain_activity'):
+                        with patch.object(brain, '_execute_sell_by_trade',
+                                          side_effect=_sell):
+                            with patch.object(brain, 'end_session',
+                                              side_effect=lambda r: end_called.append(r)):
+                                brain._check_and_close_positions()
 
     assert any('CIRCUIT_BREAKER' in r for r in end_called)
 

@@ -201,6 +201,14 @@ ADX_WEAK_THRESHOLD = 20.0
 # Circuit breaker
 CIRCUIT_BREAKER_CONSECUTIVE_LOSSES = 3
 
+# Re-entry cooldown: block re-entering a symbol within this many minutes of a
+# losing exit on it (2026-07-09 re-shorted KOTAKBANK ~6min after it stopped
+# out → a second −1.2R loss). Flag-gated dark feature: the would-block is
+# always logged as a counterfactual; it only actually blocks when enabled,
+# so we can measure the effect on collected data before turning it on.
+REENTRY_COOLDOWN_ENABLED = os.getenv('REENTRY_COOLDOWN_ENABLED', 'false').strip().lower() == 'true'
+REENTRY_COOLDOWN_MIN = int(os.getenv('REENTRY_COOLDOWN_MIN', '15'))
+
 # Per-cycle trade cap (spread trades across cycles, avoid burst)
 MAX_TRADES_PER_CYCLE = 3
 

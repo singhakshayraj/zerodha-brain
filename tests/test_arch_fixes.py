@@ -140,12 +140,14 @@ def test_resume_stats_rebuilds_consecutive_loss_streak():
     brain.session_stats = {'trades_executed': 0, 'total_pnl': 0.0,
                            'winning_trades': 0, 'losing_trades': 0}
     brain.consecutive_losses = 0
-    # newest-first (matches db.get_session_trades ordering)
+    # newest-first (matches db.get_session_trades ordering). Streak is by pnl
+    # sign now, not exit reason: two most-recent losses, then a winning close
+    # ends the streak.
     trades = [
         _closed('STOP_LOSS_HIT', -50),
-        _closed('STOP_LOSS_HIT', -40),
-        _closed('EOD_CLOSE', 5),       # doesn't touch the streak
-        _closed('TARGET_HIT', 80),     # streak boundary
+        _closed('TIME_STOP', -40),     # a non-stop loss still extends the streak
+        _closed('EOD_CLOSE', 5),       # winning close → streak boundary
+        _closed('TARGET_HIT', 80),
         _closed('STOP_LOSS_HIT', -30),
     ]
     with patch('brain.db.get_session_trades', return_value=trades):

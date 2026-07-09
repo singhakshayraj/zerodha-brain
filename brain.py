@@ -184,6 +184,7 @@ class TradingBrain:
         self._decision_ts = None        # REQ-073 decision→order clock
         self.last_context_log = None
         self.consecutive_losses = 0
+        self._last_loss_exit = {}   # symbol -> datetime of its last losing close
         self._nifty50_cache = None
         self._session_ended = False
         self.universe = {}
@@ -211,17 +212,15 @@ class TradingBrain:
         self.session_stats['losing_trades'] = sum(1 for t in closed if (t.get('pnl') or 0) <= 0)
 
         # Rebuild the circuit-breaker streak too — resetting it to zero on
-        # every restart gave a session with 2 straight stop-losses a free
-        # pass. Mirror the live counter's semantics: stop-losses extend the
-        # streak, a target hit resets it, other exits don't touch it.
-        # get_session_trades returns newest-first.
+        # every restart gave a session with 2 straight losses a free pass.
+        # Mirror the live counter's semantics (_record_close_outcome): any
+        # losing close extends the streak, any winning close resets it,
+        # regardless of exit reason. get_session_trades returns newest-first.
         streak = 0
         for t in closed:
-            reason = t.get('exit_reason')
-            if reason == 'STOP_LOSS_HIT':
-                streak += 1
-            elif reason == 'TARGET_HIT':
+            if (t.get('pnl') or 0) > 0:
                 break
+            streak += 1
         self.consecutive_losses = streak
 
         print(
@@ -817,6 +816,8 @@ class TradingBrain:
                             self.traded_symbols_this_cycle.add(symbol)
                         elif long_match:
                             print(f"[brain] Already long {symbol}, skipping duplicate BUY")
+                        elif self._cooldown_gate(symbol):
+                            pass   # re-entry cooldown (flag-gated) suppressed it
                         else:
                             self._execute_buy(symbol, exchange, live_price, signal)
                             remaining_trades -= 1
@@ -861,10 +862,13 @@ class TradingBrain:
                             signal.get('archetype') == 'ORB'
                             and signal['confidence'] >= config.ORB_MIN_CONFIDENCE
                         ):
-                            self._open_short(symbol, exchange, live_price, signal)
-                            remaining_trades -= 1
-                            trades_this_cycle += 1
-                            self.traded_symbols_this_cycle.add(symbol)
+                            if self._cooldown_gate(symbol):
+                                pass   # would short, but re-entry cooldown (flag) suppressed it
+                            else:
+                                self._open_short(symbol, exchange, live_price, signal)
+                                remaining_trades -= 1
+                                trades_this_cycle += 1
+                                self.traded_symbols_this_cycle.add(symbol)
                         else:
                             regime_short = (signal.get('regime') or 'UNK')[:4]
                             self._sell_noops.append(
@@ -1172,6 +1176,7 @@ class TradingBrain:
                 self.session_stats['winning_trades'] += 1
             else:
                 self.session_stats['losing_trades'] += 1
+            self._record_close_outcome(symbol, pnl)
             db.log_brain_activity(
                 session_id=self.session_id,
                 activity_type='POSITION_EXIT',
@@ -1179,6 +1184,64 @@ class TradingBrain:
                 message=f"COVER {symbol} — P&L: ₹{pnl:.2f}",
                 data={'exit_reason': 'COVER_SHORT', 'pnl': pnl, 'pnl_percent': pnl_pct},
             )
+
+    def _record_close_outcome(self, symbol: str, pnl: float) -> None:
+        """Single source of truth for post-close bookkeeping: the
+        consecutive-loss streak (drives the circuit breaker) and the
+        re-entry cooldown clock. Every realized close routes through here,
+        so a losing time-stop or session-end exit counts the same as a clean
+        stop — the 2026-07-09 breaker undercount came from only STOP_LOSS_HIT
+        touching the counter."""
+        if pnl > 0:
+            self.consecutive_losses = 0
+        else:
+            self.consecutive_losses += 1
+            self._last_loss_exit[symbol] = datetime.now(IST)
+
+    def _reentry_cooldown(self, symbol: str):
+        """(blocked, minutes_since_last_loss). blocked is whether re-entry
+        should be suppressed given a recent losing exit on this symbol —
+        only meaningful when config.REENTRY_COOLDOWN_ENABLED; callers log the
+        counterfactual either way. Returns (False, None) if no prior loss."""
+        ts = self._last_loss_exit.get(symbol)
+        if not ts:
+            return False, None
+        mins = (datetime.now(IST) - ts).total_seconds() / 60.0
+        return mins < config.REENTRY_COOLDOWN_MIN, mins
+
+    def _cooldown_gate(self, symbol: str) -> bool:
+        """Entry guard. Returns True if the caller should SKIP this entry.
+        Always logs the counterfactual; only actually blocks when the flag is
+        on (dark feature — measure the effect before enabling)."""
+        blocked, mins = self._reentry_cooldown(symbol)
+        if not blocked:
+            return False
+        if config.REENTRY_COOLDOWN_ENABLED:
+            print(f"[cooldown] skip {symbol} — losing exit {mins:.0f}m ago "
+                  f"(< {config.REENTRY_COOLDOWN_MIN}m)")
+            self._log_activity_safe(
+                'REENTRY_BLOCKED', symbol,
+                f"cooldown: {symbol} lost {mins:.0f}m ago (< "
+                f"{config.REENTRY_COOLDOWN_MIN}m) — entry blocked",
+                {'minutes_since_loss': round(mins, 1),
+                 'cooldown_min': config.REENTRY_COOLDOWN_MIN})
+            return True
+        # flag off — record what it WOULD have blocked, then allow
+        self._log_activity_safe(
+            'REENTRY_WOULD_BLOCK', symbol,
+            f"cooldown would block {symbol} (lost {mins:.0f}m ago) — disabled",
+            {'minutes_since_loss': round(mins, 1),
+             'cooldown_min': config.REENTRY_COOLDOWN_MIN})
+        return False
+
+    def _log_activity_safe(self, activity_type: str, symbol: str,
+                           message: str, data: dict) -> None:
+        try:
+            db.log_brain_activity(session_id=self.session_id,
+                                  activity_type=activity_type,
+                                  symbol=symbol, message=message, data=data)
+        except Exception:
+            pass
 
     def _decision_latency_ms(self):
         """ms from the entry decision to this order (REQ-073). None if no
@@ -1353,23 +1416,23 @@ class TradingBrain:
         exit_reason = None
         is_short = trade.get('position_type') == 'SHORT'
 
+        # The consecutive-loss streak is NOT updated here — it's owned by
+        # _record_close_outcome, called from every close path by realized
+        # pnl sign. Counting it here (only on STOP_LOSS_HIT) is what let the
+        # circuit breaker undercount a losing streak on 2026-07-09.
         if is_short:
             # For shorts: stop ABOVE entry, target BELOW entry
             if current_price >= trade['stop_loss_price']:
                 should_exit, exit_reason = True, 'STOP_LOSS_HIT'
-                self.consecutive_losses += 1
             elif current_price <= trade['target_price']:
                 should_exit, exit_reason = True, 'TARGET_HIT'
-                self.consecutive_losses = 0
             if should_exit:
                 self._cover_short(trade, current_price)
         else:
             if current_price <= trade['stop_loss_price']:
                 should_exit, exit_reason = True, 'STOP_LOSS_HIT'
-                self.consecutive_losses += 1
             elif current_price >= trade['target_price']:
                 should_exit, exit_reason = True, 'TARGET_HIT'
-                self.consecutive_losses = 0
             if should_exit:
                 self._execute_sell_by_trade(trade, current_price, exit_reason)
 
@@ -1492,6 +1555,7 @@ class TradingBrain:
                 self.session_stats['winning_trades'] += 1
             else:
                 self.session_stats['losing_trades'] += 1
+            self._record_close_outcome(trade['symbol'], pnl)
 
             db.log_brain_activity(
                 session_id=self.session_id,
