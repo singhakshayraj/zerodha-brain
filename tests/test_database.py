@@ -100,6 +100,76 @@ def test_link_decision_trade_noop_on_missing_ids():
         database.supabase.table.return_value.update.assert_not_called()
 
 
+def _candle(ts, o=100, h=101, l=99, c=100.5, v=1000):
+    return {'timestamp': ts, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v}
+
+
+def test_archive_candles_upserts_trailing_bars():
+    with patch.object(database, 'supabase', _chain([])):
+        up = MagicMock()
+        up.execute.return_value.data = [{}]
+        database.supabase.table.return_value.upsert = MagicMock(return_value=up)
+        candles = [_candle(f'2026-07-09T09:{15+i:02d}:00+0530') for i in range(6)]
+        n = database.archive_candles('s1', 'INFY', 'NSE', candles, tail=3)
+        assert n == 3                       # only the trailing 3 bars
+        rows = database.supabase.table.return_value.upsert.call_args[0][0]
+        assert len(rows) == 3
+        assert rows[0]['symbol'] == 'INFY'
+        assert rows[0]['trade_date'] == '2026-07-09'
+        assert rows[0]['interval'] == '5minute'
+        # dedup key passed
+        assert database.supabase.table.return_value.upsert.call_args.kwargs['on_conflict'] == 'symbol,interval,ts'
+
+
+def test_archive_candles_empty_is_noop():
+    with patch.object(database, 'supabase', _chain([])):
+        database.supabase.table.return_value.upsert = MagicMock()
+        assert database.archive_candles('s1', 'INFY', 'NSE', []) == 0
+        database.supabase.table.return_value.upsert.assert_not_called()
+
+
+def test_archive_candles_skips_bar_without_timestamp():
+    with patch.object(database, 'supabase', _chain([])):
+        up = MagicMock()
+        up.execute.return_value.data = [{}]
+        database.supabase.table.return_value.upsert = MagicMock(return_value=up)
+        candles = [{'open': 1, 'high': 2, 'low': 1, 'close': 1.5, 'volume': 10},
+                   _candle('2026-07-09T09:15:00+0530')]
+        n = database.archive_candles('s1', 'INFY', 'NSE', candles, tail=3)
+        assert n == 1   # the timestamp-less bar dropped
+
+
+def test_candle_rows_pure_formatting_no_db():
+    candles = [_candle(f'2026-07-09T09:{15+i:02d}:00+0530', c=100 + i) for i in range(5)]
+    rows = database.candle_rows('s1', 'INFY', 'NSE', candles, tail=2)
+    assert len(rows) == 2                     # trailing 2 only
+    assert rows[-1]['close'] == 104
+    assert rows[0]['symbol'] == 'INFY'
+    assert rows[0]['trade_date'] == '2026-07-09'
+    assert all(r['interval'] == '5minute' for r in rows)
+
+
+def test_upsert_candles_single_bulk_call():
+    with patch.object(database, 'supabase', _chain([])):
+        up = MagicMock()
+        up.execute.return_value.data = [{}]
+        database.supabase.table.return_value.upsert = MagicMock(return_value=up)
+        rows = [{'symbol': 'A', 'interval': '5minute', 'ts': 't1'},
+                {'symbol': 'B', 'interval': '5minute', 'ts': 't2'}]
+        n = database.upsert_candles(rows)
+        assert n == 2
+        # exactly one round-trip for the whole batch
+        assert database.supabase.table.return_value.upsert.call_count == 1
+        assert database.supabase.table.return_value.upsert.call_args.kwargs['on_conflict'] == 'symbol,interval,ts'
+
+
+def test_upsert_candles_empty_noop():
+    with patch.object(database, 'supabase', _chain([])):
+        database.supabase.table.return_value.upsert = MagicMock()
+        assert database.upsert_candles([]) == 0
+        database.supabase.table.return_value.upsert.assert_not_called()
+
+
 def test_close_trade_sets_is_winner_true_on_positive_pnl():
     """close_trade: pnl > 0 → is_winner=True."""
     with patch.object(database, 'supabase', _chain([])):

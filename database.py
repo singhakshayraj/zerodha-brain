@@ -633,6 +633,65 @@ def log_quote_snapshot(session_id: str, cycle: int, prices: dict) -> None:
         print(f"[log_quote_snapshot] error: {e}")
 
 
+def candle_rows(session_id: str, symbol: str, exchange: str,
+                candles: list, interval: str = '5minute',
+                tail: int = 3) -> list:
+    """Format the trailing `tail` OHLCV bars into candle-archive rows (pure —
+    no DB). Only the last few bars: the forming bar finalizes over successive
+    cycles, older closed bars don't change, and the (symbol,interval,ts)
+    upsert dedups a bar however many cycles re-saw it."""
+    if not candles:
+        return []
+    rows = []
+    for c in candles[-tail:]:
+        ts = c.get('timestamp')
+        if not ts:
+            continue
+        try:
+            rows.append({
+                'symbol': symbol,
+                'exchange': exchange or 'NSE',
+                'interval': interval,
+                'ts': ts,
+                'trade_date': str(ts)[:10],   # ISO 'YYYY-MM-DD...' (IST trading day)
+                'open': c.get('open'),
+                'high': c.get('high'),
+                'low': c.get('low'),
+                'close': c.get('close'),
+                'volume': int(c.get('volume') or 0),
+                'session_id': session_id,
+                'updated_at': datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as e:
+            print(f"[candle_rows] skip bad bar {symbol} {ts}: {e}")
+    return rows
+
+
+def upsert_candles(rows: list) -> int:
+    """One bulk upsert of the whole cycle's candle rows — a single round-trip
+    instead of one-per-symbol (that per-symbol version added ~7s/cycle in
+    prod, slowing stop detection). quote_snapshots keeps only last-price;
+    this keeps the actual bars, the substrate for a replay/backtest harness
+    (M5) and price-action models that can't be reliably re-fetched later."""
+    if not rows:
+        return 0
+    try:
+        supabase.table('candles').upsert(
+            rows, on_conflict='symbol,interval,ts').execute()
+        return len(rows)
+    except Exception as e:
+        print(f"[upsert_candles] error ({len(rows)} rows): {e}")
+        return 0
+
+
+def archive_candles(session_id: str, symbol: str, exchange: str,
+                    candles: list, interval: str = '5minute',
+                    tail: int = 3) -> int:
+    """Single-symbol convenience: format + upsert one symbol's bars."""
+    return upsert_candles(
+        candle_rows(session_id, symbol, exchange, candles, interval, tail))
+
+
 # --- BRAIN ACTIVITY ---
 
 def log_brain_activity(

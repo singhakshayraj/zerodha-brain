@@ -509,6 +509,7 @@ class TradingBrain:
 
             cycle_start_time = time.time()
             analyzed_count = 0
+            cycle_candle_rows = []   # buffered OHLCV bars, bulk-upserted below
 
             for key, stock in analyzable.items():
                 if remaining_trades <= 0:
@@ -538,6 +539,13 @@ class TradingBrain:
                     candles_5min = self.market_data.get_candles(
                         key, interval='5minute', days=3
                     )
+                    # Buffer trailing bars for a single bulk upsert at cycle
+                    # end — the durable OHLCV archive behind every decision,
+                    # for later replay/backtest. One round-trip, not one per
+                    # symbol (that added ~7s/cycle, slowing stop detection).
+                    if candles_5min:
+                        cycle_candle_rows.extend(db.candle_rows(
+                            self.session_id, symbol, exchange, candles_5min))
                     candles_15min = self.market_data.get_candles(
                         key, interval='15minute', days=5
                     )
@@ -888,6 +896,10 @@ class TradingBrain:
                 except Exception as e:
                     print(f"Error analyzing {symbol}: {e}")
                     continue
+
+            # One bulk upsert of the cycle's OHLCV bars (non-fatal).
+            if cycle_candle_rows:
+                db.upsert_candles(cycle_candle_rows)
 
             db.update_session(self.session_id, {
                 'total_trades_executed': self.session_stats['trades_executed'],
