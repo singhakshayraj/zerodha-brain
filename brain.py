@@ -492,6 +492,8 @@ class TradingBrain:
             print(f"[market_ctx] dir={nifty['direction']} "
                   f"chg={nifty['change_percent']}% "
                   f"breadth={nifty['advancers']}/{nifty['decliners']} "
+                  f"n={nifty.get('sample_size')} rej={nifty.get('rejected')}"
+                  f"{' LOWCONF' if nifty.get('low_confidence') else ''} "
                   f"(feed={'ON' if config.MARKET_DIRECTION_ENABLED else 'OFF'})")
 
             # Step 5
@@ -698,6 +700,9 @@ class TradingBrain:
                             'advancers': self.market_ctx['advancers'],
                             'decliners': self.market_ctx['decliners'],
                             'breadth': self.market_ctx['breadth'],
+                            'sample_size': self.market_ctx.get('sample_size'),
+                            'rejected': self.market_ctx.get('rejected'),
+                            'low_confidence': self.market_ctx.get('low_confidence'),
                             'fed_to_engine': config.MARKET_DIRECTION_ENABLED,
                         },
                     )
@@ -1193,39 +1198,57 @@ class TradingBrain:
         have, and yields breadth for the trend-tells breadth_sector tell.
 
         Returns {level, change_percent, direction, advancers, decliners,
-        breadth}. Never raises."""
+        breadth, sample_size, rejected, low_confidence}. Never raises.
+
+        Per-stock moves beyond config.MARKET_MAX_STOCK_MOVE_PCT are dropped as
+        bad data (garbage PDC / wrong token / unadjusted split), and a result
+        built on fewer than config.MARKET_BREADTH_MIN_SAMPLES clean stocks is
+        flagged low_confidence and forced SIDEWAYS — both guard the audit
+        block from the 2026-07-09 case (change=123.9% off two bad packs)."""
+        max_move = config.MARKET_MAX_STOCK_MOVE_PCT
         try:
             changes = []
-            advancers = decliners = 0
+            advancers = decliners = rejected = 0
             for key, data in self.universe.items():
                 pack = self.level_packs.get(key)
                 pdc = (pack or {}).get('pdc')
                 quote = self.market_data._holdings_cache.get(key, {}) or {}
                 live = quote.get('price') or quote.get('last_price') or 0
-                if not pdc or pdc <= 0 or not live:
+                if not pdc or float(pdc) <= 0 or not live:
                     continue
                 pct = (live - float(pdc)) / float(pdc) * 100
+                if abs(pct) > max_move:
+                    rejected += 1          # implausible move → bad reference data
+                    continue
                 changes.append(pct)
                 if pct > 0:
                     advancers += 1
                 elif pct < 0:
                     decliners += 1
-            if not changes:
-                return {'level': 0, 'change_percent': 0.0,
-                        'direction': 'SIDEWAYS', 'advancers': 0,
-                        'decliners': 0, 'breadth': None}
-            avg = sum(changes) / len(changes)
+            sample_size = len(changes)
+            avg = (sum(changes) / sample_size) if sample_size else 0.0
+            low_confidence = sample_size < config.MARKET_BREADTH_MIN_SAMPLES
+            if low_confidence:
+                # Not enough clean breadth to make a directional call.
+                return {'level': 0, 'change_percent': round(avg, 3),
+                        'direction': 'SIDEWAYS', 'advancers': advancers,
+                        'decliners': decliners, 'breadth': None,
+                        'sample_size': sample_size, 'rejected': rejected,
+                        'low_confidence': True}
             direction = ('BULLISH' if avg >= 0.5 else
                          'BEARISH' if avg <= -0.5 else 'SIDEWAYS')
             breadth = advancers / (advancers + decliners) if (advancers + decliners) else None
             return {'level': 0, 'change_percent': round(avg, 3),
                     'direction': direction, 'advancers': advancers,
                     'decliners': decliners,
-                    'breadth': round(breadth, 3) if breadth is not None else None}
+                    'breadth': round(breadth, 3) if breadth is not None else None,
+                    'sample_size': sample_size, 'rejected': rejected,
+                    'low_confidence': False}
         except Exception as e:
             print(f"[market_ctx] failed (non-fatal): {e}")
             return {'level': 0, 'change_percent': 0.0, 'direction': 'SIDEWAYS',
-                    'advancers': 0, 'decliners': 0, 'breadth': None}
+                    'advancers': 0, 'decliners': 0, 'breadth': None,
+                    'sample_size': 0, 'rejected': 0, 'low_confidence': True}
 
     def _unrealized_pnl(self) -> float:
         """Mark-to-market P&L of open positions from the cycle's price

@@ -3,6 +3,8 @@ and 09:30 in-play locker (idempotency, never-throw, lock-time gate)."""
 import os
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 with patch.dict(os.environ, {
     'SUPABASE_URL': 'https://fake.supabase.co',
     'SUPABASE_SERVICE_KEY': 'fake-key',
@@ -73,7 +75,7 @@ def _md_with_candles():
 
 def test_level_pack_builds_once(monkeypatch):
     md = _md_with_candles()
-    with patch('data_jobs.db.level_pack_exists', return_value=False), \
+    with patch('data_jobs.db.get_level_pack_map', return_value={}), \
          patch('data_jobs.db.upsert_level_pack') as up:
         n = data_jobs.maybe_build_level_pack(md, {'NSE:INFY': {}, 'NSE:TCS': {}})
     assert n == 2 and up.call_count == 2
@@ -81,17 +83,41 @@ def test_level_pack_builds_once(monkeypatch):
 
 def test_level_pack_skips_when_already_built():
     md = _md_with_candles()
-    with patch('data_jobs.db.level_pack_exists', return_value=True), \
+    with patch('data_jobs.db.get_level_pack_map',
+               return_value={'NSE:INFY': {'pdc': 100}}), \
          patch('data_jobs.db.upsert_level_pack') as up:
         n = data_jobs.maybe_build_level_pack(md, {'NSE:INFY': {}})
     assert n == 0
     up.assert_not_called()
 
 
+def test_level_pack_builds_only_missing():
+    # Self-heal: 1 of 2 already built (a partial prior run) — build only the
+    # missing one instead of skipping the whole day (2026-07-09 trap).
+    md = _md_with_candles()
+    with patch('data_jobs.db.get_level_pack_map',
+               return_value={'NSE:INFY': {'pdc': 100}}), \
+         patch('data_jobs.db.upsert_level_pack') as up:
+        n = data_jobs.maybe_build_level_pack(md, {'NSE:INFY': {}, 'NSE:TCS': {}})
+    assert n == 1 and up.call_count == 1
+
+
+def test_level_pack_aborts_on_token_expiry():
+    # A dying token mid-build must abort the whole job (re-raise), not persist
+    # a partial garbage set that then blocks the day.
+    from kite_client import TokenExpiredError
+    md = MagicMock()
+    md.get_candles.side_effect = TokenExpiredError("expired")
+    with patch('data_jobs.db.get_level_pack_map', return_value={}), \
+         patch('data_jobs.db.upsert_level_pack'):
+        with pytest.raises(TokenExpiredError):
+            data_jobs.maybe_build_level_pack(md, {'NSE:INFY': {}, 'NSE:TCS': {}})
+
+
 def test_level_pack_never_throws():
     md = MagicMock()
     md.get_candles.side_effect = RuntimeError("net down")
-    with patch('data_jobs.db.level_pack_exists', return_value=False), \
+    with patch('data_jobs.db.get_level_pack_map', return_value={}), \
          patch('data_jobs.db.upsert_level_pack'):
         assert data_jobs.maybe_build_level_pack(md, {'NSE:INFY': {}}) == 0
 

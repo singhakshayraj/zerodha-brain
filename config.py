@@ -128,6 +128,14 @@ ORB_MIN_CONFIDENCE = int(os.getenv('ORB_MIN_CONFIDENCE', '70'))
 # SIDEWAYS-fed baseline until we validate the effect, then flip with the
 # other strategy flags.
 MARKET_DIRECTION_ENABLED = os.getenv('MARKET_DIRECTION_ENABLED', 'false').strip().lower() == 'true'
+# Breadth sanity: a per-stock day-move beyond this % is treated as a bad PDC,
+# stale/wrong token, or an unadjusted corporate action — excluded from the
+# breadth average instead of poisoning it (2026-07-09 logged change=123.9%
+# off two garbage level-pack PDCs). And direction/breadth need a minimum
+# number of clean samples before they mean anything — below it the context is
+# reported low-confidence SIDEWAYS rather than a confident call off ~2 stocks.
+MARKET_MAX_STOCK_MOVE_PCT = float(os.getenv('MARKET_MAX_STOCK_MOVE_PCT', '20'))
+MARKET_BREADTH_MIN_SAMPLES = int(os.getenv('MARKET_BREADTH_MIN_SAMPLES', '5'))
 
 # Paper trading: real market data + real decisions, simulated fills.
 # No Kite orders are ever placed when true. See paper_broker.py.

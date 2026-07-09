@@ -127,3 +127,27 @@ def test_place_short_order_complete_returns_dict(om):
     assert result['quantity'] == 4
     # No safety check for shorts
     kite.get_positions.assert_not_called()
+
+
+# --- square_off_all: SHORTs must be covered, not sold ---
+
+def test_square_off_all_covers_shorts_not_sells(om):
+    trades = [
+        {'symbol': 'NSE:AXISBANK', 'exchange': 'NSE', 'quantity': 4, 'position_type': 'SHORT'},
+    ]
+    with patch.object(om, 'cover_short_order') as cover, \
+         patch.object(om, 'place_sell_order') as sell:
+        om.square_off_all(MagicMock(), trades)
+    cover.assert_called_once()
+    sell.assert_not_called()
+
+
+def test_square_off_all_sells_longs(om):
+    trades = [
+        {'symbol': 'NSE:SBIN', 'exchange': 'NSE', 'quantity': 7, 'position_type': 'LONG'},
+    ]
+    with patch.object(om, 'cover_short_order') as cover, \
+         patch.object(om, 'place_sell_order') as sell:
+        om.square_off_all(MagicMock(), trades)
+    sell.assert_called_once()
+    cover.assert_not_called()

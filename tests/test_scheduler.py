@@ -91,6 +91,50 @@ def test_start_initialize_false_no_trade_loop():
     brain.run_cycle.assert_not_called()
 
 
+# --- START: init failure must release the session (2026-07-09 zombie fix) ---
+
+def test_start_initialize_false_aborts_session_and_clears_pointer():
+    """A failed init (e.g. expired token) must mark the DB session ABORTED and
+    clear active_session_id — otherwise the row stays RUNNING and the pointer
+    stays set, a zombie that silently blocks every later Start."""
+    import scheduler
+    scheduler._is_trading = False
+    brain = _make_brain(initialized=False)
+    cmds = ['START']
+
+    def get_cmd():
+        if cmds:
+            return cmds.pop(0)
+        raise KeyboardInterrupt
+
+    with patch('scheduler.db.get_brain_command', side_effect=get_cmd), \
+         patch('scheduler.db.get_enc_token', return_value='tok'), \
+         patch('scheduler.db.get_session_config',
+               return_value={'capitalDeployed': 10000, 'maxLossPercent': 5,
+                             'tradeIntervalSeconds': 1}), \
+         patch('scheduler.db.create_session', return_value={'id': 'sess-zombie'}), \
+         patch('scheduler.db.update_session') as upd, \
+         patch('scheduler.db.write_config') as wc, \
+         patch('scheduler.db.update_heartbeat'), \
+         patch('scheduler.risk_manager.is_market_open', return_value=True), \
+         patch('scheduler.TradingBrain', return_value=brain), \
+         patch('scheduler.time.sleep'):
+        try:
+            scheduler.run()
+        except (KeyboardInterrupt, StopIteration):
+            pass
+
+    # session marked ABORTED / INIT_FAILED
+    upd.assert_called_once()
+    assert upd.call_args.args[0] == 'sess-zombie'
+    assert upd.call_args.args[1]['status'] == 'ABORTED'
+    assert upd.call_args.args[1]['end_reason'] == 'INIT_FAILED'
+    # active_session_id cleared to ''
+    cleared = [c for c in wc.call_args_list
+               if c.args and c.args[0] == 'active_session_id' and c.args[1] == '']
+    assert cleared, "active_session_id was not cleared after init failure"
+
+
 # --- START success → brain initialized ---
 
 def test_start_success_brain_initialized():

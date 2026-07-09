@@ -331,6 +331,20 @@ def run():
 
                     if not initialized:
                         print("Brain initialization failed")
+                        # Release the session pointers. Before this, a failed
+                        # init (e.g. an expired token at 09:30 autopilot start)
+                        # set IDLE but left the DB row RUNNING and
+                        # active_session_id pointing at it — a zombie that
+                        # silently blocked every later Start (2026-07-09).
+                        try:
+                            db.update_session(session_id, {
+                                'status': 'ABORTED',
+                                'end_reason': 'INIT_FAILED',
+                                'ended_at': datetime.now(IST).isoformat(),
+                            })
+                        except Exception as e:
+                            print(f"[SCHEDULER] abort of {session_id} failed: {e}")
+                        db.write_config('active_session_id', '')
                         db.write_config('brain_status', 'IDLE')
                         _set_heartbeat('ERROR', 0, 'Initialization failed')
                         time.sleep(30)

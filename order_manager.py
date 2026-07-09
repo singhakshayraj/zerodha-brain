@@ -215,9 +215,13 @@ class OrderManager:
         return None
 
     def square_off_all(self, kite: KiteClient, open_trades: list) -> None:
+        # SHORTs must be bought back (cover), not sold again — selling an
+        # open short here would place a second, wrong-direction real order.
         print(f"Squaring off {len(open_trades)} open positions")
         for trade in open_trades:
-            self.place_sell_order(
+            closer = (self.cover_short_order if trade.get('position_type') == 'SHORT'
+                      else self.place_sell_order)
+            closer(
                 kite,
                 trade['symbol'],
                 trade['exchange'],

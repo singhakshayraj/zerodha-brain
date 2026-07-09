@@ -21,6 +21,7 @@ import config
 import database as db
 import inplay
 import level_pack
+from kite_client import TokenExpiredError
 
 IST = pytz.timezone('Asia/Kolkata')
 
@@ -30,14 +31,24 @@ def _today() -> str:
 
 
 def maybe_build_level_pack(market_data, universe: dict) -> int:
-    """Build today's level_pack rows once per day. Returns rows written."""
+    """Build today's missing level_pack rows. Returns rows written.
+
+    Builds per-symbol only for symbols that don't already have a pack today,
+    so a partial build self-heals on the next cycle instead of being blocked
+    forever. Previously gated on level_pack_exists() — a mere "≥1 row exists"
+    check — so a partial build (e.g. 2 of 46 under an expiring token on
+    2026-07-09) permanently stranded the day at that handful of packs and fed
+    garbage PDCs to breadth/level consumers."""
     try:
         today = _today()
-        if db.level_pack_exists(today):
+        existing = set(db.get_level_pack_map(today).keys())
+        missing = [key for key in universe if key not in existing]
+        if not missing:
             return 0
-        print(f"[data_jobs] Building level pack for {today}…")
+        print(f"[data_jobs] Building level pack for {today}… "
+              f"({len(missing)} missing, {len(existing)} already built)")
         written = 0
-        for key in universe:
+        for key in missing:
             try:
                 candles = market_data.get_candles(key, '60minute', days=60)
                 daily = level_pack.daily_ohlc(candles)
@@ -45,10 +56,21 @@ def maybe_build_level_pack(market_data, universe: dict) -> int:
                     continue
                 db.upsert_level_pack(level_pack.build(key, today, daily))
                 written += 1
+            except TokenExpiredError:
+                # Building the rest under a dying token is exactly how the day
+                # got stuck with a few garbage packs. Stop now — build-missing
+                # is idempotent, so a later cycle with a fresh token completes
+                # it — and let the token failure surface upstream.
+                print("[data_jobs] token expired mid-build — aborting "
+                      f"(built {written} this pass, will resume next cycle)")
+                raise
             except Exception as e:
                 print(f"[data_jobs] level pack {key} failed: {e}")
-        print(f"[data_jobs] Level pack done: {written}/{len(universe)} symbols")
+        print(f"[data_jobs] Level pack: +{written} "
+              f"({len(existing) + written}/{len(universe)} symbols)")
         return written
+    except TokenExpiredError:
+        raise
     except Exception as e:
         print(f"[data_jobs] level pack job failed (non-fatal): {e}")
         return 0
