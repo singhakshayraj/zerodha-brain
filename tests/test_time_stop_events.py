@@ -99,6 +99,7 @@ def _brain_with_one_open(entry_minutes_ago, position_type='LONG'):
     b.consecutive_losses = 0
     b._session_ended = False
     b._time_stop_logged = set()
+    b._excursion = {}
     entry = (datetime.now(IST) - timedelta(minutes=entry_minutes_ago)).isoformat()
     trade = {
         'id': 't1', 'symbol': 'INFY', 'exchange': 'NSE',

@@ -26,6 +26,7 @@ def _brain(open_trades, fresh_price=95.0):
     b._session_ended = False
     b._cycle_lock = threading.Lock()
     b._time_stop_logged = set()
+    b._excursion = {}
     b.session_stats = {'trades_executed': 1, 'total_pnl': 0.0,
                        'winning_trades': 0, 'losing_trades': 0}
     b.market_data = MagicMock()

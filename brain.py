@@ -185,6 +185,7 @@ class TradingBrain:
         self.last_context_log = None
         self.consecutive_losses = 0
         self._last_loss_exit = {}   # symbol -> datetime of its last losing close
+        self._excursion = {}        # trade_id -> {'mfe_r', 'mae_r'} path extremes
         self._nifty50_cache = None
         self._session_ended = False
         self.universe = {}
@@ -1179,6 +1180,7 @@ class TradingBrain:
                 'pnl': pnl,
                 'pnl_percent': pnl_pct,
                 'r_multiple': _r_multiple(trade, pnl),
+                **self._excursion_fields(trade, result['price']),
             })
             db.update_stock_score(symbol, is_winner=pnl > 0, pnl=pnl)
             self.session_stats['total_pnl'] += pnl
@@ -1207,6 +1209,45 @@ class TradingBrain:
         else:
             self.consecutive_losses += 1
             self._last_loss_exit[symbol] = datetime.now(IST)
+
+    def _unrealized_r(self, trade: dict, price: float):
+        """Signed R-multiple of an OPEN trade at `price`. Same risk unit as
+        the realized _r_multiple, so excursions are comparable to outcomes."""
+        entry = trade.get('entry_price')
+        qty = trade.get('quantity') or 0
+        if not entry or qty <= 0 or not price:
+            return None
+        is_short = trade.get('position_type') == 'SHORT'
+        pnl = (entry - price) * qty if is_short else (price - entry) * qty
+        return _r_multiple(trade, pnl)
+
+    def _update_excursion(self, trade: dict, price: float) -> None:
+        """Track the path extremes of an open trade — Maximum Favorable
+        Excursion (best unrealized R reached) and Maximum Adverse Excursion
+        (worst). Persisted at close: the signal for whether stops were too
+        tight / targets too far, which entry+exit prices alone can't show.
+        Called every exit-check cycle and once more at the close price."""
+        tid = trade.get('id')
+        r = self._unrealized_r(trade, price)
+        if tid is None or r is None:
+            return
+        cur = self._excursion.get(tid)
+        if cur is None:
+            self._excursion[tid] = {'mfe_r': r, 'mae_r': r}
+        else:
+            if r > cur['mfe_r']:
+                cur['mfe_r'] = r
+            if r < cur['mae_r']:
+                cur['mae_r'] = r
+
+    def _excursion_fields(self, trade: dict, price: float) -> dict:
+        """Final excursion snapshot for the close payload. Folds in the close
+        price, then consumes the tracked extremes."""
+        self._update_excursion(trade, price)
+        exc = self._excursion.pop(trade.get('id'), None)
+        if not exc:
+            return {}
+        return {'mfe_r': exc['mfe_r'], 'mae_r': exc['mae_r']}
 
     def _reentry_cooldown(self, symbol: str):
         """(blocked, minutes_since_last_loss). blocked is whether re-entry
@@ -1426,6 +1467,10 @@ class TradingBrain:
         exit_reason = None
         is_short = trade.get('position_type') == 'SHORT'
 
+        # Track path extremes every cycle (MFE/MAE), including this one — the
+        # close funcs fold in the final price and persist them.
+        self._update_excursion(trade, current_price)
+
         # The consecutive-loss streak is NOT updated here — it's owned by
         # _record_close_outcome, called from every close path by realized
         # pnl sign. Counting it here (only on STOP_LOSS_HIT) is what let the
@@ -1556,6 +1601,7 @@ class TradingBrain:
                 'pnl': pnl,
                 'pnl_percent': pnl_pct,
                 'r_multiple': _r_multiple(trade, pnl),
+                **self._excursion_fields(trade, result['price']),
             })
 
             db.update_stock_score(trade['symbol'], is_winner=pnl > 0, pnl=pnl)
