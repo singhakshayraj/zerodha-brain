@@ -555,8 +555,10 @@ def log_decision(
     regime: str = None,
     market_bias: str = None,
     **kwargs,
-) -> None:
-    """Log decision; extra fields merged into indicators JSONB."""
+) -> str:
+    """Log decision; extra fields merged into indicators JSONB. Returns the
+    inserted decision id (or None) so an entry can link its trade back to the
+    exact feature vector that produced it."""
     try:
         enhanced = dict(indicators) if indicators else {}
 
@@ -591,12 +593,30 @@ def log_decision(
             'decided_at': datetime.now(timezone.utc).isoformat(),
         }
 
-        supabase.table('brain_decisions').insert(payload).execute()
+        res = supabase.table('brain_decisions').insert(payload).execute()
         print(f"[log_decision] OK {symbol} {signal} conf={confidence}")
+        if res.data and len(res.data) > 0:
+            return res.data[0].get('id')
+        return None
 
     except Exception as e:
         print(f"[log_decision] error: {e}")
         print(f"[log_decision] symbol={symbol}")
+        return None
+
+
+def link_decision_trade(decision_id: str, trade_id: str) -> None:
+    """Stamp the trade a decision produced back onto the decision row, so the
+    35-feature decision snapshot joins to its realized outcome (pnl,
+    r_multiple). brain_decisions.trade_id was never populated — the missing
+    link that blocked supervised (features -> outcome) learning."""
+    if not decision_id or not trade_id:
+        return
+    try:
+        supabase.table('brain_decisions').update(
+            {'trade_id': trade_id}).eq('id', decision_id).execute()
+    except Exception as e:
+        print(f"[link_decision_trade] error decision={decision_id}: {e}")
 
 
 def log_quote_snapshot(session_id: str, cycle: int, prices: dict) -> None:

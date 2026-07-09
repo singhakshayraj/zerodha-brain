@@ -61,6 +61,45 @@ def test_create_trade_includes_position_type():
     assert 'trade_data' in src
 
 
+def test_log_decision_returns_inserted_id():
+    """log_decision returns the new row id so an entry can link its trade."""
+    with patch.object(database, 'supabase', _chain([])):
+        insert_mock = MagicMock()
+        insert_mock.execute.return_value.data = [{'id': 'dec-abc'}]
+        database.supabase.table.return_value.insert = MagicMock(return_value=insert_mock)
+        did = database.log_decision(
+            session_id='s1', symbol='INFY', signal='BUY', confidence=80,
+            indicators={}, reasons=[], skip_reasons=[])
+        assert did == 'dec-abc'
+
+
+def test_log_decision_returns_none_on_error():
+    with patch.object(database, 'supabase', _chain([])):
+        database.supabase.table.return_value.insert.side_effect = RuntimeError('boom')
+        did = database.log_decision(
+            session_id='s1', symbol='INFY', signal='BUY', confidence=80,
+            indicators={}, reasons=[], skip_reasons=[])
+        assert did is None
+
+
+def test_link_decision_trade_updates_row():
+    with patch.object(database, 'supabase', _chain([])):
+        update_mock = MagicMock()
+        update_mock.eq.return_value.execute.return_value.data = [{}]
+        database.supabase.table.return_value.update = MagicMock(return_value=update_mock)
+        database.link_decision_trade('dec-1', 'trade-1')
+        payload = database.supabase.table.return_value.update.call_args[0][0]
+        assert payload == {'trade_id': 'trade-1'}
+
+
+def test_link_decision_trade_noop_on_missing_ids():
+    with patch.object(database, 'supabase', _chain([])):
+        database.supabase.table.return_value.update = MagicMock()
+        database.link_decision_trade(None, 'trade-1')
+        database.link_decision_trade('dec-1', None)
+        database.supabase.table.return_value.update.assert_not_called()
+
+
 def test_close_trade_sets_is_winner_true_on_positive_pnl():
     """close_trade: pnl > 0 → is_winner=True."""
     with patch.object(database, 'supabase', _chain([])):

@@ -668,7 +668,7 @@ class TradingBrain:
                     or_stats = inplay.opening_range_stats(candles_5min or [])
                     orb_snap = orb.orb_signal(live_price, or_stats)
 
-                    db.log_decision(
+                    decision_id = db.log_decision(
                         session_id=self.session_id,
                         symbol=symbol,
                         signal=signal['action'],
@@ -819,7 +819,8 @@ class TradingBrain:
                         elif self._cooldown_gate(symbol):
                             pass   # re-entry cooldown (flag-gated) suppressed it
                         else:
-                            self._execute_buy(symbol, exchange, live_price, signal)
+                            self._execute_buy(symbol, exchange, live_price, signal,
+                                              decision_id=decision_id)
                             remaining_trades -= 1
                             trades_this_cycle += 1
                             self.traded_symbols_this_cycle.add(symbol)
@@ -865,7 +866,8 @@ class TradingBrain:
                             if self._cooldown_gate(symbol):
                                 pass   # would short, but re-entry cooldown (flag) suppressed it
                             else:
-                                self._open_short(symbol, exchange, live_price, signal)
+                                self._open_short(symbol, exchange, live_price, signal,
+                                                 decision_id=decision_id)
                                 remaining_trades -= 1
                                 trades_this_cycle += 1
                                 self.traded_symbols_this_cycle.add(symbol)
@@ -949,7 +951,8 @@ class TradingBrain:
         finally:
             self._cycle_lock.release()
 
-    def _execute_buy(self, symbol: str, exchange: str, live_price: float, signal: dict) -> None:
+    def _execute_buy(self, symbol: str, exchange: str, live_price: float, signal: dict,
+                     decision_id: str = None) -> None:
         capital = self.session_config['capitalDeployed']
 
         win_rate, n_trades = db.get_win_rate()
@@ -984,6 +987,9 @@ class TradingBrain:
 
         if not trade:
             return
+
+        # Link the originating decision's feature vector to this trade's outcome.
+        db.link_decision_trade(decision_id, trade.get('id'))
 
         result = self.order_manager.place_buy_order(
             self.kite, symbol, exchange, quantity,
@@ -1045,7 +1051,8 @@ class TradingBrain:
                 message=f"BUY order failed for {symbol}",
             )
 
-    def _open_short(self, symbol: str, exchange: str, live_price: float, signal: dict) -> None:
+    def _open_short(self, symbol: str, exchange: str, live_price: float, signal: dict,
+                    decision_id: str = None) -> None:
         capital = self.session_config['capitalDeployed']
         # Invert stop/target for shorts: signal engine produces long-side levels.
         long_stop = signal['stop_loss']
@@ -1090,6 +1097,9 @@ class TradingBrain:
         })
         if not trade:
             return
+
+        # Link the originating decision's feature vector to this trade's outcome.
+        db.link_decision_trade(decision_id, trade.get('id'))
 
         result = self.order_manager.place_short_order(
             self.kite, symbol, exchange, quantity,

@@ -233,7 +233,7 @@ def test_run_cycle_buy_with_existing_long_skips():
                 with patch.object(brain, '_check_and_close_positions'):
                     with patch.object(brain, '_is_past_ist', return_value=False):
                         with patch.object(brain, '_execute_buy',
-                                          side_effect=lambda *a: buy_called.append(a[0])):
+                                          side_effect=lambda *a, **k: buy_called.append(a[0])):
                             with patch.object(brain, '_maybe_log_market_context'):
                                 brain.run_cycle()
 
@@ -267,7 +267,7 @@ def test_run_cycle_buy_no_existing_trade_executes_buy():
                 with patch.object(brain, '_check_and_close_positions'):
                     with patch.object(brain, '_is_past_ist', return_value=False):
                         with patch.object(brain, '_execute_buy',
-                                          side_effect=lambda *a: buy_called.append(a[0])):
+                                          side_effect=lambda *a, **k: buy_called.append(a[0])):
                             with patch.object(brain, '_maybe_log_market_context'):
                                 brain.run_cycle()
 
@@ -302,7 +302,7 @@ def test_run_cycle_sell_cnc_holding_blocked():
                 with patch.object(brain, '_check_and_close_positions'):
                     with patch.object(brain, '_is_past_ist', return_value=False):
                         with patch.object(brain, '_open_short',
-                                          side_effect=lambda *a: short_called.append(a[0])):
+                                          side_effect=lambda *a, **k: short_called.append(a[0])):
                             with patch.object(brain, '_maybe_log_market_context'):
                                 brain.run_cycle()
 
@@ -337,7 +337,7 @@ def test_run_cycle_sell_noncnc_opens_short():
                 with patch.object(brain, '_check_and_close_positions'):
                     with patch.object(brain, '_is_past_ist', return_value=False):
                         with patch.object(brain, '_open_short',
-                                          side_effect=lambda *a: short_called.append(a[0])):
+                                          side_effect=lambda *a, **k: short_called.append(a[0])):
                             with patch.object(brain, '_maybe_log_market_context'):
                                 brain.run_cycle()
 
@@ -403,6 +403,25 @@ def test_execute_buy_order_fails_closes_trade():
     assert mock_close.call_args[0][1]['exit_reason'] == 'ORDER_FAILED'
 
 
+def test_execute_buy_links_decision_to_trade():
+    """The originating decision must be stamped with the trade it produced —
+    the (features -> outcome) join for supervised learning."""
+    brain = _make_brain()
+    brain.risk_manager.calculate_position_size.return_value = 5
+    brain.order_manager.place_buy_order.return_value = {
+        'order_id': 'o1', 'price': 500.0, 'value': 2500.0, 'quantity': 5}
+    signal = {'confidence': 75, 'stop_loss': 480.0, 'target': 530.0,
+              'risk_reward_ratio': 2.0, 'regime': 'TRENDING', 'indicators': {}}
+    with patch('brain.db.create_trade', return_value={'id': 'trade-99'}), \
+         patch('brain.db.get_win_rate', return_value=(0.5, 5)), \
+         patch('brain.db.update_trade_entry'), \
+         patch('brain.db.log_brain_activity'), \
+         patch('brain.db.get_stock_universe', return_value=[]), \
+         patch('brain.db.link_decision_trade') as link:
+        brain._execute_buy('SBIN', 'NSE', 500.0, signal, decision_id='dec-42')
+    link.assert_called_once_with('dec-42', 'trade-99')
+
+
 # ---- _open_short tests -------------------------------------------------------
 
 def test_open_short_qty_zero_no_order():
@@ -449,6 +468,23 @@ def test_open_short_stop_inversion():
 
     assert len(captured_sl) == 1
     assert captured_sl[0] == 520.0  # 500 + (500 - 480) = 520
+
+
+def test_open_short_links_decision_to_trade():
+    brain = _make_brain()
+    brain.risk_manager.calculate_position_size.return_value = 3
+    brain.order_manager.place_short_order.return_value = {
+        'order_id': 'o1', 'price': 500.0, 'value': 1500.0, 'quantity': 3}
+    signal = {'confidence': 70, 'stop_loss': 480.0, 'target': 540.0,
+              'risk_reward_ratio': 2.0, 'regime': 'TRENDING', 'indicators': {}}
+    with patch('brain.db.create_trade', return_value={'id': 'short-77'}), \
+         patch('brain.db.get_win_rate', return_value=(0.5, 5)), \
+         patch('brain.db.update_trade_entry'), \
+         patch('brain.db.log_brain_activity'), \
+         patch('brain.db.get_stock_universe', return_value=[]), \
+         patch('brain.db.link_decision_trade') as link:
+        brain._open_short('WIPRO', 'NSE', 500.0, signal, decision_id='dec-7')
+    link.assert_called_once_with('dec-7', 'short-77')
 
 
 # ---- _check_and_close_positions tests ---------------------------------------
