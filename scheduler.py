@@ -11,6 +11,7 @@ import config
 import database as db
 import token_refresher
 from brain import TradingBrain
+from kite_client import KiteClient, TokenExpiredError
 from risk_manager import RiskManager
 
 IST = pytz.timezone('Asia/Kolkata')
@@ -29,6 +30,53 @@ INSTANCE_ID = uuid.uuid4().hex
 # incidents — a failing resume + autopilot retry loop must not re-report
 # the same incident every pass (2026-07-08: one incident spammed for an hour).
 _reported_deploy_incidents = set()
+
+# Latched so a stale token doesn't re-write the durable incident + feed line
+# every ~30s autopilot retry (2026-07-08 spam lesson). Cleared once a live
+# token starts a session.
+_stale_token_reported = False
+
+
+def _token_is_live(token: str) -> bool:
+    """Cheap authenticated probe (/user/profile) so we don't create a session
+    on a dead token. db.get_enc_token() returns the stored string, which is
+    still non-empty once yesterday's token has expired — so without this,
+    autopilot self-starts at 09:30 on a stale token, fails init, and (because
+    has_session_today() then reports True) never retries, burning the whole
+    morning (2026-07-09 lost 09:15-12:44). Returns True in QA and on
+    inconclusive/transient errors — only a hard TokenExpiredError blocks the
+    start, so a network blip can't strand the brain."""
+    if config.QA_MODE:
+        return True
+    try:
+        KiteClient(token).get_profile()
+        return True
+    except TokenExpiredError:
+        return False
+    except Exception as e:
+        print(f"[SCHEDULER] token probe inconclusive ({e}) — allowing start")
+        return True
+
+
+def _report_stale_token() -> None:
+    """One durable token_incident + feed line per stale episode (deduped)."""
+    global _stale_token_reported
+    _set_heartbeat('ERROR', 0, 'Token expired — paste a fresh enctoken to start')
+    db.write_config('brain_status', 'IDLE')
+    if _stale_token_reported:
+        return
+    _stale_token_reported = True
+    try:
+        # Durable flag the watchdog (P1) and dashboard read. No brain_activity
+        # feed line — that table's session_id is required and there's no
+        # session here (refusing to create one is the whole point).
+        db.write_config(
+            'token_incident',
+            f"{datetime.now(IST).isoformat()} token stale at start — "
+            f"awaiting fresh enctoken (no session created)",
+        )
+    except Exception:
+        pass
 
 
 def _lock_lost() -> bool:
@@ -175,7 +223,7 @@ def _should_autostart() -> bool:
 
 
 def run():
-    global _is_trading
+    global _is_trading, _stale_token_reported
 
     print(
         f"Zerodha Brain v1.0.0 started at "
@@ -300,6 +348,20 @@ def run():
                             db.write_config('brain_status', 'IDLE')
                             time.sleep(30)
                             continue
+
+                        # Probe the token BEFORE creating a session. A stale
+                        # token here must not spawn a doomed session — that row
+                        # trips has_session_today(), which suppresses autopilot
+                        # for the rest of the day (the 2026-07-09 lost morning).
+                        # Refusing to create it keeps has_session_today() False,
+                        # so autopilot retries every tick and starts the instant
+                        # a fresh token is pasted.
+                        if not _token_is_live(token):
+                            print("[SCHEDULER] Token not live — awaiting fresh token, no session created")
+                            _report_stale_token()
+                            time.sleep(30)
+                            continue
+
                         print("[SCHEDULER] Creating session in DB...")
                         session = db.create_session(session_config)
 
@@ -328,6 +390,13 @@ def run():
                     initialized = brain.initialize(token, session_config)
                     if initialized and is_resume:
                         brain.resume_stats(session_id)
+                    if initialized:
+                        # Token proved live — clear any stale-token incident so
+                        # the watchdog stops alerting and the next stale episode
+                        # reports fresh.
+                        if _stale_token_reported:
+                            _stale_token_reported = False
+                            db.write_config('token_incident', '')
 
                     if not initialized:
                         print("Brain initialization failed")

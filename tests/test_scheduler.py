@@ -11,6 +11,8 @@ with patch.dict(os.environ, {
     with patch('supabase.create_client', return_value=MagicMock()):
         import database  # noqa
 
+from kite_client import TokenExpiredError
+
 _UNSET = object()  # sentinel so we can pass explicit None
 
 
@@ -24,13 +26,15 @@ def _make_brain(initialized=True, session_ended=False):
 
 
 def _run_scheduler(commands, token='tok', session_config=_UNSET,
-                   session_row=_UNSET, market_open=True, brain=_UNSET):
+                   session_row=_UNSET, market_open=True, brain=_UNSET,
+                   token_live=True):
     """
     Run scheduler.run() for a bounded command sequence.
     Raises KeyboardInterrupt after commands exhausted → stops loop.
     """
     import scheduler
     scheduler._is_trading = False  # reset global
+    scheduler._stale_token_reported = False
 
     if session_config is _UNSET:
         session_config = {'capitalDeployed': 10000, 'maxLossPercent': 5, 'tradeIntervalSeconds': 1}
@@ -54,6 +58,7 @@ def _run_scheduler(commands, token='tok', session_config=_UNSET,
          patch('scheduler.db.update_heartbeat'), \
          patch('scheduler.risk_manager.is_market_open', return_value=market_open), \
          patch('scheduler.TradingBrain', return_value=brain), \
+         patch('scheduler._token_is_live', return_value=token_live), \
          patch('scheduler.time.sleep'):
         try:
             scheduler.run()
@@ -89,6 +94,133 @@ def test_start_initialize_false_no_trade_loop():
     brain = _make_brain(initialized=False)
     _run_scheduler(['START'], brain=brain)
     brain.run_cycle.assert_not_called()
+
+
+# --- START: stale token → NO session created (2026-07-09 lost-morning fix) ---
+
+def _run_start_once(token_live, brain=None, capture_writes=None,
+                    on_create=None):
+    """Run scheduler.run() through a single START with full mocks. Lets a
+    test observe create_session / write_config without _run_scheduler's own
+    patches shadowing them."""
+    import scheduler
+    scheduler._is_trading = False
+    scheduler._stale_token_reported = False
+    brain = brain or _make_brain()
+    cmds = ['START']
+
+    def get_cmd():
+        if cmds:
+            return cmds.pop(0)
+        raise KeyboardInterrupt
+
+    def _create(cfg):
+        if on_create:
+            on_create(cfg)
+        return {'id': 'sess-x'}
+
+    def _wc(k, v):
+        if capture_writes is not None:
+            capture_writes[k] = v
+
+    with patch('scheduler.db.get_brain_command', side_effect=get_cmd), \
+         patch('scheduler.db.get_enc_token', return_value='tok'), \
+         patch('scheduler.db.get_session_config',
+               return_value={'capitalDeployed': 10000, 'maxLossPercent': 5,
+                             'tradeIntervalSeconds': 1}), \
+         patch('scheduler.db.create_session', side_effect=_create), \
+         patch('scheduler.db.write_config', side_effect=_wc), \
+         patch('scheduler.db.update_heartbeat'), \
+         patch('scheduler.risk_manager.is_market_open', return_value=True), \
+         patch('scheduler.TradingBrain', return_value=brain), \
+         patch('scheduler._token_is_live', return_value=token_live), \
+         patch('scheduler.time.sleep'):
+        try:
+            scheduler.run()
+        except (KeyboardInterrupt, StopIteration):
+            pass
+    return brain
+
+
+def test_stale_token_creates_no_session():
+    """A stale token at start must not spawn a doomed session — that row would
+    trip has_session_today() and suppress autopilot for the rest of the day."""
+    brain = _make_brain()
+    created = []
+    _run_start_once(token_live=False, brain=brain,
+                    on_create=lambda cfg: created.append(cfg))
+    assert created == []              # no session row created
+    brain.initialize.assert_not_called()
+
+
+def test_stale_token_writes_incident_and_idles():
+    writes = {}
+    _run_start_once(token_live=False, capture_writes=writes)
+    assert 'token_incident' in writes
+    assert writes.get('brain_status') == 'IDLE'
+
+
+def test_live_token_creates_session():
+    brain = _make_brain()
+    created = []
+    _run_start_once(token_live=True, brain=brain,
+                    on_create=lambda cfg: created.append(cfg))
+    assert len(created) == 1          # session created when token is live
+    brain.initialize.assert_called_once()
+
+
+def test_live_token_still_starts_normally():
+    brain = _make_brain()
+    _run_scheduler(['START', 'STOP'], brain=brain, token_live=True)
+    brain.initialize.assert_called_once()
+
+
+# --- _token_is_live probe semantics ---
+
+def test_token_is_live_true_in_qa_mode(monkeypatch):
+    import scheduler
+    monkeypatch.setattr(scheduler.config, 'QA_MODE', True)
+    assert scheduler._token_is_live('anything') is True
+
+
+def test_token_is_live_false_on_token_expired(monkeypatch):
+    import scheduler
+    monkeypatch.setattr(scheduler.config, 'QA_MODE', False)
+    kite = MagicMock()
+    kite.get_profile.side_effect = TokenExpiredError('expired')
+    with patch('scheduler.KiteClient', return_value=kite):
+        assert scheduler._token_is_live('stale') is False
+
+
+def test_token_is_live_true_on_transient_error(monkeypatch):
+    # A network blip must NOT be read as a dead token (would strand the brain)
+    import scheduler
+    monkeypatch.setattr(scheduler.config, 'QA_MODE', False)
+    kite = MagicMock()
+    kite.get_profile.side_effect = RuntimeError('connection reset')
+    with patch('scheduler.KiteClient', return_value=kite):
+        assert scheduler._token_is_live('maybe') is True
+
+
+def test_token_is_live_true_on_success(monkeypatch):
+    import scheduler
+    monkeypatch.setattr(scheduler.config, 'QA_MODE', False)
+    kite = MagicMock()
+    kite.get_profile.return_value = {'user_id': 'AB1234'}
+    with patch('scheduler.KiteClient', return_value=kite):
+        assert scheduler._token_is_live('good') is True
+
+
+def test_report_stale_token_dedupes():
+    import scheduler
+    scheduler._stale_token_reported = False
+    writes = []
+    with patch('scheduler.db.write_config',
+               side_effect=lambda k, v: writes.append(k)), \
+         patch('scheduler._set_heartbeat'):
+        scheduler._report_stale_token()
+        scheduler._report_stale_token()
+    assert writes.count('token_incident') == 1   # durable incident written once
 
 
 # --- START: init failure must release the session (2026-07-09 zombie fix) ---
