@@ -362,6 +362,14 @@ def run():
                             time.sleep(30)
                             continue
 
+                        # Token proved live. Clear any stale-token incident NOW —
+                        # before the ~44s brain.initialize() — so the dashboard
+                        # banner doesn't flash on a healthy start (it used to
+                        # linger until the post-init clear below).
+                        if _stale_token_reported:
+                            _stale_token_reported = False
+                            db.write_config('token_incident', '')
+
                         print("[SCHEDULER] Creating session in DB...")
                         session = db.create_session(session_config)
 
