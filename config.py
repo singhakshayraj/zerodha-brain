@@ -167,6 +167,13 @@ def assert_safe_boot() -> None:
             'interlock. Set PAPER_TRADING=true for the paper run.'
         )
 
+    if DATA_COLLECTION_MODE and not PAPER_TRADING:
+        raise RuntimeError(
+            'DATA_COLLECTION_MODE=true requires PAPER_TRADING=true. It turns the '
+            'session risk stops into logged counterfactuals — never allowed with '
+            'real money. Unset DATA_COLLECTION_MODE or run in paper mode.'
+        )
+
 # Risk settings
 MAX_RISK_PER_TRADE_PERCENT = 1.0  # 1% of capital per trade
 MAX_POSITION_SIZE_PERCENT = 20.0  # max 20% capital in one stock
@@ -208,6 +215,21 @@ CIRCUIT_BREAKER_CONSECUTIVE_LOSSES = 3
 # so we can measure the effect on collected data before turning it on.
 REENTRY_COOLDOWN_ENABLED = os.getenv('REENTRY_COOLDOWN_ENABLED', 'false').strip().lower() == 'true'
 REENTRY_COOLDOWN_MIN = int(os.getenv('REENTRY_COOLDOWN_MIN', '15'))
+
+# Data-collection mode: let the session run its full day instead of throttling
+# the dataset at a fixed trade count / soft loss stop. When on, the SOFT session
+# limits (MAX_TRADES, DAILY_STOP_3R, session loss floor, consecutive-loss circuit
+# breaker, MAX_PROFIT) become logged-not-enforced counterfactuals — trading
+# continues and a LIMIT_WOULD_STOP marker records where a capped run would have
+# ended. MARKET_CLOSED stays HARD-enforced. Paper-only: force off unless
+# PAPER_TRADING (never relax risk with real money) — see assert_safe_boot.
+DATA_COLLECTION_MODE = os.getenv('DATA_COLLECTION_MODE', 'false').strip().lower() == 'true'
+
+
+def data_collection_active() -> bool:
+    """DATA_COLLECTION_MODE only takes effect in paper mode. Hard safety: a
+    real-money session can never have its risk stops turned into counterfactuals."""
+    return DATA_COLLECTION_MODE and PAPER_TRADING
 
 # Per-cycle trade cap (spread trades across cycles, avoid burst)
 MAX_TRADES_PER_CYCLE = 3

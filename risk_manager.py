@@ -194,14 +194,13 @@ class RiskManager:
             # checked below) firing first means this stop failed = incident.
             r_inr = capital * config.RISK_PER_TRADE_PCT / 100
             daily_stop_inr = config.DAILY_STOP_R * r_inr
-            if loss_check_pnl <= -daily_stop_inr:
-                return {
-                    'can_trade': False,
-                    'reason': f'DAILY_STOP_3R: P&L ₹{loss_check_pnl:.2f} '
-                              f'breached -{config.DAILY_STOP_R}R '
-                              f'(-₹{daily_stop_inr:.2f})',
-                }
 
+            # Evaluate the SOFT session stops first. These are the ones
+            # data-collection mode turns into counterfactuals (logged, not
+            # enforced) so the session runs its full day. The first tripped
+            # soft stop wins as the would_stop reason. MARKET_CLOSED (below)
+            # is a HARD stop and is never relaxed.
+            soft_stop = None
             check = TradingPrinciples.should_continue_trading(
                 current_session_pnl=loss_check_pnl,
                 session_capital=capital,
@@ -210,21 +209,29 @@ class RiskManager:
                 max_consecutive_losses=3,
             )
 
-            if not check['should_continue']:
-                return {'can_trade': False, 'reason': check['reason']}
+            if loss_check_pnl <= -daily_stop_inr:
+                soft_stop = (f'DAILY_STOP_3R: P&L ₹{loss_check_pnl:.2f} '
+                             f'breached -{config.DAILY_STOP_R}R '
+                             f'(-₹{daily_stop_inr:.2f})')
+            elif not check['should_continue']:
+                soft_stop = check['reason']
+            elif total_pnl >= max_profit_amount:
+                soft_stop = (f'MAX_PROFIT_HIT: P&L ₹{total_pnl:.2f} '
+                             f'reached target ₹{max_profit_amount:.2f}')
+            elif trades_executed >= max_trades:
+                soft_stop = (f'MAX_TRADES_HIT: {trades_executed}/{max_trades} '
+                             f'trades used')
 
-            if total_pnl >= max_profit_amount:
-                return {
-                    'can_trade': False,
-                    'reason': f'MAX_PROFIT_HIT: P&L ₹{total_pnl:.2f} '
-                              f'reached target ₹{max_profit_amount:.2f}',
-                }
-
-            if trades_executed >= max_trades:
-                return {
-                    'can_trade': False,
-                    'reason': f'MAX_TRADES_HIT: {trades_executed}/{max_trades} trades used',
-                }
+            if soft_stop is not None:
+                if config.data_collection_active():
+                    # Counterfactual: keep trading, mark where a capped run
+                    # would have ended. Caller logs LIMIT_WOULD_STOP once.
+                    return {
+                        'can_trade': True,
+                        'reason': check['reason'],
+                        'would_stop': soft_stop,
+                    }
+                return {'can_trade': False, 'reason': soft_stop}
 
             if not self.is_market_open():
                 return {'can_trade': False, 'reason': 'MARKET_CLOSED'}

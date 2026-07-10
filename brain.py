@@ -181,6 +181,7 @@ class TradingBrain:
         }
         self.traded_symbols_this_cycle = set()
         self._time_stop_logged = set()  # trade ids with a WOULD_FIRE row
+        self._would_stop_logged = set()  # session soft-stop reasons already logged
         self._decision_ts = None        # REQ-073 decision→order clock
         self.last_context_log = None
         self.consecutive_losses = 0
@@ -443,6 +444,27 @@ class TradingBrain:
                 print(f"Session limit reached: {limits['reason']}")
                 self.end_session(limits['reason'].split(':')[0])
                 return
+
+            # Data-collection mode: a soft limit tripped but we keep trading.
+            # Log where a capped run would have ended, once per reason, so the
+            # counterfactual is reconstructable from the collected data.
+            would_stop = limits.get('would_stop')
+            if would_stop:
+                marker = would_stop.split(':')[0]
+                if marker not in self._would_stop_logged:
+                    self._would_stop_logged.add(marker)
+                    self._log_activity_safe(
+                        'LIMIT_WOULD_STOP', '',
+                        f'Counterfactual: {would_stop} — continuing '
+                        f'(DATA_COLLECTION_MODE)',
+                        {
+                            'marker': marker,
+                            'reason': would_stop,
+                            'trades': self.session_stats.get('trades_executed'),
+                            'total_pnl': self.session_stats.get('total_pnl'),
+                            'consecutive_losses': self.consecutive_losses,
+                        },
+                    )
 
             # Step 3 — filter to stocks we have prices for
             if not self.universe:
@@ -1532,16 +1554,34 @@ class TradingBrain:
                     )
 
         if self.consecutive_losses >= config.CIRCUIT_BREAKER_CONSECUTIVE_LOSSES:
-            print(
-                "CIRCUIT BREAKER: 3 consecutive losses. "
-                "Stopping session to protect capital."
-            )
-            db.update_heartbeat(
-                'RUNNING',
-                self.session_stats['trades_executed'],
-                'CIRCUIT BREAKER: 3 consecutive losses — stopping',
-            )
-            self.end_session('CIRCUIT_BREAKER')
+            if config.data_collection_active():
+                # Counterfactual: log where the breaker would have fired, once,
+                # but keep trading to collect the full day.
+                if 'CIRCUIT_BREAKER' not in self._would_stop_logged:
+                    self._would_stop_logged.add('CIRCUIT_BREAKER')
+                    self._log_activity_safe(
+                        'LIMIT_WOULD_STOP', '',
+                        f'Counterfactual: CIRCUIT_BREAKER '
+                        f'({self.consecutive_losses} consecutive losses) — '
+                        f'continuing (DATA_COLLECTION_MODE)',
+                        {
+                            'marker': 'CIRCUIT_BREAKER',
+                            'consecutive_losses': self.consecutive_losses,
+                            'trades': self.session_stats.get('trades_executed'),
+                            'total_pnl': self.session_stats.get('total_pnl'),
+                        },
+                    )
+            else:
+                print(
+                    "CIRCUIT BREAKER: 3 consecutive losses. "
+                    "Stopping session to protect capital."
+                )
+                db.update_heartbeat(
+                    'RUNNING',
+                    self.session_stats['trades_executed'],
+                    'CIRCUIT BREAKER: 3 consecutive losses — stopping',
+                )
+                self.end_session('CIRCUIT_BREAKER')
         return should_exit
 
     def _check_and_close_positions(self) -> None:
