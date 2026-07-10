@@ -43,6 +43,36 @@ def test_market_context_bullish_when_universe_up():
     assert ctx['sample_size'] == 6
 
 
+def test_realized_vol_zero_when_moves_uniform():
+    # every stock the same move → cross-sectional stdev is 0
+    syms = ['NSE:A', 'NSE:B', 'NSE:C', 'NSE:D', 'NSE:E', 'NSE:F']
+    uni, packs, prices = _uniform(syms, 100, 102)
+    ctx = _brain(uni, packs, prices)._market_context()
+    assert ctx['realized_vol'] == 0.0
+
+
+def test_realized_vol_matches_cross_sectional_stdev():
+    import statistics
+    syms = ['NSE:A', 'NSE:B', 'NSE:C', 'NSE:D', 'NSE:E']
+    uni = {s: {} for s in syms}
+    packs = {s: {'pdc': 100} for s in syms}
+    prices = {  # changes: +1, +2, +3, -1, -2 (%)
+        'NSE:A': {'price': 101}, 'NSE:B': {'price': 102},
+        'NSE:C': {'price': 103}, 'NSE:D': {'price': 99},
+        'NSE:E': {'price': 98},
+    }
+    ctx = _brain(uni, packs, prices)._market_context()
+    assert ctx['realized_vol'] == round(statistics.pstdev([1, 2, 3, -1, -2]), 3)
+    assert ctx['realized_vol'] > 0
+
+
+def test_realized_vol_none_below_two_samples():
+    ctx = _brain({'NSE:A': {}}, {'NSE:A': {'pdc': 100}},
+                 {'NSE:A': {'price': 101}})._market_context()
+    # 1 clean sample → stdev undefined → None (and low_confidence)
+    assert ctx['realized_vol'] is None
+
+
 def test_market_context_bearish_when_universe_down():
     syms = ['NSE:A', 'NSE:B', 'NSE:C', 'NSE:D', 'NSE:E']
     uni, packs, prices = _uniform(syms, 100, 97)     # every stock -3%

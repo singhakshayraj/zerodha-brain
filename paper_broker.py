@@ -108,10 +108,18 @@ class PaperBroker:
         price = round(price + per_share if side == 'BUY' else price - per_share, 2)
         order_id = _paper_order_id()
 
+        # Slippage decomposition (Tier-2): the fill folds slippage + charges
+        # into one adverse price. Surface the reference (intended) price and
+        # the total adverse deviation in bps so analysis can separate execution
+        # cost from signal edge (and later link latency → slippage).
+        ref = round(ltp, 2)
+        adverse = (price - ltp) if side == 'BUY' else (ltp - price)
+        slippage_bps = round((adverse / ltp) * 10000, 2) if ltp else 0.0
+
         print(
             f"[PAPER] {side} filled: {symbol} x{quantity} @ ₹{price} "
             f"(ltp {ltp}, slippage {config.PAPER_SLIPPAGE_PCT}%, "
-            f"charges ₹{charges}) [{order_id}]"
+            f"charges ₹{charges}, {slippage_bps}bps adverse) [{order_id}]"
         )
         return {
             'order_id': order_id,
@@ -119,6 +127,8 @@ class PaperBroker:
             'price': price,
             'quantity': quantity,
             'value': price * quantity,
+            'reference_price': ref,
+            'slippage_bps': slippage_bps,
         }
 
     # ── OrderManager-compatible interface ────────────────────────────────────

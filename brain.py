@@ -1,3 +1,4 @@
+import statistics
 import threading
 import time
 from datetime import datetime
@@ -1041,14 +1042,18 @@ class TradingBrain:
                         f"expected ₹{live_price:.2f} got ₹{result['price']:.2f} "
                         f"({deviation*100:.1f}%) — possible wrong instrument token"
                     )
-            db.update_trade_entry(trade['id'], {
+            entry_payload = {
                 'entry_order_id': result['order_id'],
                 'entry_time': datetime.now(IST).isoformat(),
                 'entry_price': result['price'],
                 'quantity': result['quantity'],
                 'entry_value': result['value'],
                 'decision_to_order_ms': self._decision_latency_ms(),
-            })
+            }
+            exec_entry = self._execution_entry(result)
+            if exec_entry:
+                entry_payload['execution'] = exec_entry
+            db.update_trade_entry(trade['id'], entry_payload)
             self.session_stats['trades_executed'] += 1
             print(
                 f"BUY executed: {symbol} x{result['quantity']} "
@@ -1149,14 +1154,18 @@ class TradingBrain:
                         f"expected ₹{live_price:.2f} got ₹{result['price']:.2f} "
                         f"({deviation*100:.1f}%) — possible wrong instrument token"
                     )
-            db.update_trade_entry(trade['id'], {
+            entry_payload = {
                 'entry_order_id': result['order_id'],
                 'entry_time': datetime.now(IST).isoformat(),
                 'entry_price': result['price'],
                 'quantity': result['quantity'],
                 'entry_value': result['value'],
                 'decision_to_order_ms': self._decision_latency_ms(),
-            })
+            }
+            exec_entry = self._execution_entry(result)
+            if exec_entry:
+                entry_payload['execution'] = exec_entry
+            db.update_trade_entry(trade['id'], entry_payload)
             self.session_stats['trades_executed'] += 1
             print(
                 f"SHORT opened: {symbol} x{result['quantity']} "
@@ -1205,7 +1214,7 @@ class TradingBrain:
             pnl = entry_value - result['value']
             pnl_pct = (pnl / entry_value) * 100 if entry_value else 0
 
-            db.close_trade(trade['id'], {
+            close_payload = {
                 'exit_order_id': result['order_id'],
                 'exit_time': datetime.now(IST).isoformat(),
                 'exit_price': result['price'],
@@ -1215,7 +1224,11 @@ class TradingBrain:
                 'pnl_percent': pnl_pct,
                 'r_multiple': _r_multiple(trade, pnl),
                 **self._excursion_fields(trade, result['price']),
-            })
+            }
+            exec_exit = self._execution_exit(trade, result)
+            if exec_exit:
+                close_payload['execution'] = exec_exit
+            db.close_trade(trade['id'], close_payload)
             db.update_stock_score(symbol, is_winner=pnl > 0, pnl=pnl)
             self.session_stats['total_pnl'] += pnl
             if pnl > 0:
@@ -1282,6 +1295,32 @@ class TradingBrain:
         if not exc:
             return {}
         return {'mfe_r': exc['mfe_r'], 'mae_r': exc['mae_r']}
+
+    @staticmethod
+    def _fill_leg(result: dict) -> dict:
+        """One execution leg {reference_price, fill_price, slippage_bps} from a
+        broker fill. Only the paper broker decomposes slippage, so the real
+        path (no reference_price) yields nothing."""
+        return {
+            'reference_price': result['reference_price'],
+            'fill_price': result['price'],
+            'slippage_bps': result.get('slippage_bps'),
+        }
+
+    def _execution_entry(self, result: dict):
+        """execution jsonb for an entry fill, or None if not decomposed."""
+        if not result or result.get('reference_price') is None:
+            return None
+        return {'entry': self._fill_leg(result)}
+
+    def _execution_exit(self, trade: dict, result: dict):
+        """Merge the exit leg into the trade's existing execution block, or
+        None if not decomposed. Preserves the entry leg written at open."""
+        if not result or result.get('reference_price') is None:
+            return None
+        block = dict(trade.get('execution') or {})
+        block['exit'] = self._fill_leg(result)
+        return block
 
     def _reentry_cooldown(self, symbol: str):
         """(blocked, minutes_since_last_loss). blocked is whether re-entry
@@ -1375,12 +1414,19 @@ class TradingBrain:
                     decliners += 1
             sample_size = len(changes)
             avg = (sum(changes) / sample_size) if sample_size else 0.0
+            # Realized-volatility proxy: cross-sectional stdev (%) of the
+            # universe's day-change distribution. Retail enctoken can't read
+            # the VIX index, but the dispersion of our own universe's moves is
+            # a real, live volatility signal (replaces the dead india_vix=15).
+            realized_vol = (round(statistics.pstdev(changes), 3)
+                            if sample_size >= 2 else None)
             low_confidence = sample_size < config.MARKET_BREADTH_MIN_SAMPLES
             if low_confidence:
                 # Not enough clean breadth to make a directional call.
                 return {'level': 0, 'change_percent': round(avg, 3),
                         'direction': 'SIDEWAYS', 'advancers': advancers,
                         'decliners': decliners, 'breadth': None,
+                        'realized_vol': realized_vol,
                         'sample_size': sample_size, 'rejected': rejected,
                         'low_confidence': True}
             direction = ('BULLISH' if avg >= 0.5 else
@@ -1390,12 +1436,14 @@ class TradingBrain:
                     'direction': direction, 'advancers': advancers,
                     'decliners': decliners,
                     'breadth': round(breadth, 3) if breadth is not None else None,
+                    'realized_vol': realized_vol,
                     'sample_size': sample_size, 'rejected': rejected,
                     'low_confidence': False}
         except Exception as e:
             print(f"[market_ctx] failed (non-fatal): {e}")
             return {'level': 0, 'change_percent': 0.0, 'direction': 'SIDEWAYS',
                     'advancers': 0, 'decliners': 0, 'breadth': None,
+                    'realized_vol': None,
                     'sample_size': 0, 'rejected': 0, 'low_confidence': True}
 
     def _unrealized_pnl(self) -> float:
@@ -1644,7 +1692,7 @@ class TradingBrain:
             pnl = result['value'] - entry_value
             pnl_pct = (pnl / entry_value) * 100 if entry_value else 0
 
-            db.close_trade(trade['id'], {
+            close_payload = {
                 'exit_order_id': result['order_id'],
                 'exit_time': datetime.now(IST).isoformat(),
                 'exit_price': result['price'],
@@ -1654,7 +1702,11 @@ class TradingBrain:
                 'pnl_percent': pnl_pct,
                 'r_multiple': _r_multiple(trade, pnl),
                 **self._excursion_fields(trade, result['price']),
-            })
+            }
+            exec_exit = self._execution_exit(trade, result)
+            if exec_exit:
+                close_payload['execution'] = exec_exit
+            db.close_trade(trade['id'], close_payload)
 
             db.update_stock_score(trade['symbol'], is_winner=pnl > 0, pnl=pnl)
 
@@ -1705,14 +1757,26 @@ class TradingBrain:
                 return
 
         if nifty:
-            vix = 15.0
+            # Realized-vol proxy from the universe (cross-sectional day-change
+            # stdev). Bucket on the dispersion, not the dead india_vix=15
+            # constant. Typical large-cap intraday dispersion ~0.5–1.5%.
+            rvol = nifty.get('realized_vol')
+            if rvol is None:
+                vol_bucket = 'UNKNOWN'
+            elif rvol < 0.7:
+                vol_bucket = 'LOW'
+            elif rvol > 1.5:
+                vol_bucket = 'HIGH'
+            else:
+                vol_bucket = 'MEDIUM'
             db.log_market_context(self.session_id, {
                 'session_id': self.session_id,
                 'nifty_level': nifty['level'],
                 'nifty_change_percent': nifty['change_percent'],
                 'nifty_direction': nifty['direction'],
-                'india_vix': vix,
-                'volatility_bucket': 'LOW' if vix < 13 else 'HIGH' if vix > 20 else 'MEDIUM',
+                'india_vix': None,  # deprecated: retail token can't read VIX
+                'realized_vol': rvol,
+                'volatility_bucket': vol_bucket,
                 'time_bucket': time_bucket,
             })
             self.last_context_log = now

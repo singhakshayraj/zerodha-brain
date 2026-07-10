@@ -90,6 +90,31 @@ def test_fill_value_matches_price_times_quantity():
     assert result['status'] == 'COMPLETE'
 
 
+# --- slippage decomposition (Tier-2): reference price + adverse bps ---
+
+def test_fill_exposes_reference_price_and_bps():
+    b = _broker()
+    result = b.place_buy_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10)
+    assert result['reference_price'] == 100.0     # intended (ltp)
+    assert result['slippage_bps'] > 0             # adverse cost, positive
+
+
+def test_buy_slippage_bps_reflects_fill_above_reference():
+    b = _broker()
+    result = b.place_buy_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10)
+    # bps recomputed from the decomposed fields matches the reported value
+    expected = round((result['price'] - result['reference_price'])
+                     / result['reference_price'] * 10000, 2)
+    assert result['slippage_bps'] == expected
+
+
+def test_sell_slippage_bps_positive_though_fill_below_reference():
+    b = _broker()
+    result = b.place_sell_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10)
+    assert result['price'] < result['reference_price']
+    assert result['slippage_bps'] > 0   # adverse magnitude, always positive
+
+
 # --- no live price: fail-closed, then hint-price fallback ---
 
 def test_fill_fails_without_price_or_hint():
