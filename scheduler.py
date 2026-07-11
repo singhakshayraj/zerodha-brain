@@ -65,18 +65,26 @@ _advisor_running = False
 
 def _maybe_run_advisor() -> None:
     """Daily portfolio advisory (ADVISORY ONLY — no orders). Fires once per
-    day after 09:20 IST when a token exists and probes live. Runs on a daemon
-    thread so the scheduler loop never waits on candle fetches. Skipped in QA
-    (synthetic market has no real holdings)."""
+    day after 09:20 IST when a token exists and probes live. A manual trigger
+    (app_config 'advisor_run_now'=='true') bypasses the time gate and the
+    once-per-day dedup, for an on-demand run outside the window — set from the
+    dashboard or directly in app_config; cleared immediately so it fires once.
+    Runs on a daemon thread so the scheduler loop never waits on candle
+    fetches. Skipped in QA (synthetic market has no real holdings)."""
     global _advisor_date, _advisor_running
     if config.QA_MODE or _advisor_running:
         return
     now = datetime.now(IST)
     today = now.date().isoformat()
-    if _advisor_date == today:
+
+    forced = (db.get_config('advisor_run_now') or '').strip().lower() == 'true'
+    if forced:
+        db.write_config('advisor_run_now', '')  # consume — fires once
+    elif _advisor_date == today:
         return
-    if now.hour < 9 or (now.hour == 9 and now.minute < 20):
+    elif now.hour < 9 or (now.hour == 9 and now.minute < 20):
         return
+
     token = db.get_enc_token()
     if not token or not _token_is_live(token):
         return
