@@ -77,11 +77,44 @@ def breakeven_gain_pct(avg_price: float, last_price: float):
     return round((avg_price / last_price - 1) * 100, 1)
 
 
-def advise(holding: dict, daily_candles: list) -> dict:
+def tradebook_stats(rows: list) -> dict:
+    """Per-symbol behaviour stats from the real tradebook: how often you've
+    traded a name and (approximately) how it went. realized_pnl matches sold
+    qty against the running average buy cost — an honest approximation, not a
+    FIFO tax computation."""
+    out = {}
+    for r in rows or []:
+        try:
+            sym = r['symbol']
+            qty = float(r['quantity'] or 0)
+            price = float(r['price'] or 0)
+            s = out.setdefault(sym, {
+                'trades': 0, 'buy_qty': 0.0, 'buy_value': 0.0,
+                'sell_qty': 0.0, 'realized_pnl': 0.0, 'last_trade_date': None,
+            })
+            s['trades'] += 1
+            s['last_trade_date'] = r.get('trade_date') or s['last_trade_date']
+            if (r.get('trade_type') or '').lower() == 'buy':
+                s['buy_qty'] += qty
+                s['buy_value'] += qty * price
+            else:
+                avg_cost = (s['buy_value'] / s['buy_qty']) if s['buy_qty'] else price
+                s['realized_pnl'] += qty * (price - avg_cost)
+                s['sell_qty'] += qty
+        except Exception:
+            continue
+    for s in out.values():
+        s['realized_pnl'] = round(s['realized_pnl'], 2)
+    return out
+
+
+def advise(holding: dict, daily_candles: list, history: dict = None) -> dict:
     """One holding → one verdict. Pure: no I/O, no orders.
 
     holding: {symbol, quantity, average_price, last_price}
     daily_candles: list of {open,high,low,close,volume,timestamp}, oldest first.
+    history: optional per-symbol tradebook_stats entry — your own past
+    behaviour on this name, folded into the reasons.
     """
     symbol = holding.get('symbol')
     qty = holding.get('quantity') or 0
@@ -128,6 +161,15 @@ def advise(holding: dict, daily_candles: list) -> dict:
         reasons.append(f"Down {abs(pnl_pct):.0f}% — needs "
                        f"+{base['breakeven_gain_pct']:.0f}% from here just to "
                        f"break even; the chart must justify that")
+
+    # Your own history on this name (real tradebook), when we have it
+    if history and history.get('trades'):
+        realized = history.get('realized_pnl') or 0.0
+        line = (f"Your history here: {history['trades']} fills, realized "
+                f"{'+' if realized >= 0 else '−'}₹{abs(realized):,.0f}")
+        if realized < 0 and pnl_pct is not None and pnl_pct < 0:
+            line += " — this name has cost you both realized and unrealized"
+        reasons.append(line)
 
     if score >= 20:
         verdict = 'HOLD'
@@ -177,8 +219,46 @@ def advise(holding: dict, daily_candles: list) -> dict:
             'adx': ind.get('adx'), 'atr_14': ind.get('atr_14'),
             'support': support, 'resistance': resistance,
             'daily_bars': ind.get('candle_count'),
+            'history': history or None,
         },
     }
+
+
+def sync_tradebook(kite) -> int:
+    """Append today's REAL account trades (GET /trades) into tradebook —
+    keeps the imported history current going forward. Read-only; dedup makes
+    re-runs safe."""
+    try:
+        trades = kite.get_account_trades() or []
+    except Exception as e:
+        print(f"[advisor] tradebook sync failed (non-fatal): {e}")
+        return 0
+    rows = []
+    for t in trades:
+        try:
+            rows.append({
+                'symbol': t.get('tradingsymbol'),
+                'isin': None,
+                'trade_date': (t.get('fill_timestamp') or
+                               t.get('exchange_timestamp') or '')[:10] or None,
+                'exchange': t.get('exchange') or 'NSE',
+                'segment': 'EQ',
+                'series': None,
+                'trade_type': (t.get('transaction_type') or '').lower(),
+                'quantity': t.get('quantity') or 0,
+                'price': t.get('average_price') or 0,
+                'trade_id': str(t.get('trade_id') or ''),
+                'order_id': str(t.get('order_id') or ''),
+                'executed_at': t.get('fill_timestamp') or t.get('exchange_timestamp'),
+                'source': 'kite_daily',
+            })
+        except Exception:
+            continue
+    rows = [r for r in rows if r['symbol'] and r['trade_id']]
+    n = db.upsert_tradebook(rows)
+    if n:
+        print(f"[advisor] tradebook: appended {n} fills from today")
+    return n
 
 
 def run_advisor(market_data) -> int:
@@ -195,6 +275,11 @@ def run_advisor(market_data) -> int:
         print("[advisor] no holdings")
         return 0
 
+    # Keep the real tradebook current, then load your per-symbol history so
+    # verdicts can reference how this name has actually treated you.
+    sync_tradebook(market_data.kite)
+    history = tradebook_stats(db.get_tradebook())
+
     run_date = datetime.now(IST).date().isoformat()
     rows = []
     for h in holdings:
@@ -209,7 +294,7 @@ def run_advisor(market_data) -> int:
                 'quantity': h.get('quantity'),
                 'average_price': h.get('average_price'),
                 'last_price': h.get('last_price'),
-            }, candles or [])
+            }, candles or [], history=history.get(tsym))
             rows.append({'run_date': run_date, **advice})
             print(f"[advisor] {tsym}: {advice['verdict']} "
                   f"(trend {advice['trend_score']}, conf {advice['confidence']})")

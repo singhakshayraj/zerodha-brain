@@ -143,6 +143,11 @@ class KiteClient:
         data = self._get('/portfolio/positions')
         return data if data else {'day': [], 'net': []}
 
+    def get_account_trades(self) -> list:
+        """The REAL account's executed trades for TODAY (GET /trades) — the
+        daily tradebook. Read-only; used to keep the tradebook table current."""
+        return self._get('/trades') or []
+
     # --- MARKET DATA ---
 
     def get_quote(self, symbols: list) -> dict:

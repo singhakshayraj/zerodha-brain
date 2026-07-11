@@ -129,3 +129,64 @@ def test_run_advisor_no_holdings():
     md = MagicMock()
     md.kite.get_holdings.return_value = []
     assert pa.run_advisor(md) == 0
+
+
+# --- real tradebook: stats, reason folding, daily sync ---
+
+def _fill(sym, side, qty, price, date='2026-05-01'):
+    return {'symbol': sym, 'trade_type': side, 'quantity': qty,
+            'price': price, 'trade_date': date}
+
+
+def test_tradebook_stats_realized_pnl():
+    # buy 10 @ 100, sell 5 @ 120 → realized +100 vs avg cost
+    stats = pa.tradebook_stats([
+        _fill('X', 'buy', 10, 100.0),
+        _fill('X', 'sell', 5, 120.0, '2026-05-02'),
+    ])
+    assert stats['X']['trades'] == 2
+    assert stats['X']['realized_pnl'] == 100.0
+    assert stats['X']['last_trade_date'] == '2026-05-02'
+
+
+def test_tradebook_stats_survives_garbage():
+    stats = pa.tradebook_stats([{'symbol': 'X', 'quantity': 'bad', 'price': 1},
+                                _fill('Y', 'buy', 1, 10.0)])
+    assert 'Y' in stats
+
+
+def test_history_folded_into_reasons():
+    candles = _candles(250, start=400, step=-1.0)
+    last = candles[-1]['close']
+    out = pa.advise(_holding(avg=last * 2, last=last), candles,
+                    history={'trades': 14, 'realized_pnl': -2300.0,
+                             'buy_qty': 10, 'buy_value': 100, 'sell_qty': 5,
+                             'last_trade_date': '2026-05-25'})
+    joined = ' '.join(out['reasons'])
+    assert '14 fills' in joined
+    assert 'realized and unrealized' in joined      # losing both ways flagged
+    assert out['indicators']['history']['trades'] == 14
+
+
+def test_sync_tradebook_normalizes_and_is_read_only():
+    kite = MagicMock()
+    kite.get_account_trades.return_value = [{
+        'tradingsymbol': 'INFY', 'exchange': 'NSE', 'transaction_type': 'BUY',
+        'quantity': 5, 'average_price': 1500.5, 'trade_id': 't1',
+        'order_id': 'o1', 'fill_timestamp': '2026-07-13 10:01:00',
+    }]
+    with patch.object(pa.db, 'upsert_tradebook',
+                      side_effect=lambda rows: len(rows)) as up:
+        assert pa.sync_tradebook(kite) == 1
+    row = up.call_args.args[0][0]
+    assert row['trade_type'] == 'buy'
+    assert row['trade_date'] == '2026-07-13'
+    assert row['source'] == 'kite_daily'
+    for name in ('place_buy_order', 'place_sell_order', 'place_order'):
+        assert not getattr(kite, name).called
+
+
+def test_sync_tradebook_survives_api_error():
+    kite = MagicMock()
+    kite.get_account_trades.side_effect = RuntimeError('down')
+    assert pa.sync_tradebook(kite) == 0

@@ -718,6 +718,33 @@ def traded_symbols() -> list:
         return []
 
 
+def upsert_tradebook(rows: list) -> int:
+    """Append real-account trades, deduped on (exchange, trade_id, order_id) —
+    safe to re-run for the same day."""
+    if not rows:
+        return 0
+    try:
+        supabase.table('tradebook').upsert(
+            rows, on_conflict='exchange,trade_id,order_id',
+            ignore_duplicates=True).execute()
+        return len(rows)
+    except Exception as e:
+        print(f"[upsert_tradebook] error ({len(rows)} rows): {e}")
+        return 0
+
+
+def get_tradebook() -> list:
+    """Full real-account trade history (import + daily appends)."""
+    try:
+        res = (supabase.table('tradebook')
+               .select('symbol, trade_type, quantity, price, trade_date')
+               .order('executed_at').execute())
+        return res.data or []
+    except Exception as e:
+        print(f"[get_tradebook] error: {e}")
+        return []
+
+
 def upsert_portfolio_advice(rows: list) -> int:
     """One advisory row per (run_date, symbol); a same-day re-run overwrites so
     the day's advice reflects the latest analysis."""
