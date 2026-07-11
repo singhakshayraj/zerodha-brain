@@ -73,7 +73,7 @@ def anchored_stop_target(entry: float, direction: str, levels: list,
     Returns {stop, target, rr, stop_level, target_level} or None.
     """
     buffer_frac = config.LEVEL_STOP_BUFFER_FRAC if buffer_frac is None else buffer_frac
-    min_rr = config.MIN_RISK_REWARD_RATIO if min_rr is None else min_rr
+    min_rr = config.get_tunable('MIN_RISK_REWARD_RATIO') if min_rr is None else min_rr
     if not levels or not entry or entry <= 0:
         return None
     buf = (atr or 0) * buffer_frac

@@ -186,7 +186,7 @@ class SignalEngine:
             f"score={raw_buy_confidence}"
         )
 
-        if raw_buy_confidence >= config.MIN_BUY_CONFIDENCE and allow_buy:
+        if raw_buy_confidence >= config.get_tunable('MIN_BUY_CONFIDENCE') and allow_buy:
             regime_name = regime.get('regime', 'UNKNOWN')
             if regime_name == 'CHOPPY':
                 skip_reasons.append('No BUY in CHOPPY regime')
@@ -204,16 +204,16 @@ class SignalEngine:
                 )
                 action = 'HOLD'
                 confidence = raw_buy_confidence
-            elif risk_reward < config.MIN_RISK_REWARD_RATIO:
+            elif risk_reward < config.get_tunable('MIN_RISK_REWARD_RATIO'):
                 skip_reasons.append(
-                    f'R:R {risk_reward:.2f} below minimum {config.MIN_RISK_REWARD_RATIO}'
+                    f'R:R {risk_reward:.2f} below minimum {config.get_tunable("MIN_RISK_REWARD_RATIO")}'
                 )
                 action = 'HOLD'
                 confidence = raw_buy_confidence
             else:
                 action = 'BUY'
                 confidence = raw_buy_confidence
-        elif raw_sell_confidence >= config.MIN_SELL_CONFIDENCE and allow_sell:
+        elif raw_sell_confidence >= config.get_tunable('MIN_SELL_CONFIDENCE') and allow_sell:
             action = 'SELL'
             confidence = raw_sell_confidence
         else:
@@ -228,7 +228,7 @@ class SignalEngine:
 
         # 1. Final R:R principle check (only matters for BUY actions)
         rr_check = TradingPrinciples.is_valid_risk_reward(
-            live_price, stop_loss, target, min_ratio=config.MIN_RISK_REWARD_RATIO
+            live_price, stop_loss, target, min_ratio=config.get_tunable('MIN_RISK_REWARD_RATIO')
         )
 
         if action == 'BUY' and not rr_check['valid']:

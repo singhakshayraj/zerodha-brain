@@ -371,3 +371,58 @@ NIFTY_NEXT50_INSTRUMENT_TOKENS = {
     'NSE:SHREECEM':    794369,
     'NSE:RECLTD':      3930881,
 }
+
+# ── Live-tunable signal knobs (REQ-030) ─────────────────────────────────────
+# A whitelisted set of SIGNAL thresholds can be overridden at runtime from the
+# app_config 'tunables' key (a JSON object) WITHOUT a redeploy — useful under
+# the market-hours deploy freeze. Risk-sizing/stop knobs are deliberately NOT
+# here: those stay code-only so nothing mutable at runtime can relax the money
+# path. Reads are cached (TTL) and fail safe — any DB/parse error falls back to
+# the compiled default, never crashing the trading loop.
+import time as _time
+import json as _json
+
+TUNABLE_DEFAULTS = {
+    'MIN_BUY_CONFIDENCE': MIN_BUY_CONFIDENCE,
+    'MIN_SELL_CONFIDENCE': MIN_SELL_CONFIDENCE,
+    'MIN_RISK_REWARD_RATIO': MIN_RISK_REWARD_RATIO,
+    'ADX_TRENDING_THRESHOLD': ADX_TRENDING_THRESHOLD,
+    'ADX_WEAK_THRESHOLD': ADX_WEAK_THRESHOLD,
+}
+TUNABLE_TTL_SECONDS = 60
+_tunable_cache: dict = {}
+_tunable_cache_ts: float = 0.0
+
+
+def _tunable_overrides() -> dict:
+    """Cached JSON map of overrides from app_config 'tunables'. Refreshed every
+    TUNABLE_TTL_SECONDS. On any failure keeps the last-known cache (or empty)
+    so the trading loop never breaks on a transient DB error. Lazy DB import
+    avoids the config↔database import cycle."""
+    global _tunable_cache, _tunable_cache_ts
+    now = _time.monotonic()
+    if _tunable_cache_ts and (now - _tunable_cache_ts) < TUNABLE_TTL_SECONDS:
+        return _tunable_cache
+    try:
+        import database
+        raw = database.get_config('tunables')
+        parsed = _json.loads(raw) if raw else {}
+        _tunable_cache = parsed if isinstance(parsed, dict) else {}
+    except Exception as e:
+        print(f"[config.tunables] override read failed (non-fatal): {e}")
+    _tunable_cache_ts = now
+    return _tunable_cache
+
+
+def get_tunable(key: str):
+    """Return the live override for a whitelisted signal knob, else its compiled
+    default. Coerced to the default's type; bad values fall back to default."""
+    default = TUNABLE_DEFAULTS[key]  # KeyError = using a non-whitelisted key
+    override = _tunable_overrides().get(key)
+    if override is None:
+        return default
+    try:
+        return type(default)(override)
+    except (ValueError, TypeError):
+        print(f"[config.tunables] bad override {key}={override!r}; using default")
+        return default

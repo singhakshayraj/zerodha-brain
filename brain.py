@@ -804,7 +804,7 @@ class TradingBrain:
                         if ep == event_calendar.STAND_ASIDE:
                             blocked = 'EVENT_STAND_ASIDE'
                         elif (ep == event_calendar.RAISE_BAR
-                              and signal['confidence'] < config.MIN_BUY_CONFIDENCE + 10):
+                              and signal['confidence'] < config.get_tunable('MIN_BUY_CONFIDENCE') + 10):
                             blocked = 'EVENT_RAISE_BAR'
                         if blocked:
                             print(f"[event] {symbol} entry blocked: {blocked} "
@@ -831,7 +831,7 @@ class TradingBrain:
                         risk_reward=signal.get('risk_reward_ratio'),
                     )
 
-                    if signal['action'] == 'BUY' and signal['confidence'] >= config.MIN_BUY_CONFIDENCE:
+                    if signal['action'] == 'BUY' and signal['confidence'] >= config.get_tunable('MIN_BUY_CONFIDENCE'):
                         open_trades_now = db.get_open_trades(self.session_id)
                         short_match = next(
                             (t for t in open_trades_now

@@ -75,10 +75,10 @@ class RegimeDetector:
         if adx_data is None:
             regime = 'UNKNOWN'
             adx_modifier = 0
-        elif adx_data['adx'] > config.ADX_TRENDING_THRESHOLD:
+        elif adx_data['adx'] > config.get_tunable('ADX_TRENDING_THRESHOLD'):
             regime = 'TRENDING'
             adx_modifier = 10
-        elif adx_data['adx'] >= config.ADX_WEAK_THRESHOLD:
+        elif adx_data['adx'] >= config.get_tunable('ADX_WEAK_THRESHOLD'):
             regime = 'WEAK_TREND'
             adx_modifier = 0
         else:
