@@ -692,6 +692,40 @@ def archive_candles(session_id: str, symbol: str, exchange: str,
         candle_rows(session_id, symbol, exchange, candles, interval, tail))
 
 
+# --- NEWS EVENTS (NEWS_CORRELATION_PLAN) ---
+
+def upsert_news_events(rows: list) -> int:
+    """Bulk upsert news rows, deduped on (source, url). Decoupled from the
+    trading loop — the collector calls this out of band."""
+    if not rows:
+        return 0
+    try:
+        supabase.table('news_events').upsert(
+            rows, on_conflict='source,url').execute()
+        return len(rows)
+    except Exception as e:
+        print(f"[upsert_news_events] error ({len(rows)} rows): {e}")
+        return 0
+
+
+def recent_news_for_symbol(symbol: str, before_iso: str, limit: int = 3) -> list:
+    """Latest news rows tagging `symbol`, published strictly BEFORE before_iso
+    (causal — no leakage of news the decision couldn't have seen). Returns []
+    on any error so a decision never breaks on the news path."""
+    try:
+        res = (supabase.table('news_events')
+               .select('published_at, headline, sentiment_score, sentiment_label, url')
+               .contains('symbols', [symbol])
+               .lt('published_at', before_iso)
+               .order('published_at', desc=True)
+               .limit(limit)
+               .execute())
+        return res.data or []
+    except Exception as e:
+        print(f"[recent_news_for_symbol] error {symbol}: {e}")
+        return []
+
+
 # --- BRAIN ACTIVITY ---
 
 def log_brain_activity(

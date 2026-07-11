@@ -225,6 +225,15 @@ REENTRY_COOLDOWN_MIN = int(os.getenv('REENTRY_COOLDOWN_MIN', '15'))
 # PAPER_TRADING (never relax risk with real money) — see assert_safe_boot.
 DATA_COLLECTION_MODE = os.getenv('DATA_COLLECTION_MODE', 'false').strip().lower() == 'true'
 
+# News collector (NEWS_CORRELATION_PLAN): a decoupled periodic job fetches
+# ticker-tagged financial news + sentiment into news_events, out of the trading
+# loop. Default OFF and dormant until a Marketaux key is provided — the collector
+# no-ops without both NEWS_ENABLED and MARKETAUX_API_KEY, so nothing runs (and no
+# rate-limit burn) until deliberately switched on.
+NEWS_ENABLED = os.getenv('NEWS_ENABLED', 'false').strip().lower() == 'true'
+MARKETAUX_API_KEY = os.getenv('MARKETAUX_API_KEY', '').strip()
+NEWS_FETCH_INTERVAL_MIN = int(os.getenv('NEWS_FETCH_INTERVAL_MIN', '15'))
+
 
 def data_collection_active() -> bool:
     """DATA_COLLECTION_MODE only takes effect in paper mode. Hard safety: a
