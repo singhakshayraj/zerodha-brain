@@ -718,6 +718,20 @@ def traded_symbols() -> list:
         return []
 
 
+def upsert_portfolio_advice(rows: list) -> int:
+    """One advisory row per (run_date, symbol); a same-day re-run overwrites so
+    the day's advice reflects the latest analysis."""
+    if not rows:
+        return 0
+    try:
+        supabase.table('portfolio_advice').upsert(
+            rows, on_conflict='run_date,symbol').execute()
+        return len(rows)
+    except Exception as e:
+        print(f"[upsert_portfolio_advice] error ({len(rows)} rows): {e}")
+        return 0
+
+
 def recent_news_for_symbol(symbol: str, before_iso: str, limit: int = 3) -> list:
     """Latest news rows tagging `symbol`, published strictly BEFORE before_iso
     (causal — no leakage of news the decision couldn't have seen). Returns []

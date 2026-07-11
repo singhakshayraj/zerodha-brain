@@ -115,6 +115,10 @@ class MarketData:
             from_dt = now - timedelta(days=3)
         elif interval == '15minute':
             from_dt = now - timedelta(days=5)
+        elif interval == 'day':
+            # Daily bars for the portfolio advisor: EMA200 + swing structure
+            # need deep history (~400 calendar days ≈ 250+ trading bars).
+            from_dt = now - timedelta(days=400)
         else:
             from_dt = now - timedelta(days=20)
 

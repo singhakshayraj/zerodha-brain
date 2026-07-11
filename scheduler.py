@@ -58,6 +58,47 @@ def _token_is_live(token: str) -> bool:
         return True
 
 
+# Portfolio advisor dedup: the ISO date it last ran, so it fires once per day.
+_advisor_date = None
+_advisor_running = False
+
+
+def _maybe_run_advisor() -> None:
+    """Daily portfolio advisory (ADVISORY ONLY — no orders). Fires once per
+    day after 09:20 IST when a token exists and probes live. Runs on a daemon
+    thread so the scheduler loop never waits on candle fetches. Skipped in QA
+    (synthetic market has no real holdings)."""
+    global _advisor_date, _advisor_running
+    if config.QA_MODE or _advisor_running:
+        return
+    now = datetime.now(IST)
+    today = now.date().isoformat()
+    if _advisor_date == today:
+        return
+    if now.hour < 9 or (now.hour == 9 and now.minute < 20):
+        return
+    token = db.get_enc_token()
+    if not token or not _token_is_live(token):
+        return
+    _advisor_date = today
+    _advisor_running = True
+
+    def _run():
+        global _advisor_running
+        try:
+            import portfolio_advisor
+            from market_data import MarketData
+            md = MarketData(KiteClient(token))
+            n = portfolio_advisor.run_advisor(md)
+            print(f"[SCHEDULER] advisor done: {n} holdings analyzed")
+        except Exception as e:
+            print(f"[SCHEDULER] advisor failed (non-fatal): {e}")
+        finally:
+            _advisor_running = False
+
+    threading.Thread(target=_run, daemon=True, name='advisor').start()
+
+
 def _report_stale_token() -> None:
     """One durable token_incident + feed line per stale episode (deduped)."""
     global _stale_token_reported
@@ -251,6 +292,10 @@ def run():
             _set_heartbeat('ONLINE', 0, 'Waiting for START command')
             # Daily 6:30 IST token refresh — no-op unless KITE_* creds set.
             token_refresher.maybe_daily_refresh()
+            # Portfolio advisor: once per day when a live token exists.
+            # Advisory-only, independent of trading sessions; never blocks
+            # the loop (runs on a daemon thread).
+            _maybe_run_advisor()
             command = db.get_brain_command()
 
             if command not in ('START', 'RUNNING') and not _is_trading and _should_autostart():
