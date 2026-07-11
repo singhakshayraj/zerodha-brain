@@ -100,3 +100,58 @@ def test_collect_survives_fetch_error():
          patch.object(config, 'MARKETAUX_API_KEY', 'k'), \
          patch.object(news_jobs, 'fetch_marketaux', side_effect=RuntimeError('429')):
         assert news_jobs.collect(['RELIANCE']) == []
+
+
+# --- historical backfill ---
+
+def test_backfill_noop_when_disabled():
+    with patch.object(config, 'NEWS_ENABLED', False), \
+         patch.object(config, 'MARKETAUX_API_KEY', 'k'):
+        assert news_jobs.backfill(['R.NSE'], '2026-07-01', '2026-07-10') == 0
+
+
+def test_backfill_chunks_pages_and_stops_on_empty():
+    # 2 chunks (batch_size 1); first page has rows, second page empty → stop.
+    calls = []
+
+    def fake_fetch(chunk, key, **kw):
+        calls.append((tuple(chunk), kw.get('page')))
+        return _SAMPLE if kw.get('page') == 1 else {'data': []}
+
+    with patch.object(config, 'NEWS_ENABLED', True), \
+         patch.object(config, 'MARKETAUX_API_KEY', 'k'), \
+         patch.object(news_jobs, 'fetch_marketaux', side_effect=fake_fetch), \
+         patch.object(news_jobs, '_sleep'), \
+         patch.object(news_jobs.db, 'upsert_news_events', side_effect=lambda r: len(r)):
+        total = news_jobs.backfill(['A.NSE', 'B.NSE'], '2026-07-01',
+                                   '2026-07-10', pages=3, batch_size=1)
+    # 2 rows per chunk × 2 chunks; page 2 empty stops before page 3
+    assert total == 4
+    assert all(p in (1, 2) for _, p in calls)   # never reached page 3
+
+
+def test_backfill_passes_date_window():
+    seen = {}
+
+    def fake_fetch(chunk, key, **kw):
+        seen.update(kw)
+        return {'data': []}
+
+    with patch.object(config, 'NEWS_ENABLED', True), \
+         patch.object(config, 'MARKETAUX_API_KEY', 'k'), \
+         patch.object(news_jobs, 'fetch_marketaux', side_effect=fake_fetch), \
+         patch.object(news_jobs, '_sleep'):
+        news_jobs.backfill(['A.NSE'], '2026-07-01', '2026-07-10')
+    assert seen['published_after'] == '2026-07-01'
+    assert seen['published_before'] == '2026-07-10'
+
+
+def test_backfill_from_trades_derives_symbols():
+    with patch.object(config, 'NEWS_ENABLED', True), \
+         patch.object(config, 'MARKETAUX_API_KEY', 'k'), \
+         patch.object(news_jobs.db, 'traded_symbols', return_value=['INFY', 'TCS']), \
+         patch.object(news_jobs, 'backfill', return_value=7) as bf:
+        n = news_jobs.backfill_from_trades('2026-07-01', '2026-07-10')
+    assert n == 7
+    passed_symbols = bf.call_args.args[0]
+    assert passed_symbols == ['INFY.NSE', 'TCS.NSE']   # .NSE tag added

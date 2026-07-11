@@ -708,6 +708,16 @@ def upsert_news_events(rows: list) -> int:
         return 0
 
 
+def traded_symbols() -> list:
+    """Distinct symbols we've actually traded — the backfill target set."""
+    try:
+        res = supabase.table('trades').select('symbol').execute()
+        return sorted({r['symbol'] for r in (res.data or []) if r.get('symbol')})
+    except Exception as e:
+        print(f"[traded_symbols] error: {e}")
+        return []
+
+
 def recent_news_for_symbol(symbol: str, before_iso: str, limit: int = 3) -> list:
     """Latest news rows tagging `symbol`, published strictly BEFORE before_iso
     (causal — no leakage of news the decision couldn't have seen). Returns []

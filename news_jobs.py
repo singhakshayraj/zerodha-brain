@@ -66,20 +66,89 @@ def normalize_marketaux(payload: dict) -> list:
     return rows
 
 
-def fetch_marketaux(symbols: list, api_key: str, limit: int = 25) -> dict:
-    """One Marketaux call for a batch of symbols. Raises on HTTP error — the
-    caller (collect) guards and logs."""
+def fetch_marketaux(symbols: list, api_key: str, limit: int = 25,
+                    published_after: str = None, published_before: str = None,
+                    page: int = None) -> dict:
+    """One Marketaux call for a batch of symbols. published_after/before (ISO or
+    YYYY-MM-DD) + page drive historical backfill. Raises on HTTP error — the
+    caller guards and logs."""
     params = {
         'api_token': api_key,
         'symbols': ','.join(symbols) if symbols else None,
         'filter_entities': 'true',
         'language': 'en',
         'limit': limit,
+        'published_after': published_after,
+        'published_before': published_before,
+        'page': page,
     }
     params = {k: v for k, v in params.items() if v is not None}
     resp = requests.get(_MARKETAUX_URL, params=params, timeout=10)
     resp.raise_for_status()
     return resp.json()
+
+
+def backfill(symbols: list, published_after: str, published_before: str,
+             pages: int = 3, batch_size: int = 10, sleep_s: float = 1.0) -> int:
+    """Historical fill of news_events for past session dates so already-stored
+    trades can correlate via a symbol + published_at<decided_at join (no
+    re-stamp of old decisions). Paced for the free tier (~100 req/day): symbols
+    are chunked, pages are bounded, and a sleep spaces requests. Returns total
+    rows upserted. No-op (0) unless enabled + keyed."""
+    if not config.NEWS_ENABLED or not config.MARKETAUX_API_KEY:
+        print("[news_jobs.backfill] disabled or unkeyed — nothing to do")
+        return 0
+    total = 0
+    for i in range(0, len(symbols), batch_size):
+        chunk = symbols[i:i + batch_size]
+        for page in range(1, pages + 1):
+            try:
+                payload = fetch_marketaux(
+                    chunk, config.MARKETAUX_API_KEY,
+                    published_after=published_after,
+                    published_before=published_before, page=page)
+            except Exception as e:
+                print(f"[news_jobs.backfill] fetch failed chunk={chunk} "
+                      f"page={page} (stopping this chunk): {e}")
+                break
+            rows = normalize_marketaux(payload)
+            if not rows:
+                break                    # no more articles for this chunk
+            total += db.upsert_news_events(rows)
+            _sleep(sleep_s)
+    print(f"[news_jobs.backfill] upserted {total} rows over "
+          f"{len(symbols)} symbols {published_after}..{published_before}")
+    return total
+
+
+def backfill_from_trades(published_after: str, published_before: str,
+                         **kw) -> int:
+    """Backfill news for exactly the symbols we've traded, over a date window.
+    Symbols derived from the trades table so the fill targets what we can
+    correlate. Run as a one-off (see __main__)."""
+    symbols = [f"{s}.NSE" for s in db.traded_symbols()]
+    if not symbols:
+        print("[news_jobs.backfill_from_trades] no traded symbols found")
+        return 0
+    return backfill(symbols, published_after, published_before, **kw)
+
+
+def _sleep(seconds: float) -> None:
+    """Indirection so tests can patch out the rate-limit pause."""
+    import time
+    time.sleep(seconds)
+
+
+if __name__ == '__main__':
+    # One-off historical backfill:
+    #   python news_jobs.py <published_after> <published_before>
+    # dates as YYYY-MM-DD. Needs NEWS_ENABLED=true + MARKETAUX_API_KEY in env.
+    import sys
+    if len(sys.argv) != 3:
+        print("usage: python news_jobs.py <YYYY-MM-DD after> <YYYY-MM-DD before>")
+        sys.exit(1)
+    n = backfill_from_trades(sys.argv[1], sys.argv[2])
+    print(f"backfilled {n} news rows")
 
 
 def collect(symbols: list) -> list:
