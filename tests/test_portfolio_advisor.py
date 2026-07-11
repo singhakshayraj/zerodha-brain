@@ -190,3 +190,95 @@ def test_sync_tradebook_survives_api_error():
     kite = MagicMock()
     kite.get_account_trades.side_effect = RuntimeError('down')
     assert pa.sync_tradebook(kite) == 0
+
+
+# --- v2: trend consistency, relative strength, overextension, volume, concentration ---
+
+def test_trend_consistency_all_above():
+    # steady climb -> price consistently above its own 50-day EMA
+    closes = [float(c['close']) for c in _candles(120, start=100, step=0.5)]
+    c = pa.trend_consistency(closes)
+    assert c is not None and c >= 80
+
+
+def test_trend_consistency_none_with_insufficient_data():
+    assert pa.trend_consistency([100.0] * 10) is None
+
+
+def test_relative_strength_outperformance():
+    stock = [float(c['close']) for c in _candles(30, start=100, step=1.0)]
+    nifty = [float(c['close']) for c in _candles(30, start=100, step=0.2)]
+    rs = pa.relative_strength(stock, nifty)
+    assert rs is not None and rs > 0   # stock ran faster than the benchmark
+
+
+def test_relative_strength_none_without_benchmark():
+    stock = [float(c['close']) for c in _candles(30, start=100, step=1.0)]
+    assert pa.relative_strength(stock, []) is None
+
+
+def test_volume_trend_building():
+    candles = []
+    for i in range(20):
+        vol = 1000 if i < 10 else 3000
+        candles.append({'close': 100, 'open': 100, 'high': 101, 'low': 99, 'volume': vol})
+    vt = pa.volume_trend(candles)
+    assert vt is not None and vt > 1.3
+
+
+def test_volume_trend_none_with_insufficient_data():
+    assert pa.volume_trend([{'volume': 100}] * 5) is None
+
+
+def test_overextension_downgrades_hold_to_trim():
+    # a sharp, low-volatility spike far above EMA50 with RSI pinned high
+    base = _candles(230, start=100, step=0.3)   # gentle base uptrend
+    spike = _candles(20, start=base[-1]['close'], step=8.0)  # violent spike
+    candles = base + spike
+    out = pa.advise(_holding(avg=100, last=candles[-1]['close']), candles)
+    assert out['indicators']['overextended'] is True
+    assert out['verdict'] == 'TRIM'
+    assert any('extended' in r.lower() for r in out['reasons'])
+
+
+def test_concentration_flag_appears_above_threshold():
+    candles = _candles(250, start=100, step=0.5)
+    out = pa.advise(_holding(avg=150, last=candles[-1]['close']), candles,
+                    portfolio_weight_pct=40.0)
+    assert any('Concentration' in r for r in out['reasons'])
+    assert out['indicators']['portfolio_weight_pct'] == 40.0
+
+
+def test_concentration_flag_absent_below_threshold():
+    candles = _candles(250, start=100, step=0.5)
+    out = pa.advise(_holding(avg=150, last=candles[-1]['close']), candles,
+                    portfolio_weight_pct=5.0)
+    assert not any('Concentration' in r for r in out['reasons'])
+
+
+def test_relative_strength_folded_into_score_and_reasons():
+    stock = [float(c['close']) for c in _candles(230, start=100, step=0.5)]
+    strong_bench = [s * 0.5 for s in stock]      # benchmark far weaker
+    weak_bench = [100.0] * 230                    # benchmark flat
+    candles = _candles(230, start=100, step=0.5)
+    out_neutral = pa.advise(_holding(avg=100, last=candles[-1]['close']), candles)
+    out_with_rs = pa.advise(_holding(avg=100, last=candles[-1]['close']), candles,
+                            nifty_closes=weak_bench)
+    assert out_with_rs['indicators']['relative_strength_vs_nifty'] is not None
+    assert out_with_rs['trend_score'] >= out_neutral['trend_score']
+
+
+# --- runner: seeds instrument tokens (the 0-daily-bars bug fix) ---
+
+def test_run_advisor_seeds_instrument_token_cache():
+    md = MagicMock()
+    md._instrument_cache = {}
+    md.kite.get_holdings.return_value = [
+        {'tradingsymbol': 'INFY', 'exchange': 'NSE', 'quantity': 5,
+         'average_price': 1500.0, 'last_price': 1074.0,
+         'instrument_token': 408065},
+    ]
+    md.get_candles.return_value = _candles(250, start=1500, step=-1.5)
+    with patch.object(pa.db, 'upsert_portfolio_advice', side_effect=lambda r: len(r)):
+        pa.run_advisor(md)
+    assert md._instrument_cache.get('NSE:INFY') == 408065
