@@ -146,6 +146,24 @@ def test_backfill_passes_date_window():
     assert seen['published_before'] == '2026-07-10'
 
 
+def test_run_backfill_from_env_noop_when_unset():
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop('NEWS_BACKFILL_WINDOW', None)
+        assert news_jobs.run_backfill_from_env() == 0
+
+
+def test_run_backfill_from_env_bad_format_noop():
+    with patch.dict(os.environ, {'NEWS_BACKFILL_WINDOW': 'just-one-date'}):
+        assert news_jobs.run_backfill_from_env() == 0
+
+
+def test_run_backfill_from_env_runs_with_window():
+    with patch.dict(os.environ, {'NEWS_BACKFILL_WINDOW': '2026-06-01, 2026-07-11'}), \
+         patch.object(news_jobs, 'backfill_from_trades', return_value=9) as bf:
+        assert news_jobs.run_backfill_from_env() == 9
+    bf.assert_called_once_with('2026-06-01', '2026-07-11')
+
+
 def test_backfill_from_trades_derives_symbols():
     with patch.object(config, 'NEWS_ENABLED', True), \
          patch.object(config, 'MARKETAUX_API_KEY', 'k'), \

@@ -13,6 +13,8 @@ live key exists.
 Marketaux free tier ~100 req/day → batch symbols per call (entity filter) and
 poll on an interval (config.NEWS_FETCH_INTERVAL_MIN), not per-symbol per-minute.
 """
+import os
+
 import requests
 
 import config
@@ -131,6 +133,31 @@ def backfill_from_trades(published_after: str, published_before: str,
         print("[news_jobs.backfill_from_trades] no traded symbols found")
         return 0
     return backfill(symbols, published_after, published_before, **kw)
+
+
+def run_backfill_from_env() -> int:
+    """Boot hook: if NEWS_BACKFILL_WINDOW='YYYY-MM-DD,YYYY-MM-DD' is set, run a
+    one-off historical backfill on startup (no shell needed — set the var +
+    restart). Idempotent (upsert dedups on source,url), so leaving the var set
+    across restarts is harmless; remove it once filled. No-op when unset/blank
+    or the collector is disabled."""
+    window = os.getenv('NEWS_BACKFILL_WINDOW', '').strip()
+    if not window:
+        return 0
+    parts = [p.strip() for p in window.split(',')]
+    if len(parts) != 2 or not all(parts):
+        print(f"[news_jobs] NEWS_BACKFILL_WINDOW must be 'AFTER,BEFORE' "
+              f"(got {window!r}) — skipping")
+        return 0
+    after, before = parts
+    print(f"[news_jobs] boot backfill {after}..{before}")
+    try:
+        n = backfill_from_trades(after, before)
+        print(f"[news_jobs] boot backfill done: {n} rows")
+        return n
+    except Exception as e:
+        print(f"[news_jobs] boot backfill failed (non-fatal): {e}")
+        return 0
 
 
 def _sleep(seconds: float) -> None:
