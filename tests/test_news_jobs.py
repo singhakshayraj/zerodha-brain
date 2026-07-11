@@ -74,13 +74,13 @@ def test_label_thresholds():
 def test_collect_noop_when_disabled():
     with patch.object(config, 'NEWS_ENABLED', False), \
          patch.object(config, 'MARKETAUX_API_KEY', 'k'):
-        assert news_jobs.collect(['RELIANCE']) == 0
+        assert news_jobs.collect(['RELIANCE']) == []
 
 
 def test_collect_noop_without_key():
     with patch.object(config, 'NEWS_ENABLED', True), \
          patch.object(config, 'MARKETAUX_API_KEY', ''):
-        assert news_jobs.collect(['RELIANCE']) == 0
+        assert news_jobs.collect(['RELIANCE']) == []
 
 
 def test_collect_fetches_normalizes_stores_when_configured():
@@ -88,8 +88,8 @@ def test_collect_fetches_normalizes_stores_when_configured():
          patch.object(config, 'MARKETAUX_API_KEY', 'k'), \
          patch.object(news_jobs, 'fetch_marketaux', return_value=_SAMPLE), \
          patch.object(news_jobs.db, 'upsert_news_events', return_value=2) as up:
-        n = news_jobs.collect(['RELIANCE', 'TCS'])
-    assert n == 2
+        rows = news_jobs.collect(['RELIANCE', 'TCS'])
+    assert len(rows) == 2               # normalized rows returned for caching
     # stored the normalized rows, not the raw payload
     up.assert_called_once()
     assert len(up.call_args.args[0]) == 2
@@ -99,4 +99,4 @@ def test_collect_survives_fetch_error():
     with patch.object(config, 'NEWS_ENABLED', True), \
          patch.object(config, 'MARKETAUX_API_KEY', 'k'), \
          patch.object(news_jobs, 'fetch_marketaux', side_effect=RuntimeError('429')):
-        assert news_jobs.collect(['RELIANCE']) == 0
+        assert news_jobs.collect(['RELIANCE']) == []

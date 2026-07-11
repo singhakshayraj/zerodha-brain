@@ -13,6 +13,7 @@ import event_calendar
 import inplay
 import levels
 import logger
+import news_jobs
 import orb
 import trend_tells
 from kite_client import KiteClient, TokenExpiredError
@@ -187,6 +188,9 @@ class TradingBrain:
         self.last_context_log = None
         self.consecutive_losses = 0
         self._last_loss_exit = {}   # symbol -> datetime of its last losing close
+        self._news_cache = {}       # symbol -> latest news {sentiment, headline, published_at}
+        self._last_news_fetch = None  # throttle clock for the news collector
+        self._news_fetching = False   # guards against overlapping fetch threads
         self._excursion = {}        # trade_id -> {'mfe_r', 'mae_r'} path extremes
         self._nifty50_cache = None
         self._session_ended = False
@@ -393,6 +397,11 @@ class TradingBrain:
             print(f"\n[brain] === Cycle {current_cycle} start: {datetime.now(IST).strftime('%H:%M:%S')} ===")
             logger.set_context(cycle=current_cycle)
             logger.cycle(cycle_num=current_cycle, stocks=len(self.universe))
+
+            # Kick a throttled, non-blocking news refresh (no-op unless the
+            # collector is enabled + keyed). Runs on a daemon thread so it never
+            # delays the trading cycle.
+            self._maybe_collect_news()
 
             # Always fetch fresh prices at cycle start
             print("[brain] Refreshing prices from Zerodha...")
@@ -737,6 +746,7 @@ class TradingBrain:
                             'fed_to_engine': config.MARKET_DIRECTION_ENABLED,
                         },
                         timing=self._timing_features(current_cycle, candles_5min),
+                        news_context=self._news_context(symbol),
                     )
 
                     # ORB promotion (§5 step 5A, flag-gated): when the
@@ -1296,6 +1306,78 @@ class TradingBrain:
         if not exc:
             return {}
         return {'mfe_r': exc['mfe_r'], 'mae_r': exc['mae_r']}
+
+    def _maybe_collect_news(self) -> None:
+        """Throttled, NON-BLOCKING news fetch (NEWS_CORRELATION_PLAN). Fires at
+        most every config.NEWS_FETCH_INTERVAL_MIN and does the HTTP call on a
+        daemon thread so the trading cycle never waits on it. No-ops entirely
+        when the collector is disabled/unkeyed. Refreshes the in-memory
+        _news_cache the per-decision news_context reads from — so the hot loop
+        never makes a live API or DB call for news."""
+        if not config.NEWS_ENABLED or not config.MARKETAUX_API_KEY:
+            return
+        now = datetime.now(IST)
+        if self._last_news_fetch:
+            elapsed = (now - self._last_news_fetch).total_seconds() / 60.0
+            if elapsed < config.NEWS_FETCH_INTERVAL_MIN:
+                return
+        if self._news_fetching:
+            return
+        self._last_news_fetch = now
+        # Marketaux tags Indian tickers as SYMBOL.NSE; cap the batch to keep the
+        # querystring + rate-limit sane.
+        symbols = [f"{k.split(':')[-1]}.NSE" for k in list(self.universe)[:50]]
+
+        def _run():
+            try:
+                rows = news_jobs.collect(symbols)
+                self._rebuild_news_cache(rows)
+                print(f"[news] refreshed cache from {len(rows)} rows")
+            except Exception as e:
+                print(f"[news] collect thread failed (non-fatal): {e}")
+            finally:
+                self._news_fetching = False
+
+        self._news_fetching = True
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _rebuild_news_cache(self, rows: list) -> None:
+        """Keep the most-recent article per symbol from a fetch batch."""
+        for row in rows or []:
+            pub = row.get('published_at')
+            for sym in row.get('symbols') or []:
+                prev = self._news_cache.get(sym)
+                if not prev or (pub and pub > (prev.get('published_at') or '')):
+                    self._news_cache[sym] = {
+                        'published_at': pub,
+                        'sentiment_score': row.get('sentiment_score'),
+                        'sentiment_label': row.get('sentiment_label'),
+                        'headline': row.get('headline'),
+                    }
+
+    def _news_context(self, symbol: str) -> dict:
+        """Cached news block for a decision — in-memory read, no live call. When
+        no news is cached for the symbol, returns {'available': False} so the
+        decision still records that it saw none. minutes_since_headline is a
+        timing feature that feeds TIMING_CORRELATION_PLAN."""
+        item = self._news_cache.get(symbol)
+        if not item:
+            return {'available': False}
+        mins = None
+        pub = item.get('published_at')
+        if pub:
+            try:
+                pub_dt = datetime.fromisoformat(str(pub).replace('Z', '+00:00'))
+                mins = round((datetime.now(IST) - pub_dt).total_seconds() / 60, 1)
+            except (ValueError, TypeError):
+                mins = None
+        return {
+            'available': True,
+            'sentiment_score': item.get('sentiment_score'),
+            'sentiment_label': item.get('sentiment_label'),
+            'headline': item.get('headline'),
+            'minutes_since_headline': mins,
+        }
 
     def _timing_features(self, current_cycle: int, candles_5min: list) -> dict:
         """Timing-as-a-factor block (TIMING_CORRELATION_PLAN Pillar 2), folded

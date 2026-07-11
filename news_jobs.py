@@ -82,16 +82,18 @@ def fetch_marketaux(symbols: list, api_key: str, limit: int = 25) -> dict:
     return resp.json()
 
 
-def collect(symbols: list) -> int:
-    """Fetch → normalize → store one batch. Returns the number of rows upserted.
-    No-ops (returns 0) when disabled or unconfigured, so it is safe to call on a
-    schedule regardless of setup."""
+def collect(symbols: list) -> list:
+    """Fetch → normalize → store one batch. Returns the normalized rows (so a
+    caller can also refresh an in-memory cache). No-ops (returns []) when
+    disabled or unconfigured, so it is safe to call on a schedule regardless of
+    setup."""
     if not config.NEWS_ENABLED or not config.MARKETAUX_API_KEY:
-        return 0
+        return []
     try:
         payload = fetch_marketaux(symbols, config.MARKETAUX_API_KEY)
     except Exception as e:
         print(f"[news_jobs.collect] fetch failed (non-fatal): {e}")
-        return 0
+        return []
     rows = normalize_marketaux(payload)
-    return db.upsert_news_events(rows)
+    db.upsert_news_events(rows)
+    return rows
