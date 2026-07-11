@@ -736,6 +736,7 @@ class TradingBrain:
                             'low_confidence': self.market_ctx.get('low_confidence'),
                             'fed_to_engine': config.MARKET_DIRECTION_ENABLED,
                         },
+                        timing=self._timing_features(current_cycle, candles_5min),
                     )
 
                     # ORB promotion (§5 step 5A, flag-gated): when the
@@ -1295,6 +1296,55 @@ class TradingBrain:
         if not exc:
             return {}
         return {'mfe_r': exc['mfe_r'], 'mae_r': exc['mae_r']}
+
+    def _timing_features(self, current_cycle: int, candles_5min: list) -> dict:
+        """Timing-as-a-factor block (TIMING_CORRELATION_PLAN Pillar 2), folded
+        into the decision's indicators jsonb. Cheap to derive from data we
+        already hold — no extra DB calls:
+          - minutes_since_open / minutes_to_close (session phase, EOD squeeze)
+          - session_phase bucket (OPENING/MIDDAY/CLOSING)
+          - cycle number (position within the session)
+          - data_age_seconds — staleness of the newest candle vs now
+          - concurrency — open positions at decision time (executed − closed)
+        Never raises; missing inputs degrade to None."""
+        now = datetime.now(IST)
+        try:
+            open_dt = now.replace(hour=9, minute=15, second=0, microsecond=0)
+            close_dt = now.replace(hour=15, minute=30, second=0, microsecond=0)
+            mins_since_open = round((now - open_dt).total_seconds() / 60, 1)
+            mins_to_close = round((close_dt - now).total_seconds() / 60, 1)
+            if mins_since_open <= 30:
+                phase = 'OPENING'
+            elif mins_to_close <= 30:
+                phase = 'CLOSING'
+            else:
+                phase = 'MIDDAY'
+
+            data_age = None
+            if candles_5min:
+                ts = candles_5min[-1].get('timestamp')
+                if ts:
+                    try:
+                        bar_dt = datetime.fromisoformat(str(ts))
+                        data_age = round((now - bar_dt).total_seconds(), 1)
+                    except (ValueError, TypeError):
+                        data_age = None
+
+            s = self.session_stats
+            concurrency = (s.get('trades_executed', 0)
+                           - s.get('winning_trades', 0)
+                           - s.get('losing_trades', 0))
+            return {
+                'minutes_since_open': mins_since_open,
+                'minutes_to_close': mins_to_close,
+                'session_phase': phase,
+                'cycle': current_cycle,
+                'data_age_seconds': data_age,
+                'concurrency': concurrency,
+            }
+        except Exception as e:
+            print(f"[timing_features] failed (non-fatal): {e}")
+            return {'cycle': current_cycle}
 
     @staticmethod
     def _fill_leg(result: dict) -> dict:
