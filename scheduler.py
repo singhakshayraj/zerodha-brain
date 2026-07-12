@@ -300,6 +300,13 @@ def run():
     t = threading.Thread(target=_heartbeat_thread, daemon=True, name='heartbeat')
     t.start()
 
+    # Intraday holdings watch (ADVISORY ONLY) — no-op unless enabled + keyed.
+    try:
+        import advisor_watch
+        advisor_watch.start_advisor_watch()
+    except Exception as e:
+        print(f"[SCHEDULER] advisor watch failed to start (non-fatal): {e}")
+
     db.update_heartbeat('ONLINE', 0, 'Brain started, waiting for command')
 
     while True:
