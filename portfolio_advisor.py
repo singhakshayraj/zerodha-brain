@@ -446,7 +446,7 @@ def run_advisor(market_data) -> int:
     # trading hot loop, so a synchronous fetch here is fine.
     try:
         news_jobs.collect([
-            f"{h['tradingsymbol']}.NSE" for h in holdings
+            f"{h['tradingsymbol']}.NS" for h in holdings
             if h.get('tradingsymbol')
         ][:50])
     except Exception as e:

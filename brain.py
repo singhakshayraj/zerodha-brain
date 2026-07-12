@@ -1324,9 +1324,10 @@ class TradingBrain:
         if self._news_fetching:
             return
         self._last_news_fetch = now
-        # Marketaux tags Indian tickers as SYMBOL.NSE; cap the batch to keep the
-        # querystring + rate-limit sane.
-        symbols = [f"{k.split(':')[-1]}.NSE" for k in list(self.universe)[:50]]
+        # Marketaux tags Indian tickers as SYMBOL.NS (Yahoo-style, NOT .NSE —
+        # .NSE matches nothing); cap the batch to keep the querystring +
+        # rate-limit sane.
+        symbols = [f"{k.split(':')[-1]}.NS" for k in list(self.universe)[:50]]
 
         def _run():
             try:

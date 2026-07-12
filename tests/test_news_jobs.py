@@ -22,8 +22,8 @@ _SAMPLE = {
             'url': 'https://news.example/1',
             'published_at': '2026-07-10T05:00:00.000000Z',
             'entities': [
-                {'symbol': 'RELIANCE.NSE', 'sentiment_score': 0.6},
-                {'symbol': 'TCS.NSE', 'sentiment_score': 0.2},
+                {'symbol': 'RELIANCE.NS', 'sentiment_score': 0.6},
+                {'symbol': 'TCS.NS', 'sentiment_score': 0.2},
             ],
         },
         {
@@ -41,7 +41,7 @@ def test_normalize_maps_articles_and_strips_exchange_suffix():
     rows = news_jobs.normalize_marketaux(_SAMPLE)
     assert len(rows) == 2                       # the url-less article dropped
     stock = rows[0]
-    assert stock['symbols'] == ['RELIANCE', 'TCS']   # .NSE stripped, sorted
+    assert stock['symbols'] == ['RELIANCE', 'TCS']   # .NS stripped, sorted
     assert stock['scope'] == 'STOCK'
     assert stock['source'] == 'marketaux'
     assert stock['sentiment_score'] == 0.4      # mean of 0.6, 0.2
@@ -172,4 +172,4 @@ def test_backfill_from_trades_derives_symbols():
         n = news_jobs.backfill_from_trades('2026-07-01', '2026-07-10')
     assert n == 7
     passed_symbols = bf.call_args.args[0]
-    assert passed_symbols == ['INFY.NSE', 'TCS.NSE']   # .NSE tag added
+    assert passed_symbols == ['INFY.NS', 'TCS.NS']   # .NS tag added

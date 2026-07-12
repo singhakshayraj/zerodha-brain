@@ -45,7 +45,7 @@ def normalize_marketaux(payload: dict) -> list:
             if not url:
                 continue
             entities = art.get('entities') or []
-            # Marketaux tags tickers with an exchange suffix (RELIANCE.NSE);
+            # Marketaux tags tickers with an exchange suffix (RELIANCE.NS);
             # strip it so symbols match our universe form (RELIANCE).
             symbols = sorted({e['symbol'].split('.')[0] for e in entities
                               if e.get('symbol')})
@@ -68,12 +68,13 @@ def normalize_marketaux(payload: dict) -> list:
     return rows
 
 
-def fetch_marketaux(symbols: list, api_key: str, limit: int = 25,
+def fetch_marketaux(symbols: list, api_key: str, limit: int = 3,
                     published_after: str = None, published_before: str = None,
                     page: int = None) -> dict:
     """One Marketaux call for a batch of symbols. published_after/before (ISO or
     YYYY-MM-DD) + page drive historical backfill. Raises on HTTP error — the
-    caller guards and logs."""
+    caller guards and logs. limit defaults to 3 = the Marketaux free-plan cap
+    (higher values just warn and return 3 anyway)."""
     params = {
         'api_token': api_key,
         'symbols': ','.join(symbols) if symbols else None,
@@ -128,7 +129,7 @@ def backfill_from_trades(published_after: str, published_before: str,
     """Backfill news for exactly the symbols we've traded, over a date window.
     Symbols derived from the trades table so the fill targets what we can
     correlate. Run as a one-off (see __main__)."""
-    symbols = [f"{s}.NSE" for s in db.traded_symbols()]
+    symbols = [f"{s}.NS" for s in db.traded_symbols()]
     if not symbols:
         print("[news_jobs.backfill_from_trades] no traded symbols found")
         return 0
