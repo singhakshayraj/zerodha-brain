@@ -381,6 +381,42 @@ NIFTY_NEXT50_INSTRUMENT_TOKENS = {
     'NSE:RECLTD':      3930881,
 }
 
+
+# ── Nifty 500 universe (Portfolio Advisor rotation scan) ────────────────────
+# Same "pin it, don't fetch it live" philosophy as the dicts above, but at 500
+# symbols the pin lives in data/nifty500.csv (symbol, instrument_token,
+# sector, industry, company_name), regenerated per quarterly index
+# reconstitution via scripts/build_nifty500_tokens.py. Loaded once at import;
+# a missing/corrupt file degrades to an empty list — the rotation scan then
+# simply has no candidates, never a crash.
+def _load_nifty500_universe() -> list:
+    import csv as _csv
+    path = os.path.join(os.path.dirname(__file__), 'data', 'nifty500.csv')
+    try:
+        with open(path, newline='') as f:
+            rows = []
+            for r in _csv.DictReader(f):
+                try:
+                    rows.append({
+                        'symbol': r['symbol'],
+                        'instrument_token': int(r['instrument_token']),
+                        'sector': r.get('sector') or None,
+                        'industry': r.get('industry') or None,
+                        'company_name': r.get('company_name') or None,
+                    })
+                except Exception:
+                    continue
+            return rows
+    except Exception as e:
+        print(f"[config] nifty500.csv unavailable ({e}) — universe scan empty")
+        return []
+
+
+NIFTY500_UNIVERSE = _load_nifty500_universe()
+NIFTY500_INSTRUMENT_TOKENS = {
+    f"NSE:{r['symbol']}": r['instrument_token'] for r in NIFTY500_UNIVERSE
+}
+
 # ── Live-tunable signal knobs (REQ-030) ─────────────────────────────────────
 # A whitelisted set of SIGNAL thresholds can be overridden at runtime from the
 # app_config 'tunables' key (a JSON object) WITHOUT a redeploy — useful under

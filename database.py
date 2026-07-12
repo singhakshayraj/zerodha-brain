@@ -835,10 +835,62 @@ def get_stock_universe(filter: str = 'ALL') -> list:
             q = q.eq('is_nifty50', True)
         elif filter == 'HOLDINGS':
             q = q.eq('is_nifty50', False)
+        elif filter == 'NIFTY500':
+            q = q.eq('is_nifty500', True)
         res = q.order('brain_score', desc=True).execute()
         return res.data or []
     except Exception as e:
         print(f"[database.get_stock_universe] error: {e}")
+        return []
+
+
+def upsert_stock_universe_bulk(rows: list) -> int:
+    """Bulk seed/refresh universe rows, keyed on symbol — idempotent, used by
+    the Nifty 500 seeding script (quarterly reconstitution), never the hot
+    loop. Only the columns present in each row are written, so brain_score /
+    trade stats owned by the paper engine are untouched."""
+    if not rows:
+        return 0
+    try:
+        supabase.table('stock_universe').upsert(
+            rows, on_conflict='symbol').execute()
+        return len(rows)
+    except Exception as e:
+        print(f"[upsert_stock_universe_bulk] error ({len(rows)} rows): {e}")
+        return 0
+
+
+def update_advisor_scores(scores: dict, scored_at: str) -> int:
+    """Write the daily advisor trend scores {symbol: int} onto the universe.
+    Separate column from brain_score (paper-engine win-rate) by design."""
+    n = 0
+    for symbol, score in (scores or {}).items():
+        try:
+            supabase.table('stock_universe').update({
+                'advisor_score': score,
+                'advisor_score_updated_at': scored_at,
+            }).eq('symbol', symbol).execute()
+            n += 1
+        except Exception as e:
+            print(f"[update_advisor_scores] {symbol} failed: {e}")
+    return n
+
+
+def get_universe_by_sector(sector: str = None, exclude_symbols: list = None) -> list:
+    """Active Nifty 500 rows for rotation-candidate lookup, best score first.
+    sector=None returns the whole universe (cross-sector fallback)."""
+    try:
+        q = (supabase.table('stock_universe').select('*')
+             .eq('is_active', True).eq('is_nifty500', True)
+             .not_.is_('advisor_score', 'null'))
+        if sector:
+            q = q.eq('sector', sector)
+        res = q.order('advisor_score', desc=True).execute()
+        rows = res.data or []
+        excl = set(exclude_symbols or [])
+        return [r for r in rows if r.get('symbol') not in excl]
+    except Exception as e:
+        print(f"[get_universe_by_sector] error: {e}")
         return []
 
 

@@ -24,10 +24,10 @@ import time
 from datetime import datetime, timezone
 
 import pytz
-import requests
 from supabase import create_client
 
 import config
+import telegram
 
 IST = pytz.timezone('Asia/Kolkata')
 
@@ -65,14 +65,8 @@ def send_alert(key: str, message: str, now_ts: float = None,
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         print("[watchdog] (Telegram not configured — printed only)")
         return True
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={'chat_id': TELEGRAM_CHAT_ID, 'text': f"[{tier}] {message}"},
-            timeout=10,
-        ).raise_for_status()
-    except Exception as e:
-        print(f"[watchdog] Telegram send failed: {e}")
+    telegram.send_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+                          f"[{tier}] {message}")
     return True
 
 
