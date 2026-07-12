@@ -268,6 +268,38 @@ def test_relative_strength_folded_into_score_and_reasons():
     assert out_with_rs['trend_score'] >= out_neutral['trend_score']
 
 
+# --- news sentiment factor ---
+
+def test_news_sentiment_averages_recent_scores():
+    with patch.object(pa.db, 'recent_news_for_symbol', return_value=[
+        {'sentiment_score': 0.6}, {'sentiment_score': 0.2},
+        {'sentiment_score': None},
+    ]):
+        assert pa.news_sentiment('INFY') == 0.4
+
+
+def test_news_sentiment_none_without_coverage():
+    with patch.object(pa.db, 'recent_news_for_symbol', return_value=[]):
+        assert pa.news_sentiment('INFY') is None
+
+
+def test_news_sentiment_shifts_score_and_reasons():
+    candles = _candles(250, start=100, step=0.5)
+    h = _holding(avg=100, last=candles[-1]['close'])
+    neutral = pa.advise(h, candles)
+    negative = pa.advise(h, candles, news_sent=-0.5)
+    assert negative['trend_score'] < neutral['trend_score']
+    assert any('news sentiment negative' in r.lower() for r in negative['reasons'])
+    assert negative['indicators']['news_sentiment'] == -0.5
+
+
+def test_news_sentiment_none_contributes_zero():
+    candles = _candles(250, start=100, step=0.5)
+    h = _holding(avg=100, last=candles[-1]['close'])
+    assert (pa.advise(h, candles)['trend_score']
+            == pa.advise(h, candles, news_sent=None)['trend_score'])
+
+
 # --- runner: seeds instrument tokens (the 0-daily-bars bug fix) ---
 
 def test_run_advisor_seeds_instrument_token_cache():

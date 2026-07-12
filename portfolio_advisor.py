@@ -24,6 +24,7 @@ from datetime import datetime
 import pytz
 
 import database as db
+import news_jobs
 from indicators import calculate_ema_series, run_all_indicators
 
 IST = pytz.timezone('Asia/Kolkata')
@@ -70,6 +71,20 @@ def relative_strength(closes: list, benchmark_closes: list,
     return round(stock_ret - bench_ret, 2)
 
 
+def news_sentiment(symbol: str, now_iso: str = None):
+    """Average sentiment of the symbol's recent tagged news (from news_events,
+    filled by the news collector / backfill). Range −1..1, or None when the
+    name has no recent coverage — the scoring term then contributes 0, same
+    honest degradation as relative strength."""
+    now_iso = now_iso or datetime.now(IST).isoformat()
+    rows = db.recent_news_for_symbol(symbol, now_iso, limit=5)
+    scores = [float(r['sentiment_score']) for r in rows
+              if r.get('sentiment_score') is not None]
+    if not scores:
+        return None
+    return round(sum(scores) / len(scores), 3)
+
+
 def volume_trend(candles: list, lookback: int = 10):
     """Recent avg volume vs the prior window, on the SAME lookback — rising
     volume underneath a move (up or down) says participation is real, not a
@@ -85,13 +100,14 @@ def volume_trend(candles: list, lookback: int = 10):
 
 
 def trend_score(ind: dict, closes: list, consistency=None,
-                rel_strength=None) -> int:
+                rel_strength=None, news_sent=None) -> int:
     """Daily-timeframe direction score in [-100, 100]. Positive = up structure.
 
     Weights: EMA200 position 20, EMA50 position 15, trend consistency
     (% of last 20 closes above EMA50) 15, 20-bar momentum 20, ADX direction
-    10, relative strength vs Nifty 20. Consistency/relative-strength terms
-    contribute 0 when data is unavailable rather than skewing the read."""
+    10, relative strength vs Nifty 20, news sentiment 10 (clamped by the
+    final [-100,100] bound). Optional terms contribute 0 when data is
+    unavailable rather than skewing the read."""
     price = ind.get('current_close') or 0
     score = 0
     ema200 = ind.get('ema_200')
@@ -119,6 +135,10 @@ def trend_score(ind: dict, closes: list, consistency=None,
     if rel_strength is not None:
         # ±10% relative to Nifty over the lookback -> full ±20 swing
         score += int(max(-20, min(20, rel_strength / 10 * 20)))
+
+    if news_sent is not None:
+        # sentiment −1..1 -> ±10; ±0.4 (strong) already saturates the term
+        score += int(max(-10, min(10, news_sent / 0.4 * 10)))
 
     return max(-100, min(100, score))
 
@@ -171,7 +191,8 @@ def tradebook_stats(rows: list) -> dict:
 
 
 def advise(holding: dict, daily_candles: list, history: dict = None,
-          nifty_closes: list = None, portfolio_weight_pct: float = None) -> dict:
+          nifty_closes: list = None, portfolio_weight_pct: float = None,
+          news_sent: float = None) -> dict:
     """One holding → one verdict. Pure: no I/O, no orders.
 
     holding: {symbol, quantity, average_price, last_price}
@@ -207,7 +228,7 @@ def advise(holding: dict, daily_candles: list, history: dict = None,
     rel_strength = relative_strength(closes, nifty_closes or [])
     vol_trend = volume_trend(daily_candles)
     score = trend_score(ind, closes, consistency=consistency,
-                        rel_strength=rel_strength)
+                        rel_strength=rel_strength, news_sent=news_sent)
     support, resistance = swing_levels(daily_candles)
     rsi = ind.get('rsi_14')
     price = last or ind.get('current_close') or 0
@@ -240,6 +261,11 @@ def advise(holding: dict, daily_candles: list, history: dict = None,
     if rsi is not None:
         tag = ' — oversold' if oversold else (' — overbought/extended' if overextended else '')
         reasons.append(f"RSI {rsi:.0f}{tag}")
+    if news_sent is not None and abs(news_sent) >= 0.15:
+        reasons.append(
+            f"Recent news sentiment {'positive' if news_sent > 0 else 'negative'} "
+            f"({news_sent:+.2f}) — the tape's context "
+            f"{'supports' if news_sent > 0 else 'works against'} this name")
     if vol_trend is not None and vol_trend >= 1.3:
         reasons.append(f"Volume building ({vol_trend:.1f}× the prior window) "
                        f"— the move has real participation, not a thin drift")
@@ -324,6 +350,7 @@ def advise(holding: dict, daily_candles: list, history: dict = None,
             'trend_consistency_pct': consistency,
             'relative_strength_vs_nifty': rel_strength,
             'volume_trend_ratio': vol_trend,
+            'news_sentiment': news_sent,
             'portfolio_weight_pct': portfolio_weight_pct,
             'overextended': overextended,
             'history': history or None,
@@ -413,6 +440,18 @@ def run_advisor(market_data) -> int:
     except Exception as e:
         print(f"[advisor] nifty benchmark unavailable (non-fatal): {e}")
 
+    # Refresh news for the PORTFOLIO names (the trading-session collector only
+    # covers the trading universe). No-op unless the collector is enabled +
+    # keyed; failure never blocks a verdict. The advisor runs outside the
+    # trading hot loop, so a synchronous fetch here is fine.
+    try:
+        news_jobs.collect([
+            f"{h['tradingsymbol']}.NSE" for h in holdings
+            if h.get('tradingsymbol')
+        ][:50])
+    except Exception as e:
+        print(f"[advisor] news refresh failed (non-fatal): {e}")
+
     # Portfolio concentration: this holding's share of total holdings value,
     # so a fine trend call can still carry a "too much in one name" flag.
     total_value = sum(
@@ -437,7 +476,8 @@ def run_advisor(market_data) -> int:
                 'average_price': h.get('average_price'),
                 'last_price': h.get('last_price'),
             }, candles or [], history=history.get(tsym),
-               nifty_closes=nifty_closes, portfolio_weight_pct=weight_pct)
+               nifty_closes=nifty_closes, portfolio_weight_pct=weight_pct,
+               news_sent=news_sentiment(tsym))
             rows.append({'run_date': run_date, **advice})
             print(f"[advisor] {tsym}: {advice['verdict']} "
                   f"(trend {advice['trend_score']}, conf {advice['confidence']}, "
