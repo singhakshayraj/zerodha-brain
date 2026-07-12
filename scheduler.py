@@ -99,6 +99,13 @@ def _maybe_run_advisor() -> None:
             md = MarketData(KiteClient(token))
             n = portfolio_advisor.run_advisor(md)
             print(f"[SCHEDULER] advisor done: {n} holdings analyzed")
+            if config.ADVISOR_BACKTEST_ENABLED:
+                try:
+                    import advisor_backtest
+                    advisor_backtest.run_backtest_pass(md)
+                except Exception as e:
+                    print(f"[SCHEDULER] advisor backtest failed "
+                          f"(non-fatal): {e}")
         except Exception as e:
             print(f"[SCHEDULER] advisor failed (non-fatal): {e}")
         finally:

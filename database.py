@@ -745,6 +745,46 @@ def get_tradebook() -> list:
         return []
 
 
+def get_unevaluated_advice(max_run_date: str) -> list:
+    """Advice rows old enough to judge (run_date <= max_run_date) that have
+    no outcome yet — the backtest work queue."""
+    try:
+        res = (supabase.table('portfolio_advice').select('*')
+               .is_('evaluated_at', 'null')
+               .lte('run_date', max_run_date)
+               .order('run_date').execute())
+        return res.data or []
+    except Exception as e:
+        print(f"[get_unevaluated_advice] error: {e}")
+        return []
+
+
+def update_advice_outcome(run_date: str, symbol: str, outcome: dict) -> bool:
+    """Write one row's realized outcome (evaluated_at + outcome_* columns)."""
+    try:
+        (supabase.table('portfolio_advice').update(outcome)
+         .eq('run_date', run_date).eq('symbol', symbol).execute())
+        return True
+    except Exception as e:
+        print(f"[update_advice_outcome] {run_date}/{symbol} error: {e}")
+        return False
+
+
+def get_evaluated_advice() -> list:
+    """All judged advice rows — the advisor's track record."""
+    try:
+        res = (supabase.table('portfolio_advice')
+               .select('run_date, symbol, verdict, trend_score, quantity, '
+                       'last_price, outcome_return_pct, outcome_vs_nifty_pct, '
+                       'outcome_correct, evaluated_at')
+               .not_.is_('evaluated_at', 'null')
+               .order('run_date').execute())
+        return res.data or []
+    except Exception as e:
+        print(f"[get_evaluated_advice] error: {e}")
+        return []
+
+
 def upsert_portfolio_advice(rows: list) -> int:
     """One advisory row per (run_date, symbol); a same-day re-run overwrites so
     the day's advice reflects the latest analysis."""

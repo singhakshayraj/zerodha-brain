@@ -434,6 +434,14 @@ ROTATION_MAX_EXIT_SCORE = int(os.getenv('ROTATION_MAX_EXIT_SCORE', '-20'))
 ROTATION_MIN_TARGET_SCORE = int(os.getenv('ROTATION_MIN_TARGET_SCORE', '50'))
 ROTATION_MIN_GAP = int(os.getenv('ROTATION_MIN_GAP', '40'))
 
+# ── Advisor accountability backtest (Portfolio Advisor phase 3) ─────────────
+# Judges every stored verdict against realized price action after a fixed
+# trading-day horizon; the aggregate is the advisor's public track record.
+ADVISOR_BACKTEST_ENABLED = os.getenv(
+    'ADVISOR_BACKTEST_ENABLED', 'false').strip().lower() == 'true'
+ADVISOR_BACKTEST_HORIZON_DAYS = int(
+    os.getenv('ADVISOR_BACKTEST_HORIZON_DAYS', '10'))
+
 # ── Live-tunable signal knobs (REQ-030) ─────────────────────────────────────
 # A whitelisted set of SIGNAL thresholds can be overridden at runtime from the
 # app_config 'tunables' key (a JSON object) WITHOUT a redeploy — useful under
