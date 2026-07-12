@@ -9,6 +9,7 @@ import pytz
 
 import config
 import database as db
+import telegram
 import token_refresher
 from brain import TradingBrain
 from kite_client import KiteClient, TokenExpiredError
@@ -61,11 +62,57 @@ def _token_is_live(token: str) -> bool:
 # Portfolio advisor dedup: the ISO date it last ran, so it fires once per day.
 _advisor_date = None
 _advisor_running = False
+_preflight_date = None
+
+
+def _parse_hhmm(hhmm: str, fallback: tuple) -> tuple:
+    """'09:45' -> (9, 45); malformed config falls back rather than crashing
+    the scheduler loop."""
+    try:
+        h, m = hhmm.split(':')
+        return int(h), int(m)
+    except Exception:
+        return fallback
+
+
+def _maybe_token_preflight() -> None:
+    """Pre-flight token health check, once per market day at/after
+    ADVISOR_PREFLIGHT_IST (09:16). A dead or missing enc_token this early is
+    still fixable before the advisor run needs it — push a high-priority
+    Telegram alert instead of silently skipping the day. Never raises."""
+    global _preflight_date
+    if config.QA_MODE:
+        return
+    try:
+        now = datetime.now(IST)
+        today = now.date().isoformat()
+        if _preflight_date == today or now.weekday() > 4 \
+                or today in config.NSE_HOLIDAYS:
+            return
+        ph, pm = _parse_hhmm(config.ADVISOR_PREFLIGHT_IST, (9, 16))
+        if (now.hour, now.minute) < (ph, pm):
+            return
+        _preflight_date = today
+        token = db.get_enc_token()
+        if token and _token_is_live(token):
+            print("[SCHEDULER] token preflight OK")
+            return
+        run_at = config.ADVISOR_RUN_AFTER_IST
+        print("[SCHEDULER] token preflight FAILED — alerting")
+        if config.ADVISOR_TELEGRAM_BOT_TOKEN and config.ADVISOR_TELEGRAM_CHAT_ID:
+            telegram.send_message(
+                config.ADVISOR_TELEGRAM_BOT_TOKEN,
+                config.ADVISOR_TELEGRAM_CHAT_ID,
+                f"⚠️ Kite session expired/missing. Paste a fresh enc_token "
+                f"before the {run_at} IST advisor run!")
+    except Exception as e:
+        print(f"[SCHEDULER] token preflight errored (non-fatal): {e}")
 
 
 def _maybe_run_advisor() -> None:
     """Daily portfolio advisory (ADVISORY ONLY — no orders). Fires once per
-    day after 09:20 IST when a token exists and probes live. A manual trigger
+    day after ADVISOR_RUN_AFTER_IST (09:45 — past the opening-bell noise
+    window) when a token exists and probes live. A manual trigger
     (app_config 'advisor_run_now'=='true') bypasses the time gate and the
     once-per-day dedup, for an on-demand run outside the window — set from the
     dashboard or directly in app_config; cleared immediately so it fires once.
@@ -82,8 +129,10 @@ def _maybe_run_advisor() -> None:
         db.write_config('advisor_run_now', '')  # consume — fires once
     elif _advisor_date == today:
         return
-    elif now.hour < 9 or (now.hour == 9 and now.minute < 20):
-        return
+    else:
+        rh, rm = _parse_hhmm(config.ADVISOR_RUN_AFTER_IST, (9, 45))
+        if (now.hour, now.minute) < (rh, rm):
+            return
 
     token = db.get_enc_token()
     if not token or not _token_is_live(token):
@@ -314,6 +363,9 @@ def run():
             _set_heartbeat('ONLINE', 0, 'Waiting for START command')
             # Daily 6:30 IST token refresh — no-op unless KITE_* creds set.
             token_refresher.maybe_daily_refresh()
+            # Token preflight (09:16): a dead enc_token is still fixable
+            # before the 09:45 advisor run — alert, don't silently skip.
+            _maybe_token_preflight()
             # Portfolio advisor: once per day when a live token exists.
             # Advisory-only, independent of trading sessions; never blocks
             # the loop (runs on a daemon thread).

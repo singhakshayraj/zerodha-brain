@@ -63,12 +63,38 @@ def _bars_from(candles: list, run_date: str) -> list:
     return out
 
 
+def horizon_for(row: dict, default_days: int = None) -> int:
+    """Evaluation horizon by trigger type. MACRO calls (EMA200 / relative-
+    strength driven) get the long runway — judging a 200-day-structure
+    thesis at 10 days penalizes exactly the calls that need patience.
+    Legacy rows (no trigger_type) keep the original horizon unchanged."""
+    if (row.get('trigger_type') or '').upper() == 'MACRO':
+        return config.ADVISOR_BACKTEST_MACRO_HORIZON_DAYS
+    return default_days or config.ADVISOR_BACKTEST_HORIZON_DAYS
+
+
+def _index_return_between(nifty_candles: list, run_date: str,
+                          end_date: str):
+    """Nifty return over the stock's EXACT calendar window [run_date,
+    end_date] — not 'the index's own N bars'. When the stock skips sessions
+    (illiquidity, suspension), its N trading days span more calendar days
+    than the index's N; counting bars on both sides silently compares
+    different windows and corrupts alpha. None when the index has <2 bars
+    inside the window."""
+    bars = [c for c in nifty_candles or []
+            if run_date <= str(c.get('timestamp') or '')[:10] <= end_date
+            and c.get('close') is not None]
+    if len(bars) < 2:
+        return None
+    n0, n1 = float(bars[0]['close']), float(bars[-1]['close'])
+    return (n1 - n0) / n0 * 100 if n0 else None
+
+
 def run_backtest_pass(market_data, horizon_days: int = None) -> int:
-    """Evaluate every due, unevaluated advice row. Due = the symbol has
-    horizon_days daily bars after run_date (trading-day horizon measured on
-    the chart itself, no holiday math). Per-row failures skip that row.
-    Returns rows evaluated."""
-    horizon = horizon_days or config.ADVISOR_BACKTEST_HORIZON_DAYS
+    """Evaluate every due, unevaluated advice row. Due = the symbol has that
+    row's horizon of daily bars after run_date (trading-day horizon measured
+    on the chart itself — 10 days for MICRO-triggered calls, 30 for MACRO).
+    Per-row failures skip that row. Returns rows evaluated."""
     today = datetime.now(IST).date().isoformat()
     queue = db.get_unevaluated_advice(today)
     if not queue:
@@ -94,8 +120,10 @@ def run_backtest_pass(market_data, horizon_days: int = None) -> int:
                 # no-call: clear it from the queue, judged as neither
                 outcome = {'outcome_return_pct': None,
                            'outcome_vs_nifty_pct': None,
-                           'outcome_correct': None}
+                           'outcome_correct': None,
+                           'evaluation_horizon_days': None}
             else:
+                horizon = horizon_for(row, horizon_days)
                 if symbol not in candle_cache:
                     key = f'NSE:{symbol}'
                     token = (config.NIFTY500_INSTRUMENT_TOKENS.get(key)
@@ -107,15 +135,18 @@ def run_backtest_pass(market_data, horizon_days: int = None) -> int:
                 bars = _bars_from(candle_cache[symbol], run_date)
                 if len(bars) < horizon:
                     continue                      # not due yet
-                price_then = float(bars[horizon - 1]['close'])
+                end_bar = bars[horizon - 1]
+                price_then = float(end_bar['close'])
                 fwd = (price_then - base_price) / base_price * 100
 
-                nifty_ret = None
-                nbars = _bars_from(nifty_candles, run_date)
-                if len(nbars) >= horizon and nbars[0].get('close'):
-                    n0 = float(nbars[0]['close'])
-                    nifty_ret = (float(nbars[horizon - 1]['close']) - n0) / n0 * 100
+                # Alpha window = the STOCK's realized calendar span, so the
+                # index is measured over the same dates even when the stock
+                # skipped sessions.
+                end_date = str(end_bar.get('timestamp') or '')[:10]
+                nifty_ret = _index_return_between(
+                    nifty_candles, run_date, end_date)
                 outcome = evaluate_verdict(row, fwd, nifty_ret)
+                outcome['evaluation_horizon_days'] = horizon
 
             outcome['evaluated_at'] = datetime.now(IST).isoformat()
             if db.update_advice_outcome(run_date, symbol, outcome):
@@ -124,7 +155,8 @@ def run_backtest_pass(market_data, horizon_days: int = None) -> int:
             print(f"[backtest] {row.get('symbol')} skipped: {e}")
     if evaluated:
         print(f"[backtest] evaluated {evaluated} advice rows "
-              f"(horizon {horizon} trading days)")
+              f"(MICRO {config.ADVISOR_BACKTEST_HORIZON_DAYS}d / "
+              f"MACRO {config.ADVISOR_BACKTEST_MACRO_HORIZON_DAYS}d horizons)")
     return evaluated
 
 

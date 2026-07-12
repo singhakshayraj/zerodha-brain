@@ -26,6 +26,7 @@ import pytz
 
 import config
 import database as db
+import market_regime
 import news_jobs
 import telegram
 from indicators import calculate_ema_series, run_all_indicators
@@ -103,20 +104,28 @@ def volume_trend(candles: list, lookback: int = 10):
 
 
 def trend_score(ind: dict, closes: list, consistency=None,
-                rel_strength=None, news_sent=None) -> int:
+                rel_strength=None, news_sent=None, regime: str = None) -> int:
     """Daily-timeframe direction score in [-100, 100]. Positive = up structure.
 
     Weights: EMA200 position 20, EMA50 position 15, trend consistency
     (% of last 20 closes above EMA50) 15, 20-bar momentum 20, ADX direction
     10, relative strength vs Nifty 20, news sentiment 10 (clamped by the
     final [-100,100] bound). Optional terms contribute 0 when data is
-    unavailable rather than skewing the read."""
+    unavailable rather than skewing the read.
+
+    regime (market_regime label) reweights ONLY in HIGH_VOLATILITY_PANIC:
+    the EMA200 anchor speaks louder and 20-bar momentum quieter — a panic
+    tape's short-term slope is its least trustworthy signal. regime=None or
+    any other regime is the identity: the score is bit-for-bit what it was
+    before this parameter existed."""
+    w = market_regime.score_weights_for(regime)
     price = ind.get('current_close') or 0
     score = 0
     ema200 = ind.get('ema_200')
     ema50 = ind.get('ema_50')
     if price and ema200:
-        score += 20 if price > ema200 else -20
+        score += int(round(20 * w['ema200'])) if price > ema200 \
+            else -int(round(20 * w['ema200']))
     if price and ema50:
         score += 15 if price > ema50 else -15
 
@@ -127,7 +136,8 @@ def trend_score(ind: dict, closes: list, consistency=None,
     # 20-bar momentum, scaled ±20 (capped at ±6%)
     if len(closes) >= 21 and closes[-21]:
         mom = (closes[-1] - closes[-21]) / closes[-21] * 100
-        score += int(max(-20, min(20, mom / 6 * 20)))
+        cap = 20 * w['momentum']
+        score += int(max(-cap, min(cap, mom / 6 * cap)))
 
     # Directional pressure only when the trend is real (ADX >= 20)
     adx = ind.get('adx')
@@ -144,6 +154,51 @@ def trend_score(ind: dict, closes: list, consistency=None,
         score += int(max(-10, min(10, news_sent / 0.4 * 10)))
 
     return max(-100, min(100, score))
+
+
+def classify_trigger(score: int, price: float, ema200: float,
+                     rel_strength: float = None) -> str:
+    """MACRO vs MICRO: is this call backed by long-horizon evidence, or only
+    by short-term terms? Drives the backtest horizon — a 200-day-structure
+    call gets 30 trading days to prove out; a momentum/consistency call is
+    judged at 10, because that's the timescale it claims to read.
+
+      MACRO: the EMA200 side agrees with the call's direction, or relative
+             strength vs Nifty is decisively (>=5pp) on the call's side.
+      MICRO: everything else — the long-term structure is against or silent,
+             so short-term terms are what fired the verdict.
+    """
+    if not price or not ema200:
+        return 'MICRO'
+    bullish = score >= 0
+    if (price > ema200) == bullish:
+        return 'MACRO'
+    if rel_strength is not None and abs(rel_strength) >= 5 \
+            and (rel_strength > 0) == bullish:
+        return 'MACRO'
+    return 'MICRO'
+
+
+def smoothed_last_price(market_data, instrument_key: str):
+    """EMA over the last three 15-min closes — the verdict-time price with
+    single-bar opening noise filtered out (one flush or spike can't flip a
+    near-support / oversold check by itself). None on any failure; the
+    caller falls back to the raw holdings LTP."""
+    try:
+        candles = market_data.get_candles(instrument_key, '15minute', 3) or []
+        closes = [float(c['close']) for c in candles[-3:]
+                  if c.get('close') is not None]
+        if not closes:
+            return None
+        # Standard EMA, span 3 (alpha = 0.5), seeded on the oldest close.
+        ema = closes[0]
+        for c in closes[1:]:
+            ema = 0.5 * c + 0.5 * ema
+        return round(ema, 2)
+    except Exception as e:
+        print(f"[advisor] smoothing failed for {instrument_key} "
+              f"(raw LTP used): {e}")
+        return None
 
 
 def swing_levels(candles: list, lookback: int = SWING_LOOKBACK):
@@ -195,7 +250,7 @@ def tradebook_stats(rows: list) -> dict:
 
 def advise(holding: dict, daily_candles: list, history: dict = None,
           nifty_closes: list = None, portfolio_weight_pct: float = None,
-          news_sent: float = None) -> dict:
+          news_sent: float = None, regime: str = None) -> dict:
     """One holding → one verdict. Pure: no I/O, no orders.
 
     holding: {symbol, quantity, average_price, last_price}
@@ -204,6 +259,8 @@ def advise(holding: dict, daily_candles: list, history: dict = None,
     behaviour on this name, folded into the reasons.
     nifty_closes: optional benchmark daily closes for relative strength.
     portfolio_weight_pct: optional % of total holdings value this position is.
+    regime: optional market_regime label — reweights the score in a panic
+    tape and is stored on the row; None behaves exactly as before.
     """
     symbol = holding.get('symbol')
     qty = holding.get('quantity') or 0
@@ -222,7 +279,8 @@ def advise(holding: dict, daily_candles: list, history: dict = None,
                 'trend_score': 0, 'reasons':
                 [f'Only {len(daily_candles or [])} daily bars — need '
                  f'{MIN_DAILY_BARS}+ for an honest read'],
-                'stop_level': None, 'exit_target': None, 'indicators': {}}
+                'stop_level': None, 'exit_target': None, 'indicators': {},
+                'market_regime': regime, 'trigger_type': None}
 
     ind = run_all_indicators(daily_candles)
     closes = [float(c['close']) for c in daily_candles
@@ -231,7 +289,8 @@ def advise(holding: dict, daily_candles: list, history: dict = None,
     rel_strength = relative_strength(closes, nifty_closes or [])
     vol_trend = volume_trend(daily_candles)
     score = trend_score(ind, closes, consistency=consistency,
-                        rel_strength=rel_strength, news_sent=news_sent)
+                        rel_strength=rel_strength, news_sent=news_sent,
+                        regime=regime)
     support, resistance = swing_levels(daily_candles)
     rsi = ind.get('rsi_14')
     price = last or ind.get('current_close') or 0
@@ -342,6 +401,8 @@ def advise(holding: dict, daily_candles: list, history: dict = None,
         'verdict': verdict,
         'confidence': min(90, 50 + abs(score) // 2),
         'trend_score': score,
+        'market_regime': regime,
+        'trigger_type': classify_trigger(score, price, ema200, rel_strength),
         'reasons': reasons,
         'stop_level': round(stop, 2) if stop else None,
         'exit_target': round(target, 2) if target else None,
@@ -367,7 +428,7 @@ def _sleep(seconds: float) -> None:
 
 
 def score_universe(market_data, universe: list = None, nifty_closes: list = None,
-                   exclude_symbols: list = None) -> dict:
+                   exclude_symbols: list = None, regime: str = None) -> dict:
     """Daily trend_score for every Nifty 500 name we don't hold — the rotation
     candidate pool. Reuses the exact holdings scorer (same 7 factors minus
     news, which is skipped here: 500 per-symbol news reads for names that
@@ -402,7 +463,7 @@ def score_universe(market_data, universe: list = None, nifty_closes: list = None
                 ind, closes,
                 consistency=trend_consistency(closes),
                 rel_strength=relative_strength(closes, nifty_closes or []),
-                news_sent=None)
+                news_sent=None, regime=regime)
             out[sym] = {'symbol': sym, 'score': score,
                         'sector': entry.get('sector')}
         except Exception as e:
@@ -574,13 +635,23 @@ def run_advisor(market_data) -> int:
     # restricted; if this fails for any reason, relative strength is simply
     # skipped per-symbol below — never blocks a verdict.
     nifty_closes = []
+    nifty_candles = []
     try:
         market_data._instrument_cache['NSE:NIFTY 50'] = NIFTY50_INDEX_TOKEN
-        nifty_candles = market_data.get_candles('NSE:NIFTY 50', 'day', 400)
-        nifty_closes = [float(c['close']) for c in (nifty_candles or [])
+        nifty_candles = market_data.get_candles('NSE:NIFTY 50', 'day', 400) or []
+        nifty_closes = [float(c['close']) for c in nifty_candles
                         if c.get('close') is not None]
     except Exception as e:
         print(f"[advisor] nifty benchmark unavailable (non-fatal): {e}")
+
+    # Market Regime Filter: one read of the index tape shapes today's lens —
+    # panic reweights the score toward long-term structure, chop widens the
+    # rotation gate. Fail-safe NEUTRAL changes nothing.
+    regime_info = market_regime.get_market_regime(nifty_candles)
+    regime = regime_info['regime']
+    print(f"[advisor.regime] {regime} (ADX {regime_info['adx']}, "
+          f"ATR% {regime_info['atr_pct']}, "
+          f"EMA20 dist {regime_info['ema20_dist_pct']}%)")
 
     # Refresh news for the PORTFOLIO names (the trading-session collector only
     # covers the trading universe). No-op unless the collector is enabled +
@@ -609,17 +680,26 @@ def run_advisor(market_data) -> int:
             continue
         exch = h.get('exchange') or 'NSE'
         try:
-            candles = market_data.get_candles(f'{exch}:{tsym}', 'day', 400)
+            key = f'{exch}:{tsym}'
+            candles = market_data.get_candles(key, 'day', 400)
             weight_pct = (round(qty * (h.get('last_price') or 0)
                                 / total_value * 100, 1) if total_value else None)
+            # Verdict-time price: EMA of the last three 15-min closes when
+            # available — one opening-bell spike/flush can't flip a
+            # near-support or oversold check. Raw LTP on any failure.
+            last_price = h.get('last_price')
+            if config.ADVISOR_PRICE_SMOOTHING_ENABLED:
+                smoothed = smoothed_last_price(market_data, key)
+                if smoothed:
+                    last_price = smoothed
             advice = advise({
                 'symbol': tsym,
                 'quantity': qty,
                 'average_price': h.get('average_price'),
-                'last_price': h.get('last_price'),
+                'last_price': last_price,
             }, candles or [], history=history.get(tsym),
                nifty_closes=nifty_closes, portfolio_weight_pct=weight_pct,
-               news_sent=news_sentiment(tsym))
+               news_sent=news_sentiment(tsym), regime=regime)
             rows.append({'run_date': run_date, **advice})
             print(f"[advisor] {tsym}: {advice['verdict']} "
                   f"(trend {advice['trend_score']}, conf {advice['confidence']}, "
@@ -635,15 +715,21 @@ def run_advisor(market_data) -> int:
             held = {r['symbol'] for r in rows}
             t0 = time.monotonic()
             scored = score_universe(market_data, nifty_closes=nifty_closes,
-                                    exclude_symbols=held)
+                                    exclude_symbols=held, regime=regime)
             print(f"[advisor.scan] scored {len(scored)} universe names in "
                   f"{time.monotonic() - t0:.0f}s")
             sector_of = {u['symbol']: u.get('sector')
                          for u in config.NIFTY500_UNIVERSE}
+            # Regime-adaptive gate: chop demands a wider score gap before a
+            # rotation is worth the churn (65 vs 40 by default).
+            min_gap = market_regime.rotation_min_gap_for(regime)
+            if min_gap != config.ROTATION_MIN_GAP:
+                print(f"[advisor.regime] rotation gap widened to {min_gap} "
+                      f"({regime})")
             for row in rows:
                 target = find_rotation_candidate(
                     row.get('trend_score'), sector_of.get(row['symbol']),
-                    scored)
+                    scored, min_gap=min_gap)
                 if target:
                     row['rotation_target_symbol'] = target['symbol']
                     row['rotation_target_score'] = target['score']

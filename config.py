@@ -441,6 +441,42 @@ ADVISOR_BACKTEST_ENABLED = os.getenv(
     'ADVISOR_BACKTEST_ENABLED', 'false').strip().lower() == 'true'
 ADVISOR_BACKTEST_HORIZON_DAYS = int(
     os.getenv('ADVISOR_BACKTEST_HORIZON_DAYS', '10'))
+# MACRO-triggered calls (EMA200 / relative-strength driven) get a longer
+# runway before judgment — a 200-day-average breakdown thesis can't be graded
+# on a 10-day window without penalizing exactly the calls that need patience.
+ADVISOR_BACKTEST_MACRO_HORIZON_DAYS = int(
+    os.getenv('ADVISOR_BACKTEST_MACRO_HORIZON_DAYS', '30'))
+
+# ── Market Regime Filter (Portfolio Advisor upgrade, 2026-07-12) ────────────
+# Classifies the Nifty 50 tape before the holdings scan so the advisor can
+# adapt: demand a wider rotation gap in chop (don't churn capital on noise),
+# and lean on long-term structure over short-term momentum in a panic tape.
+# Fail-safe by construction: any error in regime detection yields NEUTRAL,
+# which changes nothing about today's behavior.
+REGIME_FILTER_ENABLED = os.getenv(
+    'REGIME_FILTER_ENABLED', 'true').strip().lower() == 'true'
+REGIME_ADX_TREND = float(os.getenv('REGIME_ADX_TREND', '25'))
+REGIME_ADX_CHOP = float(os.getenv('REGIME_ADX_CHOP', '20'))
+# Nifty daily ATR as % of price: calm tape ≈ 0.6–1.1%; sustained ≥ 1.8% is a
+# panic tape (2020-03 style days run 2.5%+).
+REGIME_ATR_PANIC_PCT = float(os.getenv('REGIME_ATR_PANIC_PCT', '1.8'))
+REGIME_ATR_QUIET_PCT = float(os.getenv('REGIME_ATR_QUIET_PCT', '1.1'))
+# In CHOPPY_SIDEWAYS the rotation gate widens to this gap — a 40pt spread in
+# a trendless tape is mostly noise; 65pts is conviction.
+ROTATION_MIN_GAP_CHOPPY = int(os.getenv('ROTATION_MIN_GAP_CHOPPY', '65'))
+
+# ── Advisor run timing (Portfolio Advisor upgrade, 2026-07-12) ──────────────
+# 09:20 captured opening-bell noise (first 15-min bar is the day's most
+# deceptive). 09:45 gives two completed 15-min bars to smooth against.
+ADVISOR_RUN_AFTER_IST = os.getenv('ADVISOR_RUN_AFTER_IST', '09:45').strip()
+# Smooth the verdict-time price with an EMA over the last 3 15-min closes so
+# a single transient spike/flush at the open can't flip a verdict. Falls back
+# to the raw holdings LTP on any failure.
+ADVISOR_PRICE_SMOOTHING_ENABLED = os.getenv(
+    'ADVISOR_PRICE_SMOOTHING_ENABLED', 'true').strip().lower() == 'true'
+# Pre-flight token health check: this early in the morning the user can still
+# fix a dead enc_token before the advisor run needs it.
+ADVISOR_PREFLIGHT_IST = os.getenv('ADVISOR_PREFLIGHT_IST', '09:16').strip()
 
 # ── Advisor Telegram (Portfolio Advisor phases 4-5) ─────────────────────────
 # A SEPARATE bot from the watchdog's TELEGRAM_BOT_TOKEN — infra alerts and
