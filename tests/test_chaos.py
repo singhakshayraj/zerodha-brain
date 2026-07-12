@@ -133,7 +133,7 @@ def test_p3_alert_never_hits_telegram(monkeypatch):
     monkeypatch.setattr(watchdog, 'TELEGRAM_BOT_TOKEN', 'x')
     monkeypatch.setattr(watchdog, 'TELEGRAM_CHAT_ID', 'y')
     posted = []
-    monkeypatch.setattr(watchdog.requests, 'post',
+    monkeypatch.setattr(watchdog.telegram.requests, 'post',
                         lambda *a, **k: posted.append(1) or MagicMock())
     watchdog.send_alert('info-1', 'hi', now_ts=1.0, tier=watchdog.P3)
     assert posted == []
@@ -149,7 +149,7 @@ def test_p1_alert_hits_telegram(monkeypatch):
         def raise_for_status(self):
             pass
 
-    monkeypatch.setattr(watchdog.requests, 'post',
+    monkeypatch.setattr(watchdog.telegram.requests, 'post',
                         lambda *a, **k: posted.append(k) or _Resp())
     watchdog.send_alert('crit-1', 'down', now_ts=1.0, tier=watchdog.P1)
     assert len(posted) == 1
