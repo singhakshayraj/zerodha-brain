@@ -27,6 +27,7 @@ import pytz
 import config
 import database as db
 import news_jobs
+import telegram
 from indicators import calculate_ema_series, run_all_indicators
 
 IST = pytz.timezone('Asia/Kolkata')
@@ -481,6 +482,61 @@ def sync_tradebook(kite) -> int:
     return n
 
 
+_ACTIONABLE = ('SELL', 'SELL_ON_BOUNCE', 'TRIM')
+
+
+def build_digest(rows: list, run_date: str) -> str:
+    """Telegram text for the day's ACTIONABLE calls only — HOLDs are noise in
+    a push channel. Empty string = nothing worth sending today."""
+    act = [r for r in rows or []
+           if r.get('verdict') in _ACTIONABLE or r.get('rotation_target_symbol')]
+    if not act:
+        return ''
+    act.sort(key=lambda r: r.get('trend_score') or 0)
+    lines = [f"📋 Portfolio Advisor — {run_date}",
+             f"{len(act)} actionable of {len(rows)} holdings:"]
+    for r in act:
+        pnl = r.get('pnl_percent')
+        line = (f"\n{r['symbol']}: {r['verdict']} "
+                f"(trend {r.get('trend_score')}, "
+                f"{'+' if (pnl or 0) >= 0 else ''}{pnl}%)")
+        if r.get('exit_target'):
+            line += f" — sell near ₹{r['exit_target']}"
+        elif r.get('stop_level') and r.get('verdict') == 'TRIM':
+            line += f" — keep rest only above ₹{r['stop_level']}"
+        if r.get('rotation_target_symbol'):
+            line += (f"\n  ↪ rotate into {r['rotation_target_symbol']} "
+                     f"(score {r.get('rotation_target_score')}, "
+                     f"{'same sector' if r.get('rotation_reason') == 'same_sector' else 'cross-sector'})")
+        lines.append(line)
+    lines.append("\nAdvisory only — you decide. Full read: /advisor")
+    return '\n'.join(lines)
+
+
+def send_daily_digest(rows: list, run_date: str) -> bool:
+    """One push per day after the advisor run. Dedup is durable (app_config
+    'advisor_digest_date') so a manual advisor_run_now re-run doesn't
+    double-send. No-ops without the flag + both bot creds. Never raises."""
+    try:
+        if not (config.ADVISOR_DIGEST_ENABLED
+                and config.ADVISOR_TELEGRAM_BOT_TOKEN
+                and config.ADVISOR_TELEGRAM_CHAT_ID):
+            return False
+        if (db.get_config('advisor_digest_date') or '') == run_date:
+            return False
+        text = build_digest(rows, run_date)
+        if not text:
+            return False
+        sent = telegram.send_message(config.ADVISOR_TELEGRAM_BOT_TOKEN,
+                                     config.ADVISOR_TELEGRAM_CHAT_ID, text)
+        if sent:
+            db.write_config('advisor_digest_date', run_date)
+        return sent
+    except Exception as e:
+        print(f"[advisor] digest failed (non-fatal): {e}")
+        return False
+
+
 def run_advisor(market_data) -> int:
     """Analyze every real holding and store today's advice. ADVISORY ONLY —
     reads holdings + candles, writes portfolio_advice, places nothing.
@@ -606,4 +662,5 @@ def run_advisor(market_data) -> int:
 
     n = db.upsert_portfolio_advice(rows)
     print(f"[advisor] stored {n} recommendations for {run_date}")
+    send_daily_digest(rows, run_date)   # non-fatal by construction
     return n

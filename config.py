@@ -442,6 +442,21 @@ ADVISOR_BACKTEST_ENABLED = os.getenv(
 ADVISOR_BACKTEST_HORIZON_DAYS = int(
     os.getenv('ADVISOR_BACKTEST_HORIZON_DAYS', '10'))
 
+# ── Advisor Telegram (Portfolio Advisor phases 4-5) ─────────────────────────
+# A SEPARATE bot from the watchdog's TELEGRAM_BOT_TOKEN — infra alerts and
+# portfolio advice are different audiences/noise levels. Safe to deploy
+# before the bot exists: everything no-ops without both values.
+ADVISOR_TELEGRAM_BOT_TOKEN = os.getenv('ADVISOR_TELEGRAM_BOT_TOKEN', '').strip()
+ADVISOR_TELEGRAM_CHAT_ID = os.getenv('ADVISOR_TELEGRAM_CHAT_ID', '').strip()
+ADVISOR_DIGEST_ENABLED = os.getenv(
+    'ADVISOR_DIGEST_ENABLED', 'false').strip().lower() == 'true'
+ADVISOR_INTRADAY_ALERTS_ENABLED = os.getenv(
+    'ADVISOR_INTRADAY_ALERTS_ENABLED', 'false').strip().lower() == 'true'
+ADVISOR_INTRADAY_THRESHOLD_PCT = float(
+    os.getenv('ADVISOR_INTRADAY_THRESHOLD_PCT', '3.0'))
+ADVISOR_WATCH_INTERVAL_SECONDS = int(
+    os.getenv('ADVISOR_WATCH_INTERVAL_SECONDS', '300'))
+
 # ── Live-tunable signal knobs (REQ-030) ─────────────────────────────────────
 # A whitelisted set of SIGNAL thresholds can be overridden at runtime from the
 # app_config 'tunables' key (a JSON object) WITHOUT a redeploy — useful under
