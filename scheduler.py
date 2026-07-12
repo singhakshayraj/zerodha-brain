@@ -355,6 +355,12 @@ def run():
         advisor_watch.start_advisor_watch()
     except Exception as e:
         print(f"[SCHEDULER] advisor watch failed to start (non-fatal): {e}")
+    # Decision bot (records Accept/Decline taps; NO order path) — same rules.
+    try:
+        import advisor_bot
+        advisor_bot.start_advisor_bot()
+    except Exception as e:
+        print(f"[SCHEDULER] advisor bot failed to start (non-fatal): {e}")
 
     db.update_heartbeat('ONLINE', 0, 'Brain started, waiting for command')
 

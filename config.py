@@ -492,6 +492,13 @@ ADVISOR_INTRADAY_THRESHOLD_PCT = float(
     os.getenv('ADVISOR_INTRADAY_THRESHOLD_PCT', '3.0'))
 ADVISOR_WATCH_INTERVAL_SECONDS = int(
     os.getenv('ADVISOR_WATCH_INTERVAL_SECONDS', '300'))
+# Accept/Decline buttons on the digest + the poller that records the taps.
+# DECISIONS ONLY — the recorded choice feeds the track record; no path here
+# can place an order. (Execution, if ever enabled, is a separate future flag
+# with its own gates: LIMIT orders, two-step confirm, ₹25k/day cap.)
+ADVISOR_DECISIONS_ENABLED = os.getenv(
+    'ADVISOR_DECISIONS_ENABLED', 'false').strip().lower() == 'true'
+ADVISOR_BOT_POLL_SECONDS = int(os.getenv('ADVISOR_BOT_POLL_SECONDS', '25'))
 
 # ── Live-tunable signal knobs (REQ-030) ─────────────────────────────────────
 # A whitelisted set of SIGNAL thresholds can be overridden at runtime from the

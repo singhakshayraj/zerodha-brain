@@ -465,7 +465,8 @@ def score_universe(market_data, universe: list = None, nifty_closes: list = None
                 rel_strength=relative_strength(closes, nifty_closes or []),
                 news_sent=None, regime=regime)
             out[sym] = {'symbol': sym, 'score': score,
-                        'sector': entry.get('sector')}
+                        'sector': entry.get('sector'),
+                        'last_close': closes[-1] if closes else None}
         except Exception as e:
             print(f"[advisor.scan] {sym} skipped: {e}")
     if out:
@@ -502,8 +503,31 @@ def find_rotation_candidate(exit_score: int, sector: str, scored: dict,
         for c in pool:
             if qualifies(c):
                 return {'symbol': c['symbol'], 'score': c['score'],
-                        'sector': c.get('sector'), 'reason': reason}
+                        'sector': c.get('sector'), 'reason': reason,
+                        'last_close': c.get('last_close')}
     return None
+
+
+# Deploy slightly under the freed capital: Zerodha releases ~80% of CNC sell
+# proceeds same-day, and the buy shouldn't assume a perfect fill price.
+ROTATION_DEPLOY_FRACTION = 0.95
+
+
+def size_rotation(verdict: str, qty: int, last_price: float,
+                  target_price: float) -> dict:
+    """Concrete rotation sizing: how many shares to sell, how much capital
+    that frees, and how many target shares it buys. TRIM is a half-exit.
+    Pure; empty dict when unsizeable (no qty/price)."""
+    if not qty or not last_price:
+        return {}
+    sell_qty = qty if verdict != 'TRIM' else max(1, qty // 2)
+    freed = round(sell_qty * last_price, 2)
+    out = {'rotation_sell_qty': sell_qty, 'rotation_freed_inr': freed}
+    if target_price and target_price > 0:
+        out['rotation_buy_qty'] = int(freed * ROTATION_DEPLOY_FRACTION
+                                      // target_price)
+        out['rotation_buy_price'] = round(float(target_price), 2)
+    return out
 
 
 def sync_tradebook(kite) -> int:
@@ -569,9 +593,34 @@ def build_digest(rows: list, run_date: str) -> str:
             line += (f"\n  ↪ rotate into {r['rotation_target_symbol']} "
                      f"(score {r.get('rotation_target_score')}, "
                      f"{'same sector' if r.get('rotation_reason') == 'same_sector' else 'cross-sector'})")
+            if r.get('rotation_buy_qty'):
+                line += (f"\n  💰 sell {r.get('rotation_sell_qty')} → "
+                         f"₹{r.get('rotation_freed_inr'):,.0f} frees "
+                         f"~{r.get('rotation_buy_qty')} "
+                         f"{r['rotation_target_symbol']} "
+                         f"@ ₹{r.get('rotation_buy_price'):,.2f}")
         lines.append(line)
     lines.append("\nAdvisory only — you decide. Full read: /advisor")
     return '\n'.join(lines)
+
+
+def build_decision_keyboard(rows: list, run_date: str) -> dict:
+    """Inline Accept/Decline buttons, one row per actionable call. Callback
+    data 'adv|<run_date>|<symbol>|<accept/decline>' — parsed and verified by
+    advisor_bot (which records the DECISION only; nothing here or there can
+    place an order). None when nothing is actionable."""
+    act = [r for r in rows or []
+           if r.get('verdict') in _ACTIONABLE or r.get('rotation_target_symbol')]
+    if not act:
+        return None
+    act.sort(key=lambda r: r.get('trend_score') or 0)
+    keyboard = [[
+        {'text': f"✅ {r['symbol']}",
+         'callback_data': f"adv|{run_date}|{r['symbol']}|accept"},
+        {'text': f"❌ {r['symbol']}",
+         'callback_data': f"adv|{run_date}|{r['symbol']}|decline"},
+    ] for r in act]
+    return {'inline_keyboard': keyboard}
 
 
 def send_daily_digest(rows: list, run_date: str) -> bool:
@@ -588,8 +637,15 @@ def send_daily_digest(rows: list, run_date: str) -> bool:
         text = build_digest(rows, run_date)
         if not text:
             return False
+        markup = (build_decision_keyboard(rows, run_date)
+                  if config.ADVISOR_DECISIONS_ENABLED else None)
+        if markup:
+            text += ("\n\nTap ✅/❌ per call to record your decision — the "
+                     "track record then judges accepted and declined calls "
+                     "separately. (Recording only; no order is placed.)")
         sent = telegram.send_message(config.ADVISOR_TELEGRAM_BOT_TOKEN,
-                                     config.ADVISOR_TELEGRAM_CHAT_ID, text)
+                                     config.ADVISOR_TELEGRAM_CHAT_ID, text,
+                                     reply_markup=markup)
         if sent:
             db.write_config('advisor_digest_date', run_date)
         return sent
@@ -734,12 +790,22 @@ def run_advisor(market_data) -> int:
                     row['rotation_target_symbol'] = target['symbol']
                     row['rotation_target_score'] = target['score']
                     row['rotation_reason'] = target['reason']
+                    sizing = size_rotation(
+                        row.get('verdict'), row.get('quantity'),
+                        row.get('last_price'), target.get('last_close'))
+                    row.update(sizing)
+                    size_note = ''
+                    if sizing.get('rotation_buy_qty'):
+                        size_note = (f" Size: sell {sizing['rotation_sell_qty']} "
+                                     f"(₹{sizing['rotation_freed_inr']:,.0f}) → "
+                                     f"buy ~{sizing['rotation_buy_qty']} "
+                                     f"@ ₹{sizing['rotation_buy_price']:,.2f}")
                     row['reasons'] = (row.get('reasons') or []) + [
                         f"Rotation: {target['symbol']} scores "
                         f"{target['score']} vs this name's "
                         f"{row.get('trend_score')} "
                         f"({'same sector' if target['reason'] == 'same_sector' else 'different sector: ' + (target.get('sector') or '?')})"
-                        f" — freed capital has a stronger home"]
+                        f" — freed capital has a stronger home.{size_note}"]
                     print(f"[advisor.rotation] {row['symbol']} "
                           f"({row.get('trend_score')}) -> {target['symbol']} "
                           f"({target['score']}, {target['reason']})")

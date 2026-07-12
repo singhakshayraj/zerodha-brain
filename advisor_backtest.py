@@ -192,6 +192,22 @@ def get_track_record_summary() -> dict:
             # exit call: money saved = what the kept position would have lost
             value += weight * qty * base * (-float(r['outcome_return_pct']) / 100)
 
+    # Split by what the USER did with each call (Telegram Accept/Decline) —
+    # the honest read of whether following the advisor beats ignoring it.
+    by_decision = {}
+    for r in judged:
+        d = r.get('user_decision') or 'ignored'
+        s = by_decision.setdefault(d, {'calls': 0, 'hits': 0, 'alphas': []})
+        s['calls'] += 1
+        s['hits'] += 1 if r['outcome_correct'] else 0
+        if r.get('outcome_vs_nifty_pct') is not None:
+            s['alphas'].append(float(r['outcome_vs_nifty_pct']))
+    for s in by_decision.values():
+        s['hit_rate_pct'] = round(s['hits'] / s['calls'] * 100, 1)
+        s['avg_alpha_pct'] = (round(sum(s['alphas']) / len(s['alphas']), 2)
+                              if s['alphas'] else None)
+        del s['alphas']
+
     return {
         'evaluated_calls': len(judged),
         'hit_rate_pct': round(hits / len(judged) * 100, 1),
@@ -199,4 +215,5 @@ def get_track_record_summary() -> dict:
         'avg_alpha_pct': round(sum(alphas) / len(alphas), 2) if alphas else None,
         'advice_value_inr': round(value, 2),
         'by_verdict': by_verdict,
+        'by_decision': by_decision,
     }

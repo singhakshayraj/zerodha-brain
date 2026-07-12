@@ -770,13 +770,33 @@ def update_advice_outcome(run_date: str, symbol: str, outcome: dict) -> bool:
         return False
 
 
+def record_advice_decision(run_date: str, symbol: str, decision: str) -> bool:
+    """Store the user's Accept/Decline tap on one advice row. Idempotent —
+    a re-tap overwrites with the latest choice. DECISION ONLY: one text
+    column changes; nothing here touches an order path."""
+    if decision not in ('accept', 'decline'):
+        return False
+    try:
+        from datetime import datetime
+
+        import pytz
+        now = datetime.now(pytz.timezone('Asia/Kolkata')).isoformat()
+        res = (supabase.table('portfolio_advice')
+               .update({'user_decision': decision, 'decided_at': now})
+               .eq('run_date', run_date).eq('symbol', symbol).execute())
+        return bool(res.data)
+    except Exception as e:
+        print(f"[record_advice_decision] {run_date}/{symbol} error: {e}")
+        return False
+
+
 def get_evaluated_advice() -> list:
     """All judged advice rows — the advisor's track record."""
     try:
         res = (supabase.table('portfolio_advice')
                .select('run_date, symbol, verdict, trend_score, quantity, '
                        'last_price, outcome_return_pct, outcome_vs_nifty_pct, '
-                       'outcome_correct, evaluated_at')
+                       'outcome_correct, evaluated_at, user_decision')
                .not_.is_('evaluated_at', 'null')
                .order('run_date').execute())
         return res.data or []
