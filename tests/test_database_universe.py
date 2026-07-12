@@ -96,23 +96,6 @@ def test_upsert_stock_universe_bulk_error_returns_zero():
         assert database.upsert_stock_universe_bulk([{'symbol': 'AAA'}]) == 0
 
 
-def test_update_advisor_scores_isolates_per_symbol_failure():
-    with patch('database.supabase') as sb:
-        calls = {'n': 0}
-
-        def _table(name):
-            calls['n'] += 1
-            m = MagicMock()
-            if calls['n'] == 1:
-                m.update.side_effect = Exception('boom')
-            return m
-
-        sb.table.side_effect = _table
-        n = database.update_advisor_scores(
-            {'AAA': 50, 'BBB': -10}, '2026-07-12T10:00:00')
-    assert n == 1   # BBB written despite AAA failing
-
-
 def test_get_universe_by_sector_excludes_symbols():
     rows = [{'symbol': 'AAA', 'advisor_score': 80},
             {'symbol': 'BBB', 'advisor_score': 60}]

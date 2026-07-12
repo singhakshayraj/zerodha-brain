@@ -417,6 +417,23 @@ NIFTY500_INSTRUMENT_TOKENS = {
     f"NSE:{r['symbol']}": r['instrument_token'] for r in NIFTY500_UNIVERSE
 }
 
+# ── Rotation advisor (Portfolio Advisor phase 2) ────────────────────────────
+# Dark by default: the daily Nifty 500 scan + rotation suggestions only run
+# when this is flipped on Railway. Advisory only — nothing here can place an
+# order.
+ROTATION_ADVISOR_ENABLED = os.getenv(
+    'ROTATION_ADVISOR_ENABLED', 'false').strip().lower() == 'true'
+# Pace between universe candle fetches; 500 symbols × 350ms ≈ 3 min once/day,
+# same cadence the quote path already treats as safe for this Kite session.
+ADVISOR_UNIVERSE_SCAN_DELAY_MS = int(
+    os.getenv('ADVISOR_UNIVERSE_SCAN_DELAY_MS', '350'))
+# Rotation gate: only surface a swap when the exit is genuinely weak AND the
+# target is genuinely strong AND the spread between them is wide — "rotate
+# into strength", never "rotate into least-bad".
+ROTATION_MAX_EXIT_SCORE = int(os.getenv('ROTATION_MAX_EXIT_SCORE', '-20'))
+ROTATION_MIN_TARGET_SCORE = int(os.getenv('ROTATION_MIN_TARGET_SCORE', '50'))
+ROTATION_MIN_GAP = int(os.getenv('ROTATION_MIN_GAP', '40'))
+
 # ── Live-tunable signal knobs (REQ-030) ─────────────────────────────────────
 # A whitelisted set of SIGNAL thresholds can be overridden at runtime from the
 # app_config 'tunables' key (a JSON object) WITHOUT a redeploy — useful under

@@ -860,22 +860,6 @@ def upsert_stock_universe_bulk(rows: list) -> int:
         return 0
 
 
-def update_advisor_scores(scores: dict, scored_at: str) -> int:
-    """Write the daily advisor trend scores {symbol: int} onto the universe.
-    Separate column from brain_score (paper-engine win-rate) by design."""
-    n = 0
-    for symbol, score in (scores or {}).items():
-        try:
-            supabase.table('stock_universe').update({
-                'advisor_score': score,
-                'advisor_score_updated_at': scored_at,
-            }).eq('symbol', symbol).execute()
-            n += 1
-        except Exception as e:
-            print(f"[update_advisor_scores] {symbol} failed: {e}")
-    return n
-
-
 def get_universe_by_sector(sector: str = None, exclude_symbols: list = None) -> list:
     """Active Nifty 500 rows for rotation-candidate lookup, best score first.
     sector=None returns the whole universe (cross-sector fallback)."""

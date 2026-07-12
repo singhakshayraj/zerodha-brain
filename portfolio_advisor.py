@@ -19,10 +19,12 @@ Verdicts:
                     holding is bleeding capital that works harder elsewhere.
   INSUFFICIENT    — not enough daily history to say anything honest.
 """
+import time
 from datetime import datetime
 
 import pytz
 
+import config
 import database as db
 import news_jobs
 from indicators import calculate_ema_series, run_all_indicators
@@ -358,6 +360,90 @@ def advise(holding: dict, daily_candles: list, history: dict = None,
     }
 
 
+def _sleep(seconds: float) -> None:
+    """Indirection so tests can patch out the scan-pacing pause."""
+    time.sleep(seconds)
+
+
+def score_universe(market_data, universe: list = None, nifty_closes: list = None,
+                   exclude_symbols: list = None) -> dict:
+    """Daily trend_score for every Nifty 500 name we don't hold — the rotation
+    candidate pool. Reuses the exact holdings scorer (same 7 factors minus
+    news, which is skipped here: 500 per-symbol news reads for names that
+    mostly have no coverage isn't worth the DB round-trips; the term
+    contributes 0 either way).
+
+    Paced by config.ADVISOR_UNIVERSE_SCAN_DELAY_MS between candle fetches so
+    the once-daily scan (~3 min at 500×350ms) never crowds the paper engine
+    sharing this Kite session. Per-symbol failures skip that symbol only.
+    Returns {symbol: {'symbol', 'score', 'sector'}} and persists scores to
+    stock_universe.advisor_score (a column the paper engine never touches)."""
+    universe = config.NIFTY500_UNIVERSE if universe is None else universe
+    excl = set(exclude_symbols or [])
+    delay_s = max(0.0, config.ADVISOR_UNIVERSE_SCAN_DELAY_MS / 1000.0)
+    out = {}
+    for entry in universe:
+        sym = entry.get('symbol')
+        token = entry.get('instrument_token')
+        if not sym or not token or sym in excl:
+            continue
+        try:
+            key = f"NSE:{sym}"
+            market_data._instrument_cache[key] = token
+            candles = market_data.get_candles(key, 'day', 400)
+            _sleep(delay_s)
+            if not candles or len(candles) < MIN_DAILY_BARS:
+                continue
+            ind = run_all_indicators(candles)
+            closes = [float(c['close']) for c in candles
+                      if c.get('close') is not None]
+            score = trend_score(
+                ind, closes,
+                consistency=trend_consistency(closes),
+                rel_strength=relative_strength(closes, nifty_closes or []),
+                news_sent=None)
+            out[sym] = {'symbol': sym, 'score': score,
+                        'sector': entry.get('sector')}
+        except Exception as e:
+            print(f"[advisor.scan] {sym} skipped: {e}")
+    if out:
+        scored_at = datetime.now(IST).isoformat()
+        db.upsert_stock_universe_bulk([
+            {'symbol': s['symbol'], 'advisor_score': s['score'],
+             'advisor_score_updated_at': scored_at} for s in out.values()])
+    return out
+
+
+def find_rotation_candidate(exit_score: int, sector: str, scored: dict,
+                            min_gap: int = None, min_target_score: int = None):
+    """Best rotation target for a weak holding, or None. Gate (all three must
+    hold — rotate into strength, never into least-bad):
+      exit_score <= ROTATION_MAX_EXIT_SCORE   (the holding is genuinely weak)
+      target score >= ROTATION_MIN_TARGET_SCORE (the target is genuinely strong)
+      target - exit >= ROTATION_MIN_GAP         (the upgrade is wide, not noise)
+    Same-sector candidates preferred; cross-sector only when none qualify."""
+    min_gap = config.ROTATION_MIN_GAP if min_gap is None else min_gap
+    min_target = (config.ROTATION_MIN_TARGET_SCORE
+                  if min_target_score is None else min_target_score)
+    if exit_score is None or exit_score > config.ROTATION_MAX_EXIT_SCORE:
+        return None
+
+    def qualifies(c):
+        return (c['score'] >= min_target
+                and c['score'] - exit_score >= min_gap)
+
+    ranked = sorted(scored.values(), key=lambda c: c['score'], reverse=True)
+    for reason, pool in (
+            ('same_sector', [c for c in ranked
+                             if sector and c.get('sector') == sector]),
+            ('cross_sector', ranked)):
+        for c in pool:
+            if qualifies(c):
+                return {'symbol': c['symbol'], 'score': c['score'],
+                        'sector': c.get('sector'), 'reason': reason}
+    return None
+
+
 def sync_tradebook(kite) -> int:
     """Append today's REAL account trades (GET /trades) into tradebook —
     keeps the imported history current going forward. Read-only; dedup makes
@@ -484,6 +570,39 @@ def run_advisor(market_data) -> int:
                   f"bars {len(candles or [])})")
         except Exception as e:
             print(f"[advisor] {tsym} failed (skipped): {e}")
+
+    # Rotation pass (dark until ROTATION_ADVISOR_ENABLED): scan the Nifty 500
+    # for stronger homes for capital stuck in weak holdings. Non-fatal — a
+    # scan failure never blocks the day's verdicts.
+    if config.ROTATION_ADVISOR_ENABLED and rows:
+        try:
+            held = {r['symbol'] for r in rows}
+            t0 = time.monotonic()
+            scored = score_universe(market_data, nifty_closes=nifty_closes,
+                                    exclude_symbols=held)
+            print(f"[advisor.scan] scored {len(scored)} universe names in "
+                  f"{time.monotonic() - t0:.0f}s")
+            sector_of = {u['symbol']: u.get('sector')
+                         for u in config.NIFTY500_UNIVERSE}
+            for row in rows:
+                target = find_rotation_candidate(
+                    row.get('trend_score'), sector_of.get(row['symbol']),
+                    scored)
+                if target:
+                    row['rotation_target_symbol'] = target['symbol']
+                    row['rotation_target_score'] = target['score']
+                    row['rotation_reason'] = target['reason']
+                    row['reasons'] = (row.get('reasons') or []) + [
+                        f"Rotation: {target['symbol']} scores "
+                        f"{target['score']} vs this name's "
+                        f"{row.get('trend_score')} "
+                        f"({'same sector' if target['reason'] == 'same_sector' else 'different sector: ' + (target.get('sector') or '?')})"
+                        f" — freed capital has a stronger home"]
+                    print(f"[advisor.rotation] {row['symbol']} "
+                          f"({row.get('trend_score')}) -> {target['symbol']} "
+                          f"({target['score']}, {target['reason']})")
+        except Exception as e:
+            print(f"[advisor] rotation pass failed (non-fatal): {e}")
 
     n = db.upsert_portfolio_advice(rows)
     print(f"[advisor] stored {n} recommendations for {run_date}")
