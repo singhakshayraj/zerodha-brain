@@ -184,6 +184,11 @@ class TradingBrain:
         self.traded_symbols_this_cycle = set()
         self._time_stop_logged = set()  # trade ids with a WOULD_FIRE row
         self._would_stop_logged = set()  # session soft-stop reasons already logged
+        # Data-richness pacing (DATA_COLLECTION_MODE): spread entries across
+        # the day and across names instead of burning the budget at the open.
+        self._symbol_trades_today = {}   # symbol -> entries opened today
+        self._hour_trades = {}           # IST hour -> entries opened
+        self._entry_deferred_logged = set()  # (symbol, reason) dedup per day
         self._decision_ts = None        # REQ-073 decision→order clock
         self.last_context_log = None
         self.consecutive_losses = 0
@@ -531,28 +536,40 @@ class TradingBrain:
             # Step 5
             self._maybe_log_market_context(nifty, time_bucket)
 
+            # Daily entry budget. In data-collection mode the session's
+            # configured cap gets a floor (DATA_MAX_TRADES_PER_DAY) — the
+            # configured number still logs its LIMIT_WOULD_STOP counterfactual
+            # above, so "what a capped run would have done" stays
+            # reconstructable while the collector keeps gathering samples.
+            trade_budget = self.session_config['maxTrades']
+            if config.data_collection_active():
+                trade_budget = max(trade_budget, config.DATA_MAX_TRADES_PER_DAY)
             remaining_trades = (
-                self.session_config['maxTrades'] -
-                self.session_stats['trades_executed']
+                trade_budget - self.session_stats['trades_executed']
             )
 
             trades_this_cycle = 0
             max_per_cycle = config.MAX_TRADES_PER_CYCLE
+            cycle_limit_logged = False
 
             cycle_start_time = time.time()
             analyzed_count = 0
             cycle_candle_rows = []   # buffered OHLCV bars, bulk-upserted below
 
             for key, stock in analyzable.items():
-                if remaining_trades <= 0:
-                    break
-                if trades_this_cycle >= max_per_cycle:
+                # Analysis NEVER stops on trade caps. The old `break` here
+                # starved the dataset: on 2026-07-13 the 10-trade cap hit at
+                # 11:39 and decision logging died with it — 25 minutes of
+                # signals captured from a 6-hour day. Caps now gate only NEW
+                # entries (in the signal branches below); every stock still
+                # gets analyzed and every decision logged, all day.
+                if trades_this_cycle >= max_per_cycle and not cycle_limit_logged:
+                    cycle_limit_logged = True
                     print(
                         f"[brain] Per-cycle limit reached "
                         f"({trades_this_cycle}/{max_per_cycle}) "
-                        f"— deferring remaining signals to next cycle"
+                        f"— analysis continues, entries deferred to next cycle"
                     )
-                    break
 
                 symbol = stock['symbol']
                 exchange = stock.get('exchange', 'NSE')
@@ -862,11 +879,17 @@ class TradingBrain:
                         elif self._cooldown_gate(symbol):
                             pass   # re-entry cooldown (flag-gated) suppressed it
                         else:
-                            self._execute_buy(symbol, exchange, live_price, signal,
-                                              decision_id=decision_id)
-                            remaining_trades -= 1
-                            trades_this_cycle += 1
-                            self.traded_symbols_this_cycle.add(symbol)
+                            block = self._entry_block(
+                                symbol, remaining_trades, trades_this_cycle)
+                            if block:
+                                self._log_entry_deferred(symbol, 'BUY', block)
+                            else:
+                                self._execute_buy(symbol, exchange, live_price,
+                                                  signal, decision_id=decision_id)
+                                remaining_trades -= 1
+                                trades_this_cycle += 1
+                                self._note_entry(symbol)
+                                self.traded_symbols_this_cycle.add(symbol)
 
                     elif signal['action'] == 'SELL':
                         open_trades = db.get_open_trades(self.session_id)
@@ -909,11 +932,17 @@ class TradingBrain:
                             if self._cooldown_gate(symbol):
                                 pass   # would short, but re-entry cooldown (flag) suppressed it
                             else:
-                                self._open_short(symbol, exchange, live_price, signal,
-                                                 decision_id=decision_id)
-                                remaining_trades -= 1
-                                trades_this_cycle += 1
-                                self.traded_symbols_this_cycle.add(symbol)
+                                block = self._entry_block(
+                                    symbol, remaining_trades, trades_this_cycle)
+                                if block:
+                                    self._log_entry_deferred(symbol, 'SHORT', block)
+                                else:
+                                    self._open_short(symbol, exchange, live_price,
+                                                     signal, decision_id=decision_id)
+                                    remaining_trades -= 1
+                                    trades_this_cycle += 1
+                                    self._note_entry(symbol)
+                                    self.traded_symbols_this_cycle.add(symbol)
                         else:
                             regime_short = (signal.get('regime') or 'UNK')[:4]
                             self._sell_noops.append(
@@ -1465,6 +1494,51 @@ class TradingBrain:
             return False, None
         mins = (datetime.now(IST) - ts).total_seconds() / 60.0
         return mins < config.REENTRY_COOLDOWN_MIN, mins
+
+    def _entry_block(self, symbol: str, remaining_trades: int,
+                     trades_this_cycle: int) -> str:
+        """Why a NEW entry is blocked right now, or '' if it may proceed.
+        Analysis and decision logging upstream are never touched by these —
+        they exist so entries spread across the day (hourly pace) and across
+        names (symbol cap) instead of bunching at the open. Exits and covers
+        are never gated."""
+        if remaining_trades <= 0:
+            return 'DAILY_TRADE_BUDGET'
+        if trades_this_cycle >= config.MAX_TRADES_PER_CYCLE:
+            return 'CYCLE_LIMIT'
+        if config.data_collection_active():
+            if (self._symbol_trades_today.get(symbol, 0)
+                    >= config.DATA_MAX_TRADES_PER_SYMBOL):
+                return 'SYMBOL_DAY_CAP'
+            hour = datetime.now(IST).hour
+            if (self._hour_trades.get(hour, 0)
+                    >= config.DATA_MAX_NEW_TRADES_PER_HOUR):
+                return 'HOURLY_PACE'
+        return ''
+
+    def _note_entry(self, symbol: str) -> None:
+        """Bump the pacing counters after an entry actually opens."""
+        self._symbol_trades_today[symbol] = \
+            self._symbol_trades_today.get(symbol, 0) + 1
+        hour = datetime.now(IST).hour
+        self._hour_trades[hour] = self._hour_trades.get(hour, 0) + 1
+
+    def _log_entry_deferred(self, symbol: str, side: str, reason: str) -> None:
+        """Record a signal that fired but was paced out — the counterfactual
+        set 'what else would the strategy have entered'. Deduped per
+        (symbol, reason) per session to keep the activity feed readable."""
+        key = (symbol, reason)
+        if key in self._entry_deferred_logged:
+            return
+        self._entry_deferred_logged.add(key)
+        print(f"[brain] {side} {symbol} deferred: {reason}")
+        self._log_activity_safe(
+            'ENTRY_DEFERRED', symbol,
+            f"{side} signal deferred: {reason}",
+            {'side': side, 'reason': reason,
+             'symbol_trades_today': self._symbol_trades_today.get(symbol, 0),
+             'trades_executed': self.session_stats.get('trades_executed')},
+        )
 
     def _cooldown_gate(self, symbol: str) -> bool:
         """Entry guard. Returns True if the caller should SKIP this entry.

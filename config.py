@@ -224,6 +224,15 @@ REENTRY_COOLDOWN_MIN = int(os.getenv('REENTRY_COOLDOWN_MIN', '15'))
 # ended. MARKET_CLOSED stays HARD-enforced. Paper-only: force off unless
 # PAPER_TRADING (never relax risk with real money) — see assert_safe_boot.
 DATA_COLLECTION_MODE = os.getenv('DATA_COLLECTION_MODE', 'false').strip().lower() == 'true'
+# Data-richness pacing (only active under data_collection_active()):
+# the day's entry budget gets a floor of DATA_MAX_TRADES_PER_DAY (the
+# session-configured cap still logs its counterfactual), spread across the
+# day (max new entries per IST hour) and across names (max entries per
+# symbol per day). 2026-07-13 showed why: 10 trades all before 11:39, then
+# zero new samples for four hours.
+DATA_MAX_TRADES_PER_DAY = int(os.getenv('DATA_MAX_TRADES_PER_DAY', '40'))
+DATA_MAX_TRADES_PER_SYMBOL = int(os.getenv('DATA_MAX_TRADES_PER_SYMBOL', '3'))
+DATA_MAX_NEW_TRADES_PER_HOUR = int(os.getenv('DATA_MAX_NEW_TRADES_PER_HOUR', '6'))
 
 # News collector (NEWS_CORRELATION_PLAN): a decoupled periodic job fetches
 # ticker-tagged financial news + sentiment into news_events, out of the trading
