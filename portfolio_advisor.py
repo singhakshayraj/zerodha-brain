@@ -207,6 +207,19 @@ def smoothed_last_price(market_data, instrument_key: str, today: str = None):
         return None
 
 
+def completed_bars(candles: list, today: str = None) -> list:
+    """Drop today's still-forming daily bar (KNOWN_ISSUES P3): at 09:45 it
+    holds 30 minutes of trading but weighs like a full day in EMA/momentum/
+    consistency, so verdicts drift with run time. Indicators read completed
+    structure; the verdict-time PRICE is handled separately (smoothed LTP)."""
+    if not candles:
+        return candles
+    today = today or datetime.now(IST).date().isoformat()
+    if str(candles[-1].get('timestamp') or '')[:10] == today:
+        return candles[:-1]
+    return candles
+
+
 def swing_levels(candles: list, lookback: int = SWING_LOOKBACK):
     """(support, resistance) from the recent swing window."""
     window = candles[-lookback:]
@@ -280,11 +293,12 @@ def advise(holding: dict, daily_candles: list, history: dict = None,
         'breakeven_gain_pct': breakeven_gain_pct(avg, last),
     }
 
+    daily_candles = completed_bars(daily_candles)
     if not daily_candles or len(daily_candles) < MIN_DAILY_BARS:
         return {**base, 'verdict': 'INSUFFICIENT', 'confidence': 0,
                 'trend_score': 0, 'reasons':
-                [f'Only {len(daily_candles or [])} daily bars — need '
-                 f'{MIN_DAILY_BARS}+ for an honest read'],
+                [f'Only {len(daily_candles or [])} completed daily bars — '
+                 f'need {MIN_DAILY_BARS}+ for an honest read'],
                 'stop_level': None, 'exit_target': None, 'indicators': {},
                 'market_regime': regime, 'trigger_type': None}
 
@@ -458,7 +472,7 @@ def score_universe(market_data, universe: list = None, nifty_closes: list = None
         try:
             key = f"NSE:{sym}"
             market_data._instrument_cache[key] = token
-            candles = market_data.get_candles(key, 'day', 400)
+            candles = completed_bars(market_data.get_candles(key, 'day', 400))
             _sleep(delay_s)
             if not candles or len(candles) < MIN_DAILY_BARS:
                 continue
@@ -711,7 +725,11 @@ def run_advisor(market_data) -> int:
     nifty_candles = []
     try:
         market_data._instrument_cache['NSE:NIFTY 50'] = NIFTY50_INDEX_TOKEN
-        nifty_candles = market_data.get_candles('NSE:NIFTY 50', 'day', 400) or []
+        # completed bars only — the benchmark must be trimmed the same way
+        # the per-symbol series are, or relative strength compares a full
+        # stock day against a partial index day.
+        nifty_candles = completed_bars(
+            market_data.get_candles('NSE:NIFTY 50', 'day', 400) or [])
         nifty_closes = [float(c['close']) for c in nifty_candles
                         if c.get('close') is not None]
     except Exception as e:

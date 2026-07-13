@@ -191,8 +191,6 @@ def maybe_lock_inplay(market_data, universe: dict) -> int:
                 print(f"[data_jobs] inplay {key} failed: {e}")
         ranked = inplay.rank(candidates)
         if not ranked:
-            # Lock an explicit empty marker? No — leaving it unlocked lets a
-            # later cycle retry (e.g. candles were thin at 09:30 sharp).
             # Diagnostics so a zero-lock day is explainable from the log
             # alone (bug vs genuinely quiet tape) — 2026-07-13 burned an
             # audit on exactly this ambiguity.
@@ -201,9 +199,20 @@ def maybe_lock_inplay(market_data, universe: dict) -> int:
             print(f"[data_jobs] No candidates cleared the RVOL bar "
                   f"(threshold {config.RVOL_THRESHOLD}; {len(candidates)} "
                   f"scanned, {len(rvols)} with known RVOL, "
-                  f"top3 {[round(r, 2) for r in rvols[:3]]}) — will retry "
-                  f"next cycle")
-            return 0
+                  f"top3 {[round(r, 2) for r in rvols[:3]]})")
+            # Capture-first fallback (KNOWN_ISSUES P5, data-collection only):
+            # a quiet tape is itself a sample. Lock the best-available names
+            # with their true below-bar RVOLs — or_rvol is stored per row, so
+            # anything downstream that means "cleared the bar" re-filters to
+            # >= RVOL_THRESHOLD. Plain mode keeps the strict gate + retry.
+            if config.data_collection_active():
+                ranked = inplay.rank(candidates, min_rvol=0.0)[
+                    :config.INPLAY_FALLBACK_TOP_N]
+                if ranked:
+                    print(f"[data_jobs] capture-first fallback: locking "
+                          f"top {len(ranked)} below-bar names")
+            if not ranked:
+                return 0            # unlocked -> a later cycle retries
         return db.lock_inplay_list(today, ranked)
     except Exception as e:
         print(f"[data_jobs] inplay job failed (non-fatal): {e}")

@@ -733,16 +733,55 @@ def upsert_tradebook(rows: list) -> int:
         return 0
 
 
+def _fetch_all(query, page_size: int = 1000) -> list:
+    """Drain a PostgREST select past the 1000-row server default — an
+    un-paginated .execute() silently truncates and the caller computes on a
+    partial dataset (KNOWN_ISSUES P2). Query must already be ordered."""
+    out = []
+    start = 0
+    while True:
+        res = query.range(start, start + page_size - 1).execute()
+        batch = res.data or []
+        out.extend(batch)
+        if len(batch) < page_size:
+            return out
+        start += page_size
+
+
 def get_tradebook() -> list:
     """Full real-account trade history (import + daily appends)."""
     try:
-        res = (supabase.table('tradebook')
-               .select('symbol, trade_type, quantity, price, trade_date')
-               .order('executed_at').execute())
-        return res.data or []
+        return _fetch_all(
+            supabase.table('tradebook')
+            .select('symbol, trade_type, quantity, price, trade_date')
+            .order('executed_at'))
     except Exception as e:
         print(f"[get_tradebook] error: {e}")
         return []
+
+
+def append_decision_skip(decision_id: str, reason: str) -> bool:
+    """Append a post-hoc skip reason (e.g. ENTRY_DEFERRED:HOURLY_PACE) onto
+    an already-logged decision row, so 'what did pacing cost us' is
+    answerable from brain_decisions alone (KNOWN_ISSUES P4). Read-modify-
+    write is fine here: one writer, low volume (deferred entries only)."""
+    if not decision_id:
+        return False
+    try:
+        res = (supabase.table('brain_decisions').select('skip_reasons')
+               .eq('id', decision_id).limit(1).execute())
+        if not res.data:
+            return False
+        existing = res.data[0].get('skip_reasons') or []
+        if reason in existing:
+            return True
+        (supabase.table('brain_decisions')
+         .update({'skip_reasons': existing + [reason]})
+         .eq('id', decision_id).execute())
+        return True
+    except Exception as e:
+        print(f"[append_decision_skip] {decision_id} error: {e}")
+        return False
 
 
 def get_unevaluated_advice(max_run_date: str) -> list:
@@ -801,13 +840,13 @@ def record_advice_decision(run_date: str, symbol: str, decision: str) -> bool:
 def get_evaluated_advice() -> list:
     """All judged advice rows — the advisor's track record."""
     try:
-        res = (supabase.table('portfolio_advice')
-               .select('run_date, symbol, verdict, trend_score, quantity, '
-                       'last_price, outcome_return_pct, outcome_vs_nifty_pct, '
-                       'outcome_correct, evaluated_at, user_decision')
-               .not_.is_('evaluated_at', 'null')
-               .order('run_date').execute())
-        return res.data or []
+        return _fetch_all(
+            supabase.table('portfolio_advice')
+            .select('run_date, symbol, verdict, trend_score, quantity, '
+                    'last_price, outcome_return_pct, outcome_vs_nifty_pct, '
+                    'outcome_correct, evaluated_at, user_decision')
+            .not_.is_('evaluated_at', 'null')
+            .order('run_date'))
     except Exception as e:
         print(f"[get_evaluated_advice] error: {e}")
         return []

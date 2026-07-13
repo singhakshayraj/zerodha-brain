@@ -81,6 +81,11 @@ STALE_QUOTE_MAX_S = int(os.getenv('STALE_QUOTE_MAX_S', '600'))
 
 # In-play engine (REQ §2.1/M3). Top-N by opening-range RVOL, locked 09:30.
 INPLAY_CAP = int(os.getenv('INPLAY_CAP', '10'))
+# Capture-first fallback (data-collection only): when NO name clears
+# RVOL_THRESHOLD, lock this many best-available anyway (true rvol stored;
+# downstream re-filters). A quiet tape recorded beats a day recorded as
+# nothing.
+INPLAY_FALLBACK_TOP_N = int(os.getenv('INPLAY_FALLBACK_TOP_N', '3'))
 RVOL_THRESHOLD = float(os.getenv('RVOL_THRESHOLD', '2.0'))
 
 # Time-stop exit (REQ-051, §4.2/4.3c): a position that has neither hit its
@@ -233,6 +238,13 @@ DATA_COLLECTION_MODE = os.getenv('DATA_COLLECTION_MODE', 'false').strip().lower(
 DATA_MAX_TRADES_PER_DAY = int(os.getenv('DATA_MAX_TRADES_PER_DAY', '40'))
 DATA_MAX_TRADES_PER_SYMBOL = int(os.getenv('DATA_MAX_TRADES_PER_SYMBOL', '3'))
 DATA_MAX_NEW_TRADES_PER_HOUR = int(os.getenv('DATA_MAX_NEW_TRADES_PER_HOUR', '6'))
+# Concurrency bound (KNOWN_ISSUES P1): without it the 40-entry budget can
+# stack open MIS positions to several times capitalDeployed — paper fills
+# tolerate it, but the dataset drifts from anything replicable with real
+# capital (pnl%, Kelly history). 8 concurrent × ~₹10k ≈ 3× capital: bounded
+# unrealism, still rich.
+DATA_MAX_CONCURRENT_POSITIONS = int(
+    os.getenv('DATA_MAX_CONCURRENT_POSITIONS', '8'))
 
 # News collector (NEWS_CORRELATION_PLAN): a decoupled periodic job fetches
 # ticker-tagged financial news + sentiment into news_events, out of the trading

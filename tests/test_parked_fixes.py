@@ -170,3 +170,116 @@ def test_digest_caps_at_twelve_calls_with_overflow_line():
     assert len(text) < 4096
     kb = pa.build_decision_keyboard(rows, '2026-07-14')
     assert len(kb['inline_keyboard']) == 12
+
+
+# ── P1/P3/P4/P5 fixes (2026-07-14, second pass) ─────────────────────────────
+
+def test_concurrent_cap_gates_entries_in_data_mode():
+    import config
+    from brain import TradingBrain
+    b = TradingBrain()
+    b.session_stats = {'trades_executed': 0, 'total_pnl': 0}
+    with patch.object(config, 'data_collection_active', return_value=True):
+        assert b._entry_block('AAA', 5, 0,
+                              open_positions=config.DATA_MAX_CONCURRENT_POSITIONS) \
+            == 'CONCURRENT_CAP'
+        assert b._entry_block('AAA', 5, 0, open_positions=2) == ''
+    with patch.object(config, 'data_collection_active', return_value=False):
+        assert b._entry_block('AAA', 5, 0, open_positions=99) == ''
+
+
+def test_completed_bars_drops_only_todays_forming_bar():
+    import portfolio_advisor as pa
+    candles = [{'timestamp': '2026-07-11', 'close': 1},
+               {'timestamp': '2026-07-14', 'close': 2}]
+    out = pa.completed_bars(candles, today='2026-07-14')
+    assert [c['timestamp'] for c in out] == ['2026-07-11']
+    # yesterday-only series untouched; empty safe
+    assert pa.completed_bars(candles[:1], today='2026-07-14') == candles[:1]
+    assert pa.completed_bars([], today='2026-07-14') == []
+
+
+def test_fetch_all_pages_past_1000():
+    q = MagicMock()
+    pages = {0: [{'i': n} for n in range(1000)],
+             1000: [{'i': n} for n in range(1000, 1500)]}
+    q.range.side_effect = lambda s, e: MagicMock(
+        execute=lambda: MagicMock(data=pages.get(s, [])))
+    rows = db._fetch_all(q)
+    assert len(rows) == 1500
+    q.range.assert_any_call(0, 999)
+    q.range.assert_any_call(1000, 1999)
+
+
+def test_append_decision_skip_appends_and_dedups():
+    sel = MagicMock()
+    sel.execute.return_value = MagicMock(data=[{'skip_reasons': ['DQ_OK']}])
+    upd = MagicMock()
+    tbl = MagicMock()
+    tbl.select.return_value.eq.return_value.limit.return_value = sel
+    tbl.update.return_value.eq.return_value = upd
+    with patch.object(db, 'supabase') as sb:
+        sb.table.return_value = tbl
+        assert db.append_decision_skip('d1', 'ENTRY_DEFERRED:HOURLY_PACE') is True
+    tbl.update.assert_called_once_with(
+        {'skip_reasons': ['DQ_OK', 'ENTRY_DEFERRED:HOURLY_PACE']})
+    # already present -> no update call
+    sel.execute.return_value = MagicMock(
+        data=[{'skip_reasons': ['ENTRY_DEFERRED:HOURLY_PACE']}])
+    tbl.update.reset_mock()
+    with patch.object(db, 'supabase') as sb:
+        sb.table.return_value = tbl
+        assert db.append_decision_skip('d1', 'ENTRY_DEFERRED:HOURLY_PACE') is True
+    tbl.update.assert_not_called()
+    assert db.append_decision_skip(None, 'x') is False
+
+
+def test_inplay_fallback_locks_top_names_in_data_mode():
+    import config
+    md = MagicMock()
+    universe = {'NSE:AAA': {}, 'NSE:BBB': {}}
+    stats = {'NSE:AAA': {'or_rvol': 1.4, 'or_high': 10, 'or_low': 9,
+                         'gap_pct': 0.1, 'or_volume': 1, 'avg_or_volume': 1},
+             'NSE:BBB': {'or_rvol': 0.9, 'or_high': 10, 'or_low': 9,
+                         'gap_pct': 0.1, 'or_volume': 1, 'avg_or_volume': 1}}
+    locked = {}
+    with patch.object(data_jobs, '_past_lock_time', return_value=True), \
+         patch.object(data_jobs.db, 'inplay_locked', return_value=False), \
+         patch.object(data_jobs.inplay, 'opening_range_stats',
+                      side_effect=lambda c: dict(stats[md._last_key]) if False else stats.get(getattr(md, '_k', 'NSE:AAA'))), \
+         patch.object(data_jobs.db, 'lock_inplay_list',
+                      side_effect=lambda d, r: locked.update({d: r}) or len(r)):
+        pass  # direct path below instead — opening stats via get_candles key
+    # simpler: call rank-level behavior through maybe_lock_inplay with
+    # per-key stats delivered by a stateful fake
+    keys = iter(['NSE:AAA', 'NSE:BBB'])
+    def fake_stats(_c):
+        return dict(stats[next(keys)])
+    with patch.object(data_jobs, '_past_lock_time', return_value=True), \
+         patch.object(data_jobs.db, 'inplay_locked', return_value=False), \
+         patch.object(data_jobs.inplay, 'opening_range_stats',
+                      side_effect=fake_stats), \
+         patch.object(config, 'data_collection_active', return_value=True), \
+         patch.object(data_jobs.db, 'lock_inplay_list',
+                      side_effect=lambda d, r: locked.update({d: r}) or len(r)):
+        n = data_jobs.maybe_lock_inplay(md, universe)
+    assert n == 2                       # both below bar 2.0, fallback locked
+    rows = list(locked.values())[0]
+    assert rows[0]['symbol'] == 'NSE:AAA' and rows[0]['or_rvol'] == 1.4
+
+
+def test_inplay_no_fallback_outside_data_mode():
+    import config
+    md = MagicMock()
+    universe = {'NSE:AAA': {}}
+    def fake_stats(_c):
+        return {'or_rvol': 1.4, 'or_high': 10, 'or_low': 9, 'gap_pct': 0.1,
+                'or_volume': 1, 'avg_or_volume': 1}
+    with patch.object(data_jobs, '_past_lock_time', return_value=True), \
+         patch.object(data_jobs.db, 'inplay_locked', return_value=False), \
+         patch.object(data_jobs.inplay, 'opening_range_stats',
+                      side_effect=fake_stats), \
+         patch.object(config, 'data_collection_active', return_value=False), \
+         patch.object(data_jobs.db, 'lock_inplay_list') as lock:
+        assert data_jobs.maybe_lock_inplay(md, universe) == 0
+    lock.assert_not_called()

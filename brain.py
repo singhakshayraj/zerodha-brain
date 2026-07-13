@@ -880,9 +880,11 @@ class TradingBrain:
                             pass   # re-entry cooldown (flag-gated) suppressed it
                         else:
                             block = self._entry_block(
-                                symbol, remaining_trades, trades_this_cycle)
+                                symbol, remaining_trades, trades_this_cycle,
+                                open_positions=len(open_trades_now))
                             if block:
-                                self._log_entry_deferred(symbol, 'BUY', block)
+                                self._log_entry_deferred(symbol, 'BUY', block,
+                                                         decision_id=decision_id)
                             else:
                                 self._execute_buy(symbol, exchange, live_price,
                                                   signal, decision_id=decision_id)
@@ -933,9 +935,11 @@ class TradingBrain:
                                 pass   # would short, but re-entry cooldown (flag) suppressed it
                             else:
                                 block = self._entry_block(
-                                    symbol, remaining_trades, trades_this_cycle)
+                                    symbol, remaining_trades, trades_this_cycle,
+                                    open_positions=len(open_trades))
                                 if block:
-                                    self._log_entry_deferred(symbol, 'SHORT', block)
+                                    self._log_entry_deferred(symbol, 'SHORT', block,
+                                                             decision_id=decision_id)
                                 else:
                                     self._open_short(symbol, exchange, live_price,
                                                      signal, decision_id=decision_id)
@@ -1496,12 +1500,13 @@ class TradingBrain:
         return mins < config.REENTRY_COOLDOWN_MIN, mins
 
     def _entry_block(self, symbol: str, remaining_trades: int,
-                     trades_this_cycle: int) -> str:
+                     trades_this_cycle: int, open_positions: int = 0) -> str:
         """Why a NEW entry is blocked right now, or '' if it may proceed.
         Analysis and decision logging upstream are never touched by these —
-        they exist so entries spread across the day (hourly pace) and across
-        names (symbol cap) instead of bunching at the open. Exits and covers
-        are never gated."""
+        they exist so entries spread across the day (hourly pace), across
+        names (symbol cap), and stay within a bounded concurrent book
+        instead of stacking paper positions to fantasy exposure. Exits and
+        covers are never gated."""
         if remaining_trades <= 0:
             return 'DAILY_TRADE_BUDGET'
         if trades_this_cycle >= config.MAX_TRADES_PER_CYCLE:
@@ -1510,6 +1515,8 @@ class TradingBrain:
             if (self._symbol_trades_today.get(symbol, 0)
                     >= config.DATA_MAX_TRADES_PER_SYMBOL):
                 return 'SYMBOL_DAY_CAP'
+            if open_positions >= config.DATA_MAX_CONCURRENT_POSITIONS:
+                return 'CONCURRENT_CAP'
             hour = datetime.now(IST).hour
             if (self._hour_trades.get(hour, 0)
                     >= config.DATA_MAX_NEW_TRADES_PER_HOUR):
@@ -1523,10 +1530,17 @@ class TradingBrain:
         hour = datetime.now(IST).hour
         self._hour_trades[hour] = self._hour_trades.get(hour, 0) + 1
 
-    def _log_entry_deferred(self, symbol: str, side: str, reason: str) -> None:
+    def _log_entry_deferred(self, symbol: str, side: str, reason: str,
+                            decision_id: str = None) -> None:
         """Record a signal that fired but was paced out — the counterfactual
-        set 'what else would the strategy have entered'. Deduped per
-        (symbol, reason) per session to keep the activity feed readable."""
+        set 'what else would the strategy have entered'. The reason is also
+        stamped onto the decision row itself so it's queryable without an
+        activity join. Activity feed deduped per (symbol, reason) per
+        session to stay readable; the decision stamp happens every time."""
+        try:
+            db.append_decision_skip(decision_id, f'ENTRY_DEFERRED:{reason}')
+        except Exception:
+            pass
         key = (symbol, reason)
         if key in self._entry_deferred_logged:
             return
