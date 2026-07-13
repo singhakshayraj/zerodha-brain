@@ -155,8 +155,9 @@ def _maybe_run_advisor() -> None:
                 except Exception as e:
                     print(f"[SCHEDULER] advisor backtest failed "
                           f"(non-fatal): {e}")
-            # Weekly stock profiles (M3): first advisor run of a new ISO
-            # week rebuilds them — was a Mac cron that never got installed.
+            # Weekly stock profiles (M3): no-ops during market hours (the
+            # builder refuses to run next to the live loop); actually fires
+            # from the post-close slot below or an off-hours advisor run.
             try:
                 import data_jobs
                 data_jobs.maybe_weekly_profiles(md)
@@ -168,6 +169,39 @@ def _maybe_run_advisor() -> None:
             _advisor_running = False
 
     threading.Thread(target=_run, daemon=True, name='advisor').start()
+
+
+_profiles_kick_date = None
+
+
+def _maybe_kick_weekly_profiles() -> None:
+    """Post-close slot (15:40–17:00 IST) for the weekly profile builder —
+    ~100 paced historical fetches that must not run next to the live loop.
+    The builder itself dedups per ISO week; this just gives it a call site
+    with a valid same-day token. Once-per-day attempt, daemon thread."""
+    global _profiles_kick_date
+    try:
+        now = datetime.now(IST)
+        today = now.date().isoformat()
+        m = now.hour * 60 + now.minute
+        if _profiles_kick_date == today or not (15 * 60 + 40) <= m <= (17 * 60):
+            return
+        _profiles_kick_date = today
+        token = db.get_enc_token()
+        if not token or not _token_is_live(token):
+            return
+
+        def _run():
+            try:
+                import data_jobs
+                from market_data import MarketData
+                data_jobs.maybe_weekly_profiles(MarketData(KiteClient(token)))
+            except Exception as e:
+                print(f"[SCHEDULER] weekly profiles kick failed (non-fatal): {e}")
+
+        threading.Thread(target=_run, daemon=True, name='profiles').start()
+    except Exception as e:
+        print(f"[SCHEDULER] profiles kick errored (non-fatal): {e}")
 
 
 def _report_stale_token() -> None:
@@ -379,6 +413,8 @@ def run():
             # Token preflight (09:16): a dead enc_token is still fixable
             # before the 09:45 advisor run — alert, don't silently skip.
             _maybe_token_preflight()
+            # Weekly profiles get their post-close window (15:40+).
+            _maybe_kick_weekly_profiles()
             # Portfolio advisor: once per day when a live token exists.
             # Advisory-only, independent of trading sessions; never blocks
             # the loop (runs on a daemon thread).

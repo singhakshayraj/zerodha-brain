@@ -13,6 +13,7 @@ universe is unchanged — rows are collected for M4/M5), and never throw:
 a data-job failure must never take down a trading cycle.
 """
 
+import time
 from datetime import datetime
 
 import pytz
@@ -104,6 +105,9 @@ def build_weekly_profiles(market_data, asof: str = None,
             candles = market_data.get_candles(sym, '60minute',
                                               days=lookback_days)
             dailies[sym] = level_pack.daily_ohlc(candles)
+            # Pace like the advisor's universe scan — ~100 historical fetches
+            # on the shared Kite session must never arrive as a burst.
+            time.sleep(config.ADVISOR_UNIVERSE_SCAN_DELAY_MS / 1000.0)
         except Exception as e:
             print(f"[data_jobs.profiles] {sym} fetch failed: {e}")
             dailies[sym] = []
@@ -136,12 +140,22 @@ def build_weekly_profiles(market_data, asof: str = None,
     return ok
 
 
+def _market_hours_now() -> bool:
+    now = datetime.now(IST)
+    if now.weekday() > 4:
+        return False
+    m = now.hour * 60 + now.minute
+    return (9 * 60 + 15) <= m <= (15 * 60 + 35)
+
+
 def maybe_weekly_profiles(market_data) -> int:
     """Run the profile builder once per ISO week (durable marker in
-    app_config 'profiles_week'). Called after the daily advisor run — the
-    first run of a new ISO week (usually Monday ~09:45, live token in hand)
-    rebuilds; every other call no-ops. Non-fatal by construction."""
+    app_config 'profiles_week'). Refuses to run during market hours even
+    paced — ~100 historical fetches belong in the post-close/overnight
+    window, never next to the live trading loop. Non-fatal by construction."""
     try:
+        if _market_hours_now():
+            return 0
         week = datetime.now(IST).strftime('%G-W%V')
         if (db.get_config('profiles_week') or '') == week:
             return 0

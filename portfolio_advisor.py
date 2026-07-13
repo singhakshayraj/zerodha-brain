@@ -576,6 +576,12 @@ def sync_tradebook(kite) -> int:
 _ACTIONABLE = ('SELL', 'SELL_ON_BOUNCE', 'TRIM')
 
 
+# Telegram rejects messages over 4096 chars — a heavy day (many actionable
+# calls, each with a rotation + sizing block) can clear that. Cap the digest
+# to the worst N; the rest are one tap away on /advisor.
+_DIGEST_MAX_CALLS = 12
+
+
 def build_digest(rows: list, run_date: str) -> str:
     """Telegram text for the day's ACTIONABLE calls only — HOLDs are noise in
     a push channel. Empty string = nothing worth sending today."""
@@ -584,8 +590,10 @@ def build_digest(rows: list, run_date: str) -> str:
     if not act:
         return ''
     act.sort(key=lambda r: r.get('trend_score') or 0)
+    overflow = len(act) - _DIGEST_MAX_CALLS
+    act = act[:_DIGEST_MAX_CALLS]
     lines = [f"📋 Portfolio Advisor — {run_date}",
-             f"{len(act)} actionable of {len(rows)} holdings:"]
+             f"{len(act) + max(0, overflow)} actionable of {len(rows)} holdings:"]
     for r in act:
         pnl = r.get('pnl_percent')
         line = (f"\n{r['symbol']}: {r['verdict']} "
@@ -606,6 +614,8 @@ def build_digest(rows: list, run_date: str) -> str:
                          f"{r['rotation_target_symbol']} "
                          f"@ ₹{r.get('rotation_buy_price'):,.2f}")
         lines.append(line)
+    if overflow > 0:
+        lines.append(f"\n…and {overflow} more — full read on /advisor")
     lines.append("\nAdvisory only — you decide. Full read: /advisor")
     return '\n'.join(lines)
 
@@ -620,6 +630,7 @@ def build_decision_keyboard(rows: list, run_date: str) -> dict:
     if not act:
         return None
     act.sort(key=lambda r: r.get('trend_score') or 0)
+    act = act[:_DIGEST_MAX_CALLS]     # keyboard mirrors the digest's cap
     keyboard = [[
         {'text': f"✅ {r['symbol']}",
          'callback_data': f"adv|{run_date}|{r['symbol']}|accept"},

@@ -118,7 +118,15 @@ def _poll_once() -> int:
 def _bot_loop() -> None:
     while True:
         try:
+            t0 = time.monotonic()
             _poll_once()
+            # A healthy empty long-poll is held open ~ADVISOR_BOT_POLL_SECONDS
+            # by Telegram's server. An instant return means the request
+            # failed (get_updates swallows network errors and returns []) —
+            # sleep the interval instead of spinning hot against a dead
+            # network and hammering the API.
+            if time.monotonic() - t0 < 5:
+                time.sleep(config.ADVISOR_BOT_POLL_SECONDS)
         except Exception as e:
             print(f"[advisor_bot] poll error (loop continues): {e}")
             time.sleep(config.ADVISOR_BOT_POLL_SECONDS)
