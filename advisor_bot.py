@@ -27,7 +27,29 @@ import telegram
 
 IST = pytz.timezone('Asia/Kolkata')
 
-_offset = None          # getUpdates cursor (max update_id + 1)
+# getUpdates cursor (max update_id + 1). Durable in app_config so a Railway
+# redeploy can't replay already-processed taps (Telegram redelivers
+# unconfirmed updates for a while — an in-memory cursor made that window
+# a decision-reverting hazard).
+_OFFSET_KEY = 'advisor_bot_offset'
+_offset = None
+
+
+def _load_offset():
+    global _offset
+    try:
+        raw = db.get_config(_OFFSET_KEY)
+        _offset = int(raw) if raw else None
+    except Exception:
+        _offset = None
+
+
+def _save_offset():
+    try:
+        if _offset is not None:
+            db.write_config(_OFFSET_KEY, str(_offset))
+    except Exception as e:
+        print(f"[advisor_bot] offset save failed (non-fatal): {e}")
 
 
 def parse_callback(data: str):
@@ -66,7 +88,8 @@ def handle_update(update: dict) -> bool:
     telegram.answer_callback(
         config.ADVISOR_TELEGRAM_BOT_TOKEN, cq_id,
         f"{verb}: {symbol} ({run_date}) recorded — no order placed."
-        if ok else f"Could not record {symbol} — try again.")
+        if ok else f"Not recorded: {symbol} ({run_date}) — this call was "
+                   f"already judged by the backtest, or the row is gone.")
     if ok:
         print(f"[advisor_bot] {run_date} {symbol}: {decision}")
     return ok
@@ -87,6 +110,8 @@ def _poll_once() -> int:
                 n += 1
         except Exception as e:
             print(f"[advisor_bot] update skipped: {e}")
+    if updates:
+        _save_offset()
     return n
 
 
@@ -108,6 +133,7 @@ def start_advisor_bot() -> bool:
             and config.ADVISOR_TELEGRAM_CHAT_ID):
         print("[advisor_bot] enabled but bot creds missing — not starting")
         return False
+    _load_offset()
     t = threading.Thread(target=_bot_loop, daemon=True, name='advisor_bot')
     t.start()
     print(f"[advisor_bot] started — decision recording via "

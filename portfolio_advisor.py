@@ -179,15 +179,21 @@ def classify_trigger(score: int, price: float, ema200: float,
     return 'MICRO'
 
 
-def smoothed_last_price(market_data, instrument_key: str):
-    """EMA over the last three 15-min closes — the verdict-time price with
-    single-bar opening noise filtered out (one flush or spike can't flip a
-    near-support / oversold check by itself). None on any failure; the
-    caller falls back to the raw holdings LTP."""
+def smoothed_last_price(market_data, instrument_key: str, today: str = None):
+    """EMA over TODAY's last (up to three) 15-min closes — the verdict-time
+    price with single-bar opening noise filtered out (one flush or spike
+    can't flip a near-support / oversold check by itself).
+
+    Strictly same-session: candles from prior days are discarded, never
+    blended — smoothing Friday's close into a gapped Monday open would be
+    the opposite of this feature's purpose. None when today has no closed
+    bar yet or on any failure; the caller falls back to the raw LTP."""
     try:
+        today = today or datetime.now(IST).date().isoformat()
         candles = market_data.get_candles(instrument_key, '15minute', 3) or []
-        closes = [float(c['close']) for c in candles[-3:]
-                  if c.get('close') is not None]
+        closes = [float(c['close']) for c in candles
+                  if c.get('close') is not None
+                  and str(c.get('timestamp') or '')[:10] == today][-3:]
         if not closes:
             return None
         # Standard EMA, span 3 (alpha = 0.5), seeded on the oldest close.

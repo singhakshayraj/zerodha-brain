@@ -83,6 +83,77 @@ def _past_lock_time() -> bool:
     return (now.hour * 60 + now.minute) >= (9 * 60 + 30)
 
 
+def build_weekly_profiles(market_data, asof: str = None,
+                          lookback_days: int = 90) -> int:
+    """Behavioural fingerprint per universe symbol (ENGINEERING_SPEC M3):
+    trendiness, gap-follow rate, range profile → stock_profile table.
+    Extracted from scripts/build_profiles.py so the scheduler can run it
+    weekly instead of depending on a Mac cron that never got installed
+    (table sat at 0 rows for weeks). Read-only + upserts; returns rows
+    written. Per-symbol failures skip that symbol."""
+    import level_pack
+    import stock_profile
+    asof = asof or datetime.now(IST).strftime('%Y-%m-%d')
+    tokens = dict(config.NIFTY50_INSTRUMENT_TOKENS)
+    tokens.update(getattr(config, 'NIFTY_NEXT50_INSTRUMENT_TOKENS', {}))
+
+    dailies = {}
+    for sym, token in tokens.items():
+        try:
+            market_data._instrument_cache[sym] = token
+            candles = market_data.get_candles(sym, '60minute',
+                                              days=lookback_days)
+            dailies[sym] = level_pack.daily_ohlc(candles)
+        except Exception as e:
+            print(f"[data_jobs.profiles] {sym} fetch failed: {e}")
+            dailies[sym] = []
+
+    trends, gaps = [], []
+    for sym, daily in dailies.items():
+        if len(daily) >= stock_profile.MIN_SAMPLES:
+            t = stock_profile.efficiency_ratio([d['close'] for d in daily])
+            g = stock_profile.gap_follow_rate(daily)['rate']
+            if t is not None:
+                trends.append(t)
+            if g is not None:
+                gaps.append(g)
+    universe_avg = {
+        'trendiness': round(sum(trends) / len(trends), 4) if trends else None,
+        'gap_follow_rate': round(sum(gaps) / len(gaps), 4) if gaps else None,
+    }
+
+    ok = 0
+    for sym, daily in dailies.items():
+        try:
+            row = stock_profile.build(sym, asof, daily, lookback_days,
+                                      universe_avg=universe_avg)
+            db.upsert_stock_profile(row)
+            ok += 1
+        except Exception as e:
+            print(f"[data_jobs.profiles] {sym} failed: {e}")
+    print(f"[data_jobs.profiles] built {ok}/{len(dailies)} profiles "
+          f"asof {asof}")
+    return ok
+
+
+def maybe_weekly_profiles(market_data) -> int:
+    """Run the profile builder once per ISO week (durable marker in
+    app_config 'profiles_week'). Called after the daily advisor run — the
+    first run of a new ISO week (usually Monday ~09:45, live token in hand)
+    rebuilds; every other call no-ops. Non-fatal by construction."""
+    try:
+        week = datetime.now(IST).strftime('%G-W%V')
+        if (db.get_config('profiles_week') or '') == week:
+            return 0
+        n = build_weekly_profiles(market_data)
+        if n:
+            db.write_config('profiles_week', week)
+        return n
+    except Exception as e:
+        print(f"[data_jobs.profiles] weekly job failed (non-fatal): {e}")
+        return 0
+
+
 def maybe_lock_inplay(market_data, universe: dict) -> int:
     """Lock today's in-play list once, at/after 09:30. Returns rows locked.
     Non-gating during the paper run — the list is recorded, not enforced."""
@@ -108,7 +179,16 @@ def maybe_lock_inplay(market_data, universe: dict) -> int:
         if not ranked:
             # Lock an explicit empty marker? No — leaving it unlocked lets a
             # later cycle retry (e.g. candles were thin at 09:30 sharp).
-            print("[data_jobs] No candidates cleared the RVOL bar — will retry next cycle")
+            # Diagnostics so a zero-lock day is explainable from the log
+            # alone (bug vs genuinely quiet tape) — 2026-07-13 burned an
+            # audit on exactly this ambiguity.
+            rvols = sorted((c['or_rvol'] for c in candidates
+                            if c.get('or_rvol') is not None), reverse=True)
+            print(f"[data_jobs] No candidates cleared the RVOL bar "
+                  f"(threshold {config.RVOL_THRESHOLD}; {len(candidates)} "
+                  f"scanned, {len(rvols)} with known RVOL, "
+                  f"top3 {[round(r, 2) for r in rvols[:3]]}) — will retry "
+                  f"next cycle")
             return 0
         return db.lock_inplay_list(today, ranked)
     except Exception as e:

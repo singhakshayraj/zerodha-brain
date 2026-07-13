@@ -128,10 +128,31 @@ def test_backtest_pass_asymmetric_horizons_and_alignment():
 def test_smoothed_last_price_ema3():
     md = MagicMock()
     md.get_candles.return_value = [
-        {'close': 100.0}, {'close': 110.0}, {'close': 90.0}]
+        {'close': 100.0, 'timestamp': '2026-07-14 09:15:00'},
+        {'close': 110.0, 'timestamp': '2026-07-14 09:30:00'},
+        {'close': 90.0, 'timestamp': '2026-07-14 09:45:00'}]
     # EMA(0.5): 100 -> 105 -> 97.5; one 90 flush can't drag the read to 90
-    assert pa.smoothed_last_price(md, 'NSE:X') == 97.5
+    assert pa.smoothed_last_price(md, 'NSE:X', today='2026-07-14') == 97.5
     md.get_candles.assert_called_once_with('NSE:X', '15minute', 3)
+
+
+def test_smoothed_last_price_never_blends_prior_session():
+    """Bug fix pin (2026-07-13): the 15-min fetch spans 3 CALENDAR days; at
+    09:45 only 1-2 of today's bars exist, and the old [-3:] slice blended
+    Friday's close into a gapped Monday read. Prior-day bars must be
+    discarded, and a day with no closed bar yet must fall back (None)."""
+    md = MagicMock()
+    md.get_candles.return_value = [
+        {'close': 500.0, 'timestamp': '2026-07-11 15:15:00'},  # Friday
+        {'close': 505.0, 'timestamp': '2026-07-11 15:30:00'},  # Friday
+        {'close': 450.0, 'timestamp': '2026-07-14 09:30:00'},  # Monday gap-down
+    ]
+    # Only Monday's bar counts — 450.0, not an EMA polluted by 505
+    assert pa.smoothed_last_price(md, 'NSE:X', today='2026-07-14') == 450.0
+    # No bar closed today yet -> None (caller uses raw LTP)
+    md.get_candles.return_value = [
+        {'close': 505.0, 'timestamp': '2026-07-11 15:30:00'}]
+    assert pa.smoothed_last_price(md, 'NSE:X', today='2026-07-14') is None
 
 
 def test_smoothed_last_price_fails_safe():

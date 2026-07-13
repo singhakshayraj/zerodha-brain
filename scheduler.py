@@ -98,8 +98,8 @@ def _maybe_token_preflight() -> None:
             print("[SCHEDULER] token preflight OK")
             return
         run_at = config.ADVISOR_RUN_AFTER_IST
-        print("[SCHEDULER] token preflight FAILED — alerting")
         if config.ADVISOR_TELEGRAM_BOT_TOKEN and config.ADVISOR_TELEGRAM_CHAT_ID:
+            print("[SCHEDULER] token preflight FAILED — alerting via Telegram")
             telegram.send_message(
                 config.ADVISOR_TELEGRAM_BOT_TOKEN,
                 config.ADVISOR_TELEGRAM_CHAT_ID,
@@ -155,6 +155,13 @@ def _maybe_run_advisor() -> None:
                 except Exception as e:
                     print(f"[SCHEDULER] advisor backtest failed "
                           f"(non-fatal): {e}")
+            # Weekly stock profiles (M3): first advisor run of a new ISO
+            # week rebuilds them — was a Mac cron that never got installed.
+            try:
+                import data_jobs
+                data_jobs.maybe_weekly_profiles(md)
+            except Exception as e:
+                print(f"[SCHEDULER] weekly profiles failed (non-fatal): {e}")
         except Exception as e:
             print(f"[SCHEDULER] advisor failed (non-fatal): {e}")
         finally:

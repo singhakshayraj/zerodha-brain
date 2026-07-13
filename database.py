@@ -772,8 +772,12 @@ def update_advice_outcome(run_date: str, symbol: str, outcome: dict) -> bool:
 
 def record_advice_decision(run_date: str, symbol: str, decision: str) -> bool:
     """Store the user's Accept/Decline tap on one advice row. Idempotent —
-    a re-tap overwrites with the latest choice. DECISION ONLY: one text
-    column changes; nothing here touches an order path."""
+    a re-tap overwrites with the latest choice, but ONLY while the row is
+    still unjudged: once the backtest has evaluated it (evaluated_at set),
+    the decision is frozen — a stale tap on an old digest can't move a call
+    between the accepted/declined track-record buckets after the outcome
+    was already scored against it. DECISION ONLY: one text column changes;
+    nothing here touches an order path."""
     if decision not in ('accept', 'decline'):
         return False
     try:
@@ -783,7 +787,11 @@ def record_advice_decision(run_date: str, symbol: str, decision: str) -> bool:
         now = datetime.now(pytz.timezone('Asia/Kolkata')).isoformat()
         res = (supabase.table('portfolio_advice')
                .update({'user_decision': decision, 'decided_at': now})
-               .eq('run_date', run_date).eq('symbol', symbol).execute())
+               .eq('run_date', run_date).eq('symbol', symbol)
+               .is_('evaluated_at', 'null').execute())
+        if not res.data:
+            print(f"[record_advice_decision] {run_date}/{symbol} rejected "
+                  f"(already evaluated or no such row)")
         return bool(res.data)
     except Exception as e:
         print(f"[record_advice_decision] {run_date}/{symbol} error: {e}")
