@@ -189,6 +189,10 @@ class TradingBrain:
         self._symbol_trades_today = {}   # symbol -> entries opened today
         self._hour_trades = {}           # IST hour -> entries opened
         self._entry_deferred_logged = set()  # (symbol, reason) dedup per day
+        # Last computed indicator state per symbol — reused as the exit-time
+        # snapshot (P4/exit-state) instead of recomputing TA inside the ~30s
+        # exit path. 'at'/'cycle' make staleness visible to analysis.
+        self._last_symbol_state = {}
         self._decision_ts = None        # REQ-073 decision→order clock
         self.last_context_log = None
         self.consecutive_losses = 0
@@ -725,6 +729,15 @@ class TradingBrain:
                     # every decision, promotes a HOLD only when enabled.
                     or_stats = inplay.opening_range_stats(candles_5min or [])
                     orb_snap = orb.orb_signal(live_price, or_stats)
+
+                    self._last_symbol_state[symbol] = {
+                        'indicators': signal.get('indicators'),
+                        'regime': signal.get('regime'),
+                        'action': signal.get('action'),
+                        'confidence': signal.get('confidence'),
+                        'cycle': current_cycle,
+                        'at': datetime.now(IST).isoformat(),
+                    }
 
                     decision_id = db.log_decision(
                         session_id=self.session_id,
@@ -1268,6 +1281,7 @@ class TradingBrain:
                 'pnl_percent': pnl_pct,
                 'r_multiple': _r_multiple(trade, pnl),
                 **self._excursion_fields(trade, result['price']),
+                **self._exit_state(symbol),
             }
             exec_exit = self._execution_exit(trade, result)
             if exec_exit:
@@ -1553,6 +1567,18 @@ class TradingBrain:
              'symbol_trades_today': self._symbol_trades_today.get(symbol, 0),
              'trades_executed': self.session_stats.get('trades_executed')},
         )
+
+    def _exit_state(self, symbol: str) -> dict:
+        """Exit-time indicator snapshot (P4/exit-state): the symbol's last
+        analysis-cycle state, attached to the close instead of recomputing
+        TA inside the exit path (which runs on a ~30s cadence and must stay
+        fast — cf. the archive_candles latency regression). Empty dict when
+        the symbol was never analyzed this process (e.g. resumed session
+        closing a position before its first cycle)."""
+        # getattr: some tests (and a hypothetical resumed half-built brain)
+        # exercise close paths on instances that skipped __init__.
+        s = getattr(self, '_last_symbol_state', {}).get(symbol)
+        return {'exit_state': s} if s else {}
 
     def _cooldown_gate(self, symbol: str) -> bool:
         """Entry guard. Returns True if the caller should SKIP this entry.
@@ -1923,6 +1949,7 @@ class TradingBrain:
                 'pnl_percent': pnl_pct,
                 'r_multiple': _r_multiple(trade, pnl),
                 **self._excursion_fields(trade, result['price']),
+                **self._exit_state(trade['symbol']),
             }
             exec_exit = self._execution_exit(trade, result)
             if exec_exit:
@@ -2068,6 +2095,7 @@ class TradingBrain:
                         'pnl': pnl,
                         'pnl_percent': pnl_pct,
                         'r_multiple': _r_multiple(t, pnl),
+                        **self._exit_state(t['symbol']),
                     })
 
         logger.info(

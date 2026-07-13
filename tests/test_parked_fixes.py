@@ -283,3 +283,17 @@ def test_inplay_no_fallback_outside_data_mode():
          patch.object(data_jobs.db, 'lock_inplay_list') as lock:
         assert data_jobs.maybe_lock_inplay(md, universe) == 0
     lock.assert_not_called()
+
+
+# ── P4 follow-through: exit-state snapshot (2026-07-14) ─────────────────────
+
+def test_exit_state_snapshot_from_last_analysis():
+    from brain import TradingBrain
+    b = TradingBrain()
+    assert b._exit_state('AAA') == {}      # never analyzed -> empty, no crash
+    b._last_symbol_state['AAA'] = {'indicators': {'rsi_14': 61},
+                                   'regime': 'TRENDING', 'action': 'HOLD',
+                                   'confidence': 70, 'cycle': 9, 'at': 't'}
+    out = b._exit_state('AAA')
+    assert out['exit_state']['indicators']['rsi_14'] == 61
+    assert out['exit_state']['cycle'] == 9  # staleness stays visible
