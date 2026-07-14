@@ -1206,6 +1206,58 @@ def get_inplay_symbols(date: str) -> list:
         return []
 
 
+def get_directional_decisions_for_date(run_date: str) -> list:
+    """BUY/SELL decisions for run_date not yet counterfactually labeled —
+    the decision_outcomes (Track C) work queue. Excludes decisions already
+    present in decision_outcomes so re-runs are cheap/idempotent."""
+    try:
+        res = (supabase.table('brain_decisions')
+               .select('id, symbol, signal, price_at_decision, indicators, created_at')
+               .in_('signal', ['BUY', 'SELL'])
+               .gte('created_at', f'{run_date}T00:00:00')
+               .lt('created_at', f'{run_date}T23:59:59.999999')
+               .execute())
+        rows = res.data or []
+        if not rows:
+            return []
+        ids = [r['id'] for r in rows]
+        done = (supabase.table('decision_outcomes').select('decision_id')
+                .in_('decision_id', ids).execute())
+        done_ids = {r['decision_id'] for r in (done.data or [])}
+        return [r for r in rows if r['id'] not in done_ids]
+    except Exception as e:
+        print(f"[get_directional_decisions_for_date] error: {e}")
+        return []
+
+
+def get_candles_for_symbol_from(symbol: str, after_ts: str, run_date: str) -> list:
+    """5-min bars for symbol on run_date at/after after_ts, oldest first —
+    the forward price-path a counterfactual decision_outcome walks."""
+    try:
+        res = (supabase.table('candles')
+               .select('ts, open, high, low, close')
+               .eq('symbol', symbol).eq('interval', '5minute')
+               .eq('trade_date', run_date)
+               .gte('ts', after_ts)
+               .order('ts').execute())
+        return res.data or []
+    except Exception as e:
+        print(f"[get_candles_for_symbol_from] error: {e}")
+        return []
+
+
+def insert_decision_outcome(row: dict) -> bool:
+    """One counterfactual outcome row (Track C) — plain insert, decision_id
+    is unique so a re-run of an already-labeled decision fails loudly
+    rather than silently duplicating."""
+    try:
+        supabase.table('decision_outcomes').insert(row).execute()
+        return True
+    except Exception as e:
+        print(f"[insert_decision_outcome] error for {row.get('decision_id')}: {e}")
+        return False
+
+
 def add_holdings_to_universe(holdings: list) -> None:
     for h in holdings:
         try:
