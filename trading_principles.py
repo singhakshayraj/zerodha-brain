@@ -120,48 +120,6 @@ class TradingPrinciples:
             return capital * 0.15
 
     @staticmethod
-    def calculate_position_size(
-        capital: float,
-        entry_price: float,
-        stop_loss_price: float,
-        win_rate: float,
-        avg_win: float,
-        avg_loss: float,
-        slippage_percent: float = 0.005,
-        commission_percent: float = 0.001,
-    ) -> int:
-        try:
-            kelly_f = TradingPrinciples.kelly_fraction(
-                win_rate, avg_win, avg_loss, safety_multiplier=0.33
-            )
-
-            risk_amount = capital * kelly_f
-            adjusted_entry = entry_price * (1 + slippage_percent)
-            stop_distance = adjusted_entry - stop_loss_price
-
-            if stop_distance <= 0:
-                print(f"[position_size] Invalid stop loss")
-                return 0
-
-            quantity = risk_amount / stop_distance
-
-            max_per_trade = capital * 0.15 / entry_price
-            min_per_trade = 1
-
-            final_quantity = int(max(min_per_trade, min(quantity, max_per_trade)))
-
-            print(
-                f"[position_size] Kelly={kelly_f:.2%}, "
-                f"risk={risk_amount:.0f}, qty={final_quantity}"
-            )
-
-            return final_quantity
-
-        except Exception as e:
-            print(f"[position_size] Error: {e}")
-            return 0
-
-    @staticmethod
     def should_continue_trading(
         current_session_pnl: float,
         session_capital: float,
@@ -237,51 +195,6 @@ class TradingPrinciples:
         except Exception as e:
             print(f"[adjust_confidence] Error: {e}")
             return base_confidence
-
-    @staticmethod
-    def estimate_slippage(
-        stock_price: float,
-        volatility: float = 1.0,
-        quantity: int = 100,
-        market_condition: str = 'normal',
-    ) -> float:
-        try:
-            base_slippage_percent = 0.005
-            volatility_factor = 1.0 + (volatility / 100.0)
-            size_factor = 1.0 + (quantity / 1000.0)
-
-            condition_factors = {
-                'opening': 1.5,
-                'closing': 1.2,
-                'normal': 1.0,
-                'lunch': 0.8,
-            }
-
-            condition_factor = condition_factors.get(market_condition, 1.0)
-
-            total_slippage_percent = (
-                base_slippage_percent
-                * volatility_factor
-                * size_factor
-                * condition_factor
-            )
-
-            slippage_rupees = stock_price * total_slippage_percent
-            max_slippage = stock_price * 0.05
-            final_slippage = min(slippage_rupees, max_slippage)
-
-            print(
-                f"[slippage] Rs{stock_price} x {quantity} shares, "
-                f"volatility {volatility:.1f}%, "
-                f"condition={market_condition} "
-                f"-> slippage Rs{final_slippage:.2f}"
-            )
-
-            return final_slippage
-
-        except Exception as e:
-            print(f"[slippage] Error: {e}")
-            return stock_price * 0.005
 
     @staticmethod
     def is_tradeable_indian_stock(

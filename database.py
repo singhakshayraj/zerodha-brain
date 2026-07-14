@@ -672,13 +672,21 @@ def upsert_candles(rows: list) -> int:
     instead of one-per-symbol (that per-symbol version added ~7s/cycle in
     prod, slowing stop detection). quote_snapshots keeps only last-price;
     this keeps the actual bars, the substrate for a replay/backtest harness
-    (M5) and price-action models that can't be reliably re-fetched later."""
+    (M5) and price-action models that can't be reliably re-fetched later.
+
+    Rows are deduped on (symbol, interval, ts) first — a symbol analyzed
+    twice in one cycle (holdings AND nifty50 universe entries) produces the
+    same bars twice, and Postgres rejects a single upsert that touches one
+    row twice ('cannot affect row a second time'), losing the WHOLE batch.
+    Seen live 2026-07-14: 141-row cycles archived nothing."""
     if not rows:
         return 0
     try:
+        deduped = list({(r['symbol'], r['interval'], str(r['ts'])): r
+                        for r in rows}.values())
         supabase.table('candles').upsert(
-            rows, on_conflict='symbol,interval,ts').execute()
-        return len(rows)
+            deduped, on_conflict='symbol,interval,ts').execute()
+        return len(deduped)
     except Exception as e:
         print(f"[upsert_candles] error ({len(rows)} rows): {e}")
         return 0

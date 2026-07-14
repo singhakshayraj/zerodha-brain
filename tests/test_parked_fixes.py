@@ -297,3 +297,24 @@ def test_exit_state_snapshot_from_last_analysis():
     out = b._exit_state('AAA')
     assert out['exit_state']['indicators']['rsi_14'] == 61
     assert out['exit_state']['cycle'] == 9  # staleness stays visible
+
+
+# ── candle-archive dedup (found live 2026-07-14) ────────────────────────────
+
+def test_upsert_candles_dedups_within_batch():
+    """A symbol analyzed twice in one cycle duplicates its bars; Postgres
+    rejects an upsert touching one row twice and the WHOLE batch was lost
+    (candles_today=0 on 2026-07-14 until this fix)."""
+    row = {'symbol': 'X', 'interval': '5minute', 'ts': '2026-07-14 10:00:00',
+           'close': 1}
+    sent = {}
+    tbl = MagicMock()
+    tbl.upsert.side_effect = lambda rows, **kw: sent.update(
+        {'rows': rows}) or MagicMock(execute=MagicMock())
+    with patch.object(db, 'supabase') as sb:
+        sb.table.return_value = tbl
+        n = db.upsert_candles([row, dict(row), dict(row, symbol='Y')])
+    assert n == 2                                  # deduped
+    assert len(sent['rows']) == 2
+    keys = {(r['symbol'], r['ts']) for r in sent['rows']}
+    assert keys == {('X', '2026-07-14 10:00:00'), ('Y', '2026-07-14 10:00:00')}
