@@ -20,13 +20,14 @@ def test_decision_update_filters_unevaluated_rows_only():
     chain = MagicMock()
     chain.execute.return_value = MagicMock(data=[{'id': 1}])
     tbl = MagicMock()
-    tbl.update.return_value.eq.return_value.eq.return_value \
+    tbl.update.return_value.eq.return_value.eq.return_value.eq.return_value \
         .is_.return_value = chain
     with patch.object(db, 'supabase') as sb:
         sb.table.return_value = tbl
         assert db.record_advice_decision('2026-07-14', 'NTPC', 'accept') is True
-    # the update chain MUST scope to evaluated_at IS NULL
-    tbl.update.return_value.eq.return_value.eq.return_value \
+    # the update chain MUST scope to is_official (2026-07-14 intraday
+    # snapshots) AND evaluated_at IS NULL
+    tbl.update.return_value.eq.return_value.eq.return_value.eq.return_value \
         .is_.assert_called_once_with('evaluated_at', 'null')
 
 
@@ -34,7 +35,7 @@ def test_decision_update_rejected_when_already_evaluated():
     chain = MagicMock()
     chain.execute.return_value = MagicMock(data=[])   # filter matched 0 rows
     tbl = MagicMock()
-    tbl.update.return_value.eq.return_value.eq.return_value \
+    tbl.update.return_value.eq.return_value.eq.return_value.eq.return_value \
         .is_.return_value = chain
     with patch.object(db, 'supabase') as sb:
         sb.table.return_value = tbl

@@ -227,18 +227,8 @@ def test_preflight_skips_weekend():
     tok.assert_not_called()
 
 
-def test_advisor_gate_moved_to_0945():
-    """The daily advisor no longer fires in the 09:20–09:44 noise window."""
-    scheduler._advisor_date = None
-    scheduler._advisor_running = False
-    with patch.object(scheduler, 'datetime') as dt, \
-         patch.object(scheduler.db, 'get_config', return_value=''), \
-         patch.object(scheduler.db, 'get_enc_token') as tok, \
-         patch.object(config, 'QA_MODE', False):
-        dt.now.return_value = _at(9, 30)
-        scheduler._maybe_run_advisor()
-        tok.assert_not_called()              # gated: too early now
-        dt.now.return_value = _at(9, 46)
-        with patch.object(scheduler, '_token_is_live', return_value=False):
-            scheduler._maybe_run_advisor()
-        tok.assert_called()                  # gate opens at 09:45
+# test_advisor_gate_moved_to_0945 moved to test_advisor_trigger.py
+# (test_outside_window_no_official_yet_no_trigger /
+# test_first_run_after_window_fires_official) — that file now owns all
+# _maybe_run_advisor gating coverage with the DB-backed dedup mocks the
+# 2026-07-14 rewrite requires.

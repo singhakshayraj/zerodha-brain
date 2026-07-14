@@ -139,7 +139,7 @@ def test_run_advisor_attaches_rotation_when_enabled():
          patch.object(pa, 'news_sentiment', return_value=None), \
          patch.object(pa.db, 'get_tradebook', return_value=[]), \
          patch.object(pa.db, 'upsert_tradebook', return_value=0), \
-         patch.object(pa.db, 'upsert_portfolio_advice', side_effect=capture):
+         patch.object(pa.db, 'write_official_portfolio_advice', side_effect=capture):
         n = pa.run_advisor(md)
 
     assert n == 1
@@ -161,7 +161,7 @@ def test_run_advisor_rotation_dark_by_default():
          patch.object(pa, 'news_sentiment', return_value=None), \
          patch.object(pa.db, 'get_tradebook', return_value=[]), \
          patch.object(pa.db, 'upsert_tradebook', return_value=0), \
-         patch.object(pa.db, 'upsert_portfolio_advice', return_value=1):
+         patch.object(pa.db, 'write_official_portfolio_advice', return_value=1):
         pa.run_advisor(md)
     scan.assert_not_called()
 
@@ -173,7 +173,7 @@ def test_run_advisor_rotation_failure_never_blocks_verdicts():
          patch.object(pa, 'news_sentiment', return_value=None), \
          patch.object(pa.db, 'get_tradebook', return_value=[]), \
          patch.object(pa.db, 'upsert_tradebook', return_value=0), \
-         patch.object(pa.db, 'upsert_portfolio_advice', return_value=1) as up:
+         patch.object(pa.db, 'write_official_portfolio_advice', return_value=1) as up:
         n = pa.run_advisor(md)
     assert n == 1
     assert 'rotation_target_symbol' not in up.call_args.args[0][0]

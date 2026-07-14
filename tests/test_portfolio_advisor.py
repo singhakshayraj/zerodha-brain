@@ -89,7 +89,7 @@ def test_run_advisor_stores_rows_and_places_nothing():
     md = _md([{'tradingsymbol': 'INFY', 'exchange': 'NSE', 'quantity': 5,
                'average_price': 1500.0, 'last_price': 1074.0}],
              _candles(250, start=1500, step=-1.5))
-    with patch.object(pa.db, 'upsert_portfolio_advice',
+    with patch.object(pa.db, 'write_official_portfolio_advice',
                       side_effect=lambda rows: len(rows)) as up:
         n = pa.run_advisor(md)
     assert n == 1
@@ -119,7 +119,7 @@ def test_run_advisor_skips_zero_qty_and_survives_symbol_failure():
         return good
 
     md.get_candles.side_effect = candles_for
-    with patch.object(pa.db, 'upsert_portfolio_advice',
+    with patch.object(pa.db, 'write_official_portfolio_advice',
                       side_effect=lambda rows: len(rows)):
         n = pa.run_advisor(md)
     assert n == 1   # only GOOD; SOLD skipped, BROKEN failed but didn't abort
@@ -311,6 +311,94 @@ def test_run_advisor_seeds_instrument_token_cache():
          'instrument_token': 408065},
     ]
     md.get_candles.return_value = _candles(250, start=1500, step=-1.5)
-    with patch.object(pa.db, 'upsert_portfolio_advice', side_effect=lambda r: len(r)):
+    with patch.object(pa.db, 'write_official_portfolio_advice', side_effect=lambda r: len(r)):
         pa.run_advisor(md)
     assert md._instrument_cache.get('NSE:INFY') == 408065
+
+
+# --- run_advisor_lite (2026-07-14 intraday refresh) ------------------------
+
+def test_run_advisor_lite_stores_snapshot_rows_not_official():
+    md = _md([{'tradingsymbol': 'INFY', 'exchange': 'NSE', 'quantity': 5,
+               'average_price': 1500.0, 'last_price': 1074.0}],
+             _candles(250, start=1500, step=-1.5))
+    with patch.object(pa.db, 'insert_portfolio_advice_snapshot',
+                      side_effect=lambda rows: len(rows)) as ins, \
+         patch.object(pa.db, 'get_official_advice_for_date', return_value=[]), \
+         patch.object(pa.db, 'get_tradebook', return_value=[]):
+        n = pa.run_advisor_lite(md)
+    assert n == 1
+    row = ins.call_args.args[0][0]
+    assert row['is_official'] is False
+    assert 'run_id' in row
+    # advisory only — no order-path method was ever touched
+    for name in ('place_buy_order', 'place_sell_order', 'place_order'):
+        assert not getattr(md.kite, name).called
+
+
+def test_run_advisor_lite_never_rescans_rotation_or_sends_digest():
+    md = _md([{'tradingsymbol': 'INFY', 'exchange': 'NSE', 'quantity': 5,
+               'average_price': 1500.0, 'last_price': 1074.0}],
+             _candles(250, start=1500, step=-1.5))
+    with patch.object(pa.db, 'insert_portfolio_advice_snapshot',
+                      side_effect=lambda rows: len(rows)), \
+         patch.object(pa.db, 'get_official_advice_for_date', return_value=[]), \
+         patch.object(pa.db, 'get_tradebook', return_value=[]), \
+         patch.object(pa, 'score_universe') as scan, \
+         patch.object(pa, 'send_daily_digest') as digest:
+        pa.run_advisor_lite(md)
+    scan.assert_not_called()
+    digest.assert_not_called()
+
+
+def test_run_advisor_lite_carries_forward_rotation_from_official_row():
+    md = _md([{'tradingsymbol': 'NTPC', 'exchange': 'NSE', 'quantity': 5,
+               'average_price': 100.0, 'last_price': 90.0}],
+             _candles(250, start=100, step=-1.0))
+    official_row = {
+        'symbol': 'NTPC', 'rotation_target_symbol': 'PSU_GOLD',
+        'rotation_target_score': 70, 'rotation_reason': 'same_sector',
+        'rotation_sell_qty': 5, 'rotation_freed_inr': 450.0,
+        'rotation_buy_qty': 4, 'rotation_buy_price': 112.0,
+    }
+    with patch.object(pa.db, 'insert_portfolio_advice_snapshot',
+                      side_effect=lambda rows: len(rows)) as ins, \
+         patch.object(pa.db, 'get_official_advice_for_date',
+                      return_value=[official_row]), \
+         patch.object(pa.db, 'get_tradebook', return_value=[]):
+        pa.run_advisor_lite(md)
+    row = ins.call_args.args[0][0]
+    assert row['rotation_target_symbol'] == 'PSU_GOLD'
+    assert row['rotation_target_score'] == 70
+    assert row['rotation_buy_qty'] == 4
+
+
+def test_run_advisor_lite_no_holdings():
+    md = MagicMock()
+    md.kite.get_holdings.return_value = []
+    assert pa.run_advisor_lite(md) == 0
+
+
+def test_run_advisor_lite_skips_zero_qty_and_survives_symbol_failure():
+    md = MagicMock()
+    md.kite.get_holdings.return_value = [
+        {'tradingsymbol': 'SOLD', 'quantity': 0},
+        {'tradingsymbol': 'BROKEN', 'quantity': 5, 'average_price': 10,
+         'last_price': 9},
+        {'tradingsymbol': 'GOOD', 'quantity': 5, 'average_price': 10,
+         'last_price': 12},
+    ]
+    good = _candles(250, start=10, step=0.05)
+
+    def candles_for(key, interval, days):
+        if 'BROKEN' in key:
+            raise RuntimeError('boom')
+        return good
+
+    md.get_candles.side_effect = candles_for
+    with patch.object(pa.db, 'insert_portfolio_advice_snapshot',
+                      side_effect=lambda rows: len(rows)), \
+         patch.object(pa.db, 'get_official_advice_for_date', return_value=[]), \
+         patch.object(pa.db, 'get_tradebook', return_value=[]):
+        n = pa.run_advisor_lite(md)
+    assert n == 1   # only GOOD; SOLD skipped, BROKEN failed but didn't abort

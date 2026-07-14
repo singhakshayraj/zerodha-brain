@@ -794,10 +794,13 @@ def append_decision_skip(decision_id: str, reason: str) -> bool:
 
 def get_unevaluated_advice(max_run_date: str) -> list:
     """Advice rows old enough to judge (run_date <= max_run_date) that have
-    no outcome yet — the backtest work queue."""
+    no outcome yet — the backtest work queue. Scoped to is_official: the
+    intraday refresh (2026-07-14) writes several extra snapshot rows per
+    symbol/day, and only the one official daily row is backtest-eligible."""
     try:
         res = (supabase.table('portfolio_advice').select('*')
                .is_('evaluated_at', 'null')
+               .eq('is_official', True)
                .lte('run_date', max_run_date)
                .order('run_date').execute())
         return res.data or []
@@ -807,10 +810,13 @@ def get_unevaluated_advice(max_run_date: str) -> list:
 
 
 def update_advice_outcome(run_date: str, symbol: str, outcome: dict) -> bool:
-    """Write one row's realized outcome (evaluated_at + outcome_* columns)."""
+    """Write one row's realized outcome (evaluated_at + outcome_* columns).
+    Scoped to is_official so this can't ever touch an intraday snapshot row
+    sharing the same (run_date, symbol)."""
     try:
         (supabase.table('portfolio_advice').update(outcome)
-         .eq('run_date', run_date).eq('symbol', symbol).execute())
+         .eq('run_date', run_date).eq('symbol', symbol)
+         .eq('is_official', True).execute())
         return True
     except Exception as e:
         print(f"[update_advice_outcome] {run_date}/{symbol} error: {e}")
@@ -835,6 +841,7 @@ def record_advice_decision(run_date: str, symbol: str, decision: str) -> bool:
         res = (supabase.table('portfolio_advice')
                .update({'user_decision': decision, 'decided_at': now})
                .eq('run_date', run_date).eq('symbol', symbol)
+               .eq('is_official', True)
                .is_('evaluated_at', 'null').execute())
         if not res.data:
             print(f"[record_advice_decision] {run_date}/{symbol} rejected "
@@ -846,13 +853,16 @@ def record_advice_decision(run_date: str, symbol: str, decision: str) -> bool:
 
 
 def get_evaluated_advice() -> list:
-    """All judged advice rows — the advisor's track record."""
+    """All judged advice rows — the advisor's track record. is_official is
+    redundant here in practice (only official rows are ever evaluated — see
+    get_unevaluated_advice) but kept explicit for clarity."""
     try:
         return _fetch_all(
             supabase.table('portfolio_advice')
             .select('run_date, symbol, verdict, trend_score, quantity, '
                     'last_price, outcome_return_pct, outcome_vs_nifty_pct, '
                     'outcome_correct, evaluated_at, user_decision')
+            .eq('is_official', True)
             .not_.is_('evaluated_at', 'null')
             .order('run_date'))
     except Exception as e:
@@ -860,18 +870,81 @@ def get_evaluated_advice() -> list:
         return []
 
 
-def upsert_portfolio_advice(rows: list) -> int:
-    """One advisory row per (run_date, symbol); a same-day re-run overwrites so
-    the day's advice reflects the latest analysis."""
+def write_official_portfolio_advice(rows: list) -> int:
+    """The day's ONE canonical advisory batch (rotation scan + digest +
+    backtest-eligible) — is_official=True on every row. Same-day re-run
+    (manual force-trigger) replaces the prior official batch rather than
+    upserting per-row, since there is no longer a (run_date, symbol) unique
+    constraint (intraday snapshot rows share that key many times a day)."""
+    if not rows:
+        return 0
+    run_date = rows[0].get('run_date')
+    try:
+        if run_date:
+            (supabase.table('portfolio_advice').delete()
+             .eq('run_date', run_date).eq('is_official', True).execute())
+        supabase.table('portfolio_advice').insert(rows).execute()
+        return len(rows)
+    except Exception as e:
+        print(f"[write_official_portfolio_advice] error ({len(rows)} rows): {e}")
+        return 0
+
+
+def insert_portfolio_advice_snapshot(rows: list) -> int:
+    """One intraday refresh batch (is_official=False) — plain append, never
+    overwrites. Each call is a new timestamped snapshot so the dataset
+    accrues an intraday time series per holding."""
     if not rows:
         return 0
     try:
-        supabase.table('portfolio_advice').upsert(
-            rows, on_conflict='run_date,symbol').execute()
+        supabase.table('portfolio_advice').insert(rows).execute()
         return len(rows)
     except Exception as e:
-        print(f"[upsert_portfolio_advice] error ({len(rows)} rows): {e}")
+        print(f"[insert_portfolio_advice_snapshot] error ({len(rows)} rows): {e}")
         return 0
+
+
+def get_official_advice_for_date(run_date: str) -> list:
+    """Today's official advice rows, keyed by symbol by the caller — used by
+    the intraday lite refresh to carry forward rotation targets without
+    rescanning the Nifty 500 every 5 minutes."""
+    try:
+        res = (supabase.table('portfolio_advice').select('*')
+               .eq('run_date', run_date).eq('is_official', True).execute())
+        return res.data or []
+    except Exception as e:
+        print(f"[get_official_advice_for_date] error: {e}")
+        return []
+
+
+def has_official_advisor_run(run_date: str) -> bool:
+    """Whether today's official (once-daily, backtest-eligible) advisor batch
+    has already been written — the DB is the source of truth for this dedup,
+    not an in-memory flag, so it survives a Railway redeploy mid-day."""
+    try:
+        res = (supabase.table('portfolio_advice').select('run_date')
+               .eq('run_date', run_date).eq('is_official', True)
+               .limit(1).execute())
+        return bool(res.data)
+    except Exception as e:
+        print(f"[has_official_advisor_run] error: {e}")
+        return False
+
+
+def get_last_advisor_run_time(run_date: str):
+    """Timestamp of the most recent advisor write today (official or
+    intraday snapshot) — drives the intraday refresh interval gate. Returns
+    None if nothing has run yet today."""
+    try:
+        res = (supabase.table('portfolio_advice').select('created_at')
+               .eq('run_date', run_date)
+               .order('created_at', desc=True).limit(1).execute())
+        if res.data:
+            return res.data[0]['created_at']
+        return None
+    except Exception as e:
+        print(f"[get_last_advisor_run_time] error: {e}")
+        return None
 
 
 def recent_news_for_symbol(symbol: str, before_iso: str, limit: int = 3) -> list:

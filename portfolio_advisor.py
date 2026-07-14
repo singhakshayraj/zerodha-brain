@@ -20,6 +20,7 @@ Verdicts:
   INSUFFICIENT    — not enough daily history to say anything honest.
 """
 import time
+import uuid
 from datetime import datetime
 
 import pytz
@@ -847,7 +848,107 @@ def run_advisor(market_data) -> int:
         except Exception as e:
             print(f"[advisor] rotation pass failed (non-fatal): {e}")
 
-    n = db.upsert_portfolio_advice(rows)
-    print(f"[advisor] stored {n} recommendations for {run_date}")
+    run_id = str(uuid.uuid4())
+    for row in rows:
+        row['is_official'] = True
+        row['run_id'] = run_id
+    n = db.write_official_portfolio_advice(rows)
+    print(f"[advisor] stored {n} recommendations for {run_date} (official, run_id={run_id})")
     send_daily_digest(rows, run_date)   # non-fatal by construction
+    return n
+
+
+def run_advisor_lite(market_data) -> int:
+    """Intraday re-score of the holdings (2026-07-14): fresh price/indicators
+    only, no Nifty-500 rotation rescan (that's a ~3min/484-name scan, far too
+    expensive for a 5-min cadence and unnecessary — rotation targets don't
+    meaningfully change within minutes), no digest (would spam Telegram every
+    interval), not backtest-eligible (is_official=False). Rotation fields are
+    carried forward unchanged from today's official row so the UI still shows
+    a 'rotate into X' chip between official runs. ADVISORY ONLY, same as
+    run_advisor(). Per-symbol failures skip that symbol, never abort the run."""
+    try:
+        holdings = market_data.kite.get_holdings() or []
+    except Exception as e:
+        print(f"[advisor.lite] holdings fetch failed: {e}")
+        return 0
+    if not holdings:
+        return 0
+
+    for h in holdings:
+        tsym = h.get('tradingsymbol')
+        token = h.get('instrument_token')
+        if tsym and token:
+            key = f"{h.get('exchange') or 'NSE'}:{tsym}"
+            market_data._instrument_cache[key] = token
+
+    history = tradebook_stats(db.get_tradebook())
+
+    nifty_closes = []
+    nifty_candles = []
+    try:
+        market_data._instrument_cache['NSE:NIFTY 50'] = NIFTY50_INDEX_TOKEN
+        nifty_candles = completed_bars(
+            market_data.get_candles('NSE:NIFTY 50', 'day', 400) or [])
+        nifty_closes = [float(c['close']) for c in nifty_candles
+                        if c.get('close') is not None]
+    except Exception as e:
+        print(f"[advisor.lite] nifty benchmark unavailable (non-fatal): {e}")
+
+    regime_info = market_regime.get_market_regime(nifty_candles)
+    regime = regime_info['regime']
+
+    total_value = sum(
+        (h.get('quantity') or 0) * (h.get('last_price') or 0) for h in holdings
+    )
+
+    run_date = datetime.now(IST).date().isoformat()
+    today_official = {
+        r['symbol']: r for r in db.get_official_advice_for_date(run_date)
+    }
+    rows = []
+    for h in holdings:
+        tsym = h.get('tradingsymbol')
+        qty = h.get('quantity') or 0
+        if not tsym or qty <= 0:
+            continue
+        exch = h.get('exchange') or 'NSE'
+        try:
+            key = f'{exch}:{tsym}'
+            candles = market_data.get_candles(key, 'day', 400)
+            weight_pct = (round(qty * (h.get('last_price') or 0)
+                                / total_value * 100, 1) if total_value else None)
+            last_price = h.get('last_price')
+            if config.ADVISOR_PRICE_SMOOTHING_ENABLED:
+                smoothed = smoothed_last_price(market_data, key)
+                if smoothed:
+                    last_price = smoothed
+            advice = advise({
+                'symbol': tsym,
+                'quantity': qty,
+                'average_price': h.get('average_price'),
+                'last_price': last_price,
+            }, candles or [], history=history.get(tsym),
+               nifty_closes=nifty_closes, portfolio_weight_pct=weight_pct,
+               news_sent=news_sentiment(tsym), regime=regime)
+            # Carry forward today's rotation read rather than rescanning.
+            official = today_official.get(tsym)
+            if official:
+                for k in ('rotation_target_symbol', 'rotation_target_score',
+                          'rotation_reason', 'rotation_sell_qty',
+                          'rotation_freed_inr', 'rotation_buy_qty',
+                          'rotation_buy_price'):
+                    if official.get(k) is not None:
+                        advice[k] = official[k]
+            rows.append({'run_date': run_date, **advice})
+        except Exception as e:
+            print(f"[advisor.lite] {tsym} failed (skipped): {e}")
+
+    run_id = str(uuid.uuid4())
+    for row in rows:
+        row['is_official'] = False
+        row['run_id'] = run_id
+    n = db.insert_portfolio_advice_snapshot(rows)
+    print(f"[advisor.lite] stored {n} intraday snapshots for {run_date} "
+          f"(run_id={run_id})")
     return n

@@ -498,6 +498,17 @@ ADVISOR_PRICE_SMOOTHING_ENABLED = os.getenv(
 # Pre-flight token health check: this early in the morning the user can still
 # fix a dead enc_token before the advisor run needs it.
 ADVISOR_PREFLIGHT_IST = os.getenv('ADVISOR_PREFLIGHT_IST', '09:16').strip()
+# Intraday refresh (2026-07-14): the FIRST run of the day past
+# ADVISOR_RUN_AFTER_IST is the "official" run (full: rotation scan, digest,
+# backtest-eligible). Every ADVISOR_REFRESH_INTERVAL_SECONDS after that, a
+# lightweight re-score of the holdings (fresh price/indicators only, no
+# rotation rescan/digest) is stored so the UI always has a current-market
+# read and the dataset accrues an intraday time series. 300s matches the
+# existing intraday-watch cadence and the daily-candle cache TTL (market_data
+# 'day' interval defaults to 300s) — a shorter interval would mostly re-serve
+# the same cached candle anyway.
+ADVISOR_REFRESH_INTERVAL_SECONDS = int(
+    os.getenv('ADVISOR_REFRESH_INTERVAL_SECONDS', '300'))
 
 # ── Advisor Telegram (Portfolio Advisor phases 4-5) ─────────────────────────
 # A SEPARATE bot from the watchdog's TELEGRAM_BOT_TOKEN — infra alerts and

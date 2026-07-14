@@ -92,7 +92,7 @@ def test_send_digest_failure_never_reaches_run_advisor():
          patch.object(pa, 'news_sentiment', return_value=None), \
          patch.object(pa.db, 'get_tradebook', return_value=[]), \
          patch.object(pa.db, 'upsert_tradebook', return_value=0), \
-         patch.object(pa.db, 'upsert_portfolio_advice', return_value=1) as up:
+         patch.object(pa.db, 'write_official_portfolio_advice', return_value=1) as up:
         try:
             n = pa.run_advisor(md)
         except Exception:

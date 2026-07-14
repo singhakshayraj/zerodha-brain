@@ -59,8 +59,13 @@ def _token_is_live(token: str) -> bool:
         return True
 
 
-# Portfolio advisor dedup: the ISO date it last ran, so it fires once per day.
-_advisor_date = None
+# Portfolio advisor concurrency guard only — dedup itself is DB-backed
+# (db.has_official_advisor_run / get_last_advisor_run_time), not an in-memory
+# flag. 2026-07-14: the old in-memory `_advisor_date` was set BEFORE the run
+# executed, so a transient failure (e.g. holdings fetch hiccup) still
+# consumed the day's one attempt with zero rows written and no retry until a
+# lucky redeploy reset the flag. DB-backed dedup fixes both that and the
+# redeploy-fragility in one move.
 _advisor_running = False
 _preflight_date = None
 
@@ -109,35 +114,78 @@ def _maybe_token_preflight() -> None:
         print(f"[SCHEDULER] token preflight errored (non-fatal): {e}")
 
 
+def _now_ist() -> datetime:
+    """Isolates 'current time' behind a plain function so tests can patch
+    just this, leaving the real datetime class (which _parse_iso_dt below
+    needs for fromisoformat/isinstance) untouched."""
+    return datetime.now(IST)
+
+
+def _parse_iso_dt(value) -> "datetime | None":
+    """created_at from Supabase comes back as an ISO string; tolerate a
+    datetime too. Returns None on anything unparseable rather than raising —
+    a bad timestamp should degrade to 'run again', never crash the loop."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else IST.localize(value)
+    try:
+        dt = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+        return dt.astimezone(IST) if dt.tzinfo else IST.localize(dt)
+    except Exception:
+        return None
+
+
 def _maybe_run_advisor() -> None:
-    """Daily portfolio advisory (ADVISORY ONLY — no orders). Fires once per
-    day after ADVISOR_RUN_AFTER_IST (09:45 — past the opening-bell noise
-    window) when a token exists and probes live. A manual trigger
-    (app_config 'advisor_run_now'=='true') bypasses the time gate and the
-    once-per-day dedup, for an on-demand run outside the window — set from the
+    """Portfolio advisory (ADVISORY ONLY — no orders).
+
+    The FIRST run of the day, once past ADVISOR_RUN_AFTER_IST (09:45 — past
+    the opening-bell noise window) with a live token, is the "official" run:
+    full analysis + Nifty-500 rotation scan + Telegram digest +
+    backtest-eligible. Every ADVISOR_REFRESH_INTERVAL_SECONDS after that
+    (2026-07-14, until market close), a lightweight intraday re-score fires
+    instead — fresh price/verdict stored as a new snapshot row, no rotation
+    rescan/digest — so the UI always reflects current market data and the
+    dataset accrues an intraday time series per holding.
+
+    A manual trigger (app_config 'advisor_run_now'=='true') forces an
+    official-style run immediately regardless of gates — on-demand, from the
     dashboard or directly in app_config; cleared immediately so it fires once.
     Runs on a daemon thread so the scheduler loop never waits on candle
-    fetches. Skipped in QA (synthetic market has no real holdings)."""
-    global _advisor_date, _advisor_running
+    fetches. Skipped in QA (synthetic market has no real holdings) and on
+    non-trading days."""
+    global _advisor_running
     if config.QA_MODE or _advisor_running:
         return
-    now = datetime.now(IST)
+    now = _now_ist()
     today = now.date().isoformat()
+    if now.weekday() > 4 or today in config.NSE_HOLIDAYS:
+        return
 
     forced = (db.get_config('advisor_run_now') or '').strip().lower() == 'true'
     if forced:
         db.write_config('advisor_run_now', '')  # consume — fires once
-    elif _advisor_date == today:
-        return
+        is_official_run = True
     else:
-        rh, rm = _parse_hhmm(config.ADVISOR_RUN_AFTER_IST, (9, 45))
-        if (now.hour, now.minute) < (rh, rm):
-            return
+        have_official = db.has_official_advisor_run(today)
+        if not have_official:
+            rh, rm = _parse_hhmm(config.ADVISOR_RUN_AFTER_IST, (9, 45))
+            if (now.hour, now.minute) < (rh, rm):
+                return
+            is_official_run = True
+        else:
+            ch, cm = config.MARKET_CLOSE_HOUR, config.MARKET_CLOSE_MINUTE
+            if (now.hour, now.minute) >= (ch, cm):
+                return
+            last_run_at = _parse_iso_dt(db.get_last_advisor_run_time(today))
+            if last_run_at and (now - last_run_at).total_seconds() \
+                    < config.ADVISOR_REFRESH_INTERVAL_SECONDS:
+                return
+            is_official_run = False
 
     token = db.get_enc_token()
     if not token or not _token_is_live(token):
         return
-    _advisor_date = today
     _advisor_running = True
 
     def _run():
@@ -146,23 +194,27 @@ def _maybe_run_advisor() -> None:
             import portfolio_advisor
             from market_data import MarketData
             md = MarketData(KiteClient(token))
-            n = portfolio_advisor.run_advisor(md)
-            print(f"[SCHEDULER] advisor done: {n} holdings analyzed")
-            if config.ADVISOR_BACKTEST_ENABLED:
+            if is_official_run:
+                n = portfolio_advisor.run_advisor(md)
+                print(f"[SCHEDULER] advisor (official) done: {n} holdings analyzed")
+                if config.ADVISOR_BACKTEST_ENABLED:
+                    try:
+                        import advisor_backtest
+                        advisor_backtest.run_backtest_pass(md)
+                    except Exception as e:
+                        print(f"[SCHEDULER] advisor backtest failed "
+                              f"(non-fatal): {e}")
+                # Weekly stock profiles (M3): no-ops during market hours (the
+                # builder refuses to run next to the live loop); actually
+                # fires from the post-close slot below or an off-hours run.
                 try:
-                    import advisor_backtest
-                    advisor_backtest.run_backtest_pass(md)
+                    import data_jobs
+                    data_jobs.maybe_weekly_profiles(md)
                 except Exception as e:
-                    print(f"[SCHEDULER] advisor backtest failed "
-                          f"(non-fatal): {e}")
-            # Weekly stock profiles (M3): no-ops during market hours (the
-            # builder refuses to run next to the live loop); actually fires
-            # from the post-close slot below or an off-hours advisor run.
-            try:
-                import data_jobs
-                data_jobs.maybe_weekly_profiles(md)
-            except Exception as e:
-                print(f"[SCHEDULER] weekly profiles failed (non-fatal): {e}")
+                    print(f"[SCHEDULER] weekly profiles failed (non-fatal): {e}")
+            else:
+                n = portfolio_advisor.run_advisor_lite(md)
+                print(f"[SCHEDULER] advisor (intraday refresh) done: {n} holdings analyzed")
         except Exception as e:
             print(f"[SCHEDULER] advisor failed (non-fatal): {e}")
         finally:
