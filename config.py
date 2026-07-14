@@ -261,8 +261,15 @@ def data_collection_active() -> bool:
     real-money session can never have its risk stops turned into counterfactuals."""
     return DATA_COLLECTION_MODE and PAPER_TRADING
 
-# Per-cycle trade cap (spread trades across cycles, avoid burst)
-MAX_TRADES_PER_CYCLE = 3
+# Per-cycle trade cap (spread trades across cycles, avoid burst). Env-tunable
+# (2026-07-15) so the data-richness pacing knobs can all be adjusted from
+# Railway without a redeploy — this one used to be a bare constant while its
+# DATA_MAX_* siblings below were already env vars, an inconsistency found
+# while diagnosing why only 14/1269 decisions became real trades on
+# 2026-07-14 (115 qualifying entries were paced out as ENTRY_DEFERRED
+# counterfactuals — pacing was the binding constraint, not the strategy's
+# own selectivity or the daily trade budget).
+MAX_TRADES_PER_CYCLE = int(os.getenv('MAX_TRADES_PER_CYCLE', '3'))
 
 # Position sizing economics
 MAX_POSITION_PERCENT = 0.40   # max 40% of capital per trade
