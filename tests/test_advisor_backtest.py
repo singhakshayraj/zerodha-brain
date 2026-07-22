@@ -156,3 +156,59 @@ def test_track_record_summary_empty():
     with patch.object(bt.db, 'get_evaluated_advice', return_value=[]):
         s = bt.get_track_record_summary()
     assert s['evaluated_calls'] == 0 and s['advice_value_inr'] == 0.0
+
+
+# --- factor_attribution (pure) -------------------------------------------------
+
+def _row(correct, alpha, *, price=100.0, ema200=None, ema50=None, rsi=None,
+         adx=None, consistency=None, rel=None, vol=None, trigger=None):
+    return {
+        'outcome_correct': correct, 'outcome_vs_nifty_pct': alpha,
+        'last_price': price, 'trigger_type': trigger,
+        'indicators': {'ema_200': ema200, 'ema_50': ema50, 'rsi_14': rsi,
+                       'adx': adx, 'trend_consistency_pct': consistency,
+                       'relative_strength_vs_nifty': rel, 'volume_trend_ratio': vol},
+    }
+
+
+def test_factor_attribution_separates_a_predictive_factor():
+    # ema200_position perfectly predicts: above-200EMA always right,
+    # below-200EMA always wrong. min_bucket_n=2 so both buckets rank.
+    rows = (
+        [_row(True, 3.0, price=110, ema200=100) for _ in range(3)]
+        + [_row(False, -3.0, price=90, ema200=100) for _ in range(3)]
+    )
+    a = bt.factor_attribution(rows, min_bucket_n=2)
+    assert a['graded_calls'] == 6
+    f = a['factors']['ema200_position']
+    assert f['buckets']['price_above_200EMA']['hit_rate_pct'] == 100.0
+    assert f['buckets']['price_below_200EMA']['hit_rate_pct'] == 0.0
+    assert f['separation_pct'] == 100.0
+    assert a['ranked_by_separation'][0] == 'ema200_position'
+
+
+def test_factor_attribution_ignores_missing_data_and_flags_low_n():
+    # rsi present on only one row -> its single bucket is low-n, unrankable.
+    rows = [
+        _row(True, 1.0, rsi=25),                        # oversold
+        _row(True, 1.0, ema200=None, ema50=None),       # rsi absent -> skipped for rsi
+    ]
+    a = bt.factor_attribution(rows, min_bucket_n=5)
+    rsi = a['factors']['rsi_zone']
+    assert rsi['buckets']['oversold']['n'] == 1
+    assert rsi['buckets']['oversold']['low_n'] is True
+    assert rsi['separation_pct'] is None          # <2 sufficiently-sampled buckets
+    assert 'rsi_zone' not in a['ranked_by_separation']
+
+
+def test_factor_attribution_empty():
+    a = bt.factor_attribution([])
+    assert a['graded_calls'] == 0
+    assert a['ranked_by_separation'] == []
+
+
+def test_factor_attribution_skips_ungraded_rows():
+    rows = [_row(None, None, price=110, ema200=100),   # INSUFFICIENT-style, excluded
+            _row(True, 2.0, price=110, ema200=100)]
+    a = bt.factor_attribution(rows, min_bucket_n=1)
+    assert a['graded_calls'] == 1

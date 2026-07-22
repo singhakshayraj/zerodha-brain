@@ -217,3 +217,134 @@ def get_track_record_summary() -> dict:
         'by_verdict': by_verdict,
         'by_decision': by_decision,
     }
+
+
+# --- Factor attribution ---------------------------------------------------
+# The advisor's 7 scoring weights (EMA200=20, EMA50=15, consistency=15,
+# momentum=20, ADX=10, relative-strength=20, news=10) are hand-picked
+# priors. This measures, once enough calls are graded, whether each factor
+# actually separated right calls from wrong ones — the evidence to reweight
+# on, instead of guessing. Each factor maps a graded row to a bucket; a
+# factor that predicts shows a real hit-rate spread between its buckets.
+
+def _bucket_ema200(row, ind):
+    price, ema = row.get('last_price'), ind.get('ema_200')
+    if not price or not ema:
+        return None
+    return 'price_above_200EMA' if price > ema else 'price_below_200EMA'
+
+
+def _bucket_ema50(row, ind):
+    price, ema = row.get('last_price'), ind.get('ema_50')
+    if not price or not ema:
+        return None
+    return 'price_above_50EMA' if price > ema else 'price_below_50EMA'
+
+
+def _bucket_consistency(row, ind):
+    c = ind.get('trend_consistency_pct')
+    if c is None:
+        return None
+    return 'held_above_50EMA' if c >= 50 else 'kept_losing_50EMA'
+
+
+def _bucket_rel_strength(row, ind):
+    rs = ind.get('relative_strength_vs_nifty')
+    if rs is None:
+        return None
+    if rs >= 5:
+        return 'strong_outperform'
+    if rs <= -5:
+        return 'strong_underperform'
+    return 'inline_with_nifty'
+
+
+def _bucket_rsi(row, ind):
+    rsi = ind.get('rsi_14')
+    if rsi is None:
+        return None
+    if rsi <= 32:
+        return 'oversold'
+    if rsi >= 70:
+        return 'overbought'
+    return 'neutral'
+
+
+def _bucket_adx(row, ind):
+    adx = ind.get('adx')
+    if adx is None:
+        return None
+    return 'trending_ADX>=20' if adx >= 20 else 'choppy_ADX<20'
+
+
+def _bucket_trigger(row, ind):
+    t = (row.get('trigger_type') or '').upper()
+    return t if t in ('MACRO', 'MICRO') else None
+
+
+def _bucket_volume(row, ind):
+    v = ind.get('volume_trend_ratio')
+    if v is None:
+        return None
+    return 'volume_building' if v >= 1.3 else 'volume_flat'
+
+
+_FACTORS = {
+    'ema200_position': _bucket_ema200,
+    'ema50_position': _bucket_ema50,
+    'trend_consistency': _bucket_consistency,
+    'relative_strength': _bucket_rel_strength,
+    'rsi_zone': _bucket_rsi,
+    'adx_regime': _bucket_adx,
+    'trigger_type': _bucket_trigger,
+    'volume_trend': _bucket_volume,
+}
+
+
+def factor_attribution(rows: list, min_bucket_n: int = 5) -> dict:
+    """Per-factor hit-rate/alpha breakdown over graded advice rows. Pure —
+    feed it db.get_evaluated_advice_with_features() output (or synthetic
+    rows in tests).
+
+    For each factor, buckets the calls it applies to and reports each
+    bucket's n / hit-rate / avg alpha. `separation_pct` = the hit-rate gap
+    between the factor's best and worst sufficiently-sampled bucket — a
+    factor that genuinely predicts shows a wide gap; near-zero means the
+    factor isn't earning its weight. Factors are ranked by separation so
+    the reweighting conversation starts from evidence, not the current
+    hand-picked priors. Buckets under `min_bucket_n` are computed but
+    flagged low-n and excluded from the separation ranking."""
+    judged = [r for r in rows if r.get('outcome_correct') is not None]
+    factors = {}
+    for name, fn in _FACTORS.items():
+        buckets = {}
+        for r in judged:
+            ind = r.get('indicators') or {}
+            label = fn(r, ind)
+            if label is None:
+                continue
+            b = buckets.setdefault(label, {'n': 0, 'hits': 0, 'alphas': []})
+            b['n'] += 1
+            b['hits'] += 1 if r['outcome_correct'] else 0
+            if r.get('outcome_vs_nifty_pct') is not None:
+                b['alphas'].append(float(r['outcome_vs_nifty_pct']))
+        for b in buckets.values():
+            b['hit_rate_pct'] = round(b['hits'] / b['n'] * 100, 1) if b['n'] else None
+            b['avg_alpha_pct'] = (round(sum(b['alphas']) / len(b['alphas']), 2)
+                                  if b['alphas'] else None)
+            b['low_n'] = b['n'] < min_bucket_n
+            del b['alphas']
+        rated = [b['hit_rate_pct'] for b in buckets.values()
+                 if not b['low_n'] and b['hit_rate_pct'] is not None]
+        separation = round(max(rated) - min(rated), 1) if len(rated) >= 2 else None
+        factors[name] = {'buckets': buckets, 'separation_pct': separation}
+
+    ranked = sorted(
+        (n for n, f in factors.items() if f['separation_pct'] is not None),
+        key=lambda n: factors[n]['separation_pct'], reverse=True)
+
+    return {
+        'graded_calls': len(judged),
+        'factors': factors,
+        'ranked_by_separation': ranked,
+    }

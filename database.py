@@ -870,6 +870,26 @@ def get_evaluated_advice() -> list:
         return []
 
 
+def get_evaluated_advice_with_features() -> list:
+    """Judged advice rows WITH the per-decision `indicators` blob + trigger
+    type — the substrate for factor attribution (which scoring factor
+    actually separated right calls from wrong ones). Separate from
+    get_evaluated_advice so the lightweight track-record summary doesn't
+    haul the jsonb on every call."""
+    try:
+        return _fetch_all(
+            supabase.table('portfolio_advice')
+            .select('run_date, symbol, verdict, trend_score, trigger_type, '
+                    'last_price, indicators, outcome_correct, '
+                    'outcome_return_pct, outcome_vs_nifty_pct')
+            .eq('is_official', True)
+            .not_.is_('evaluated_at', 'null')
+            .order('run_date'))
+    except Exception as e:
+        print(f"[get_evaluated_advice_with_features] error: {e}")
+        return []
+
+
 def write_official_portfolio_advice(rows: list) -> int:
     """The day's ONE canonical advisory batch (rotation scan + digest +
     backtest-eligible) — is_official=True on every row. Same-day re-run
