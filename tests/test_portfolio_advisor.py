@@ -402,3 +402,97 @@ def test_run_advisor_lite_skips_zero_qty_and_survives_symbol_failure():
          patch.object(pa.db, 'get_tradebook', return_value=[]):
         n = pa.run_advisor_lite(md)
     assert n == 1   # only GOOD; SOLD skipped, BROKEN failed but didn't abort
+
+
+# --- weekly (higher-timeframe) confluence -------------------------------------
+
+def _daily_dated(n, start=100.0, step=0.5, start_date='2025-01-06'):
+    """n consecutive-calendar-day bars from start_date (a Monday), so
+    resample_weekly produces distinct ISO weeks."""
+    from datetime import date, timedelta
+    d0 = date.fromisoformat(start_date)
+    out, p = [], start
+    for i in range(n):
+        p += step
+        out.append({'open': round(p - 0.2, 2), 'high': round(p + 1.0, 2),
+                    'low': round(p - 1.0, 2), 'close': round(p, 2),
+                    'volume': 1000, 'timestamp': (d0 + timedelta(days=i)).isoformat()})
+    return out
+
+
+def test_resample_weekly_aggregates_ohlcv():
+    # 14 consecutive days from a Monday -> 2 full ISO weeks
+    daily = _daily_dated(14, start=100, step=1.0)
+    weekly = pa.resample_weekly(daily)
+    assert len(weekly) == 2
+    # week 1 close = 7th day's close; high = week's max high
+    assert weekly[0]['close'] == daily[6]['close']
+    assert weekly[0]['high'] == max(d['high'] for d in daily[:7])
+    assert weekly[0]['volume'] == sum(d['volume'] for d in daily[:7])
+
+
+def test_weekly_trend_up_and_down():
+    up = pa.weekly_trend(_daily_dated(250, start=100, step=0.6),
+                         price=_daily_dated(250, start=100, step=0.6)[-1]['close'])
+    assert up['weekly_trend'] == 'UP'
+    assert up['price_vs_weekly_pct'] > 0
+
+    down_daily = _daily_dated(250, start=250, step=-0.6)
+    down = pa.weekly_trend(down_daily, price=down_daily[-1]['close'])
+    assert down['weekly_trend'] == 'DOWN'
+
+
+def test_weekly_trend_none_without_enough_history():
+    # ~5 weeks of data < WEEKLY_EMA_MID (10 weeks)
+    wk = pa.weekly_trend(_daily_dated(30, start=100, step=0.5), price=115)
+    assert wk['weekly_trend'] is None
+    assert wk['weekly_weeks'] < pa.WEEKLY_EMA_MID
+
+
+def test_daily_weekly_alignment_labels():
+    assert pa.daily_weekly_alignment(50, 'DOWN') == 'CONFLICT'
+    assert pa.daily_weekly_alignment(50, 'UP') == 'ALIGNED_UP'
+    assert pa.daily_weekly_alignment(-50, 'DOWN') == 'ALIGNED_DOWN'
+    assert pa.daily_weekly_alignment(0, 'UP') == 'NEUTRAL'      # daily sideways
+    assert pa.daily_weekly_alignment(50, 'SIDEWAYS') == 'NEUTRAL'
+    assert pa.daily_weekly_alignment(50, None) is None
+
+
+def test_advise_populates_weekly_fields_and_reason():
+    daily = _daily_dated(250, start=100, step=0.6)
+    h = _holding(avg=100, last=daily[-1]['close'])
+    out = pa.advise(h, daily)
+    ind = out['indicators']
+    assert ind['weekly_trend'] in ('UP', 'DOWN', 'SIDEWAYS')
+    assert ind['daily_weekly_alignment'] is not None
+    assert any('weekly trend' in r.lower() for r in out['reasons'])
+
+
+def test_advise_flags_countertrend_conflict():
+    # daily uptrend (score >= 20) but force the weekly read DOWN -> CONFLICT.
+    # Patch weekly_trend so the branch is exercised deterministically rather
+    # than relying on a fragile synthetic that produces the exact conflict.
+    daily = _daily_dated(250, start=100, step=0.6)   # clean daily uptrend
+    h = _holding(avg=100, last=daily[-1]['close'])
+    forced_down = {'weekly_trend': 'DOWN', 'weekly_ema_long': 130.0,
+                   'weekly_ema_mid': 128.0, 'price_vs_weekly_pct': -2.0,
+                   'weekly_weeks': 35}
+    with patch.object(pa, 'weekly_trend', return_value=forced_down):
+        out = pa.advise(h, daily)
+    assert out['trend_score'] >= 20                       # daily is up
+    assert out['indicators']['daily_weekly_alignment'] == 'CONFLICT'
+    assert any('countertrend' in r.lower() for r in out['reasons'])
+
+
+def test_weekly_does_not_change_trend_score():
+    # dark-flag discipline: weekly is logged/surfaced but must NOT move the
+    # numeric score (its weight is unproven until factor_attribution grades it)
+    daily = _daily_dated(250, start=100, step=0.6)
+    h = _holding(avg=100, last=daily[-1]['close'])
+    score = pa.advise(h, daily)['trend_score']
+    # recompute the score directly the way advise does, minus any weekly input
+    ind = pa.run_all_indicators(pa.completed_bars(daily))
+    closes = [float(c['close']) for c in pa.completed_bars(daily)]
+    direct = pa.trend_score(ind, closes,
+                            consistency=pa.trend_consistency(closes))
+    assert score == direct

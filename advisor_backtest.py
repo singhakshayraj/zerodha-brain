@@ -289,6 +289,11 @@ def _bucket_volume(row, ind):
     return 'volume_building' if v >= 1.3 else 'volume_flat'
 
 
+def _bucket_weekly_alignment(row, ind):
+    a = ind.get('daily_weekly_alignment')
+    return a if a in ('ALIGNED_UP', 'ALIGNED_DOWN', 'CONFLICT', 'NEUTRAL') else None
+
+
 _FACTORS = {
     'ema200_position': _bucket_ema200,
     'ema50_position': _bucket_ema50,
@@ -298,6 +303,9 @@ _FACTORS = {
     'adx_regime': _bucket_adx,
     'trigger_type': _bucket_trigger,
     'volume_trend': _bucket_volume,
+    # Step-2 candidate (2026-07-23): does daily/weekly agreement predict?
+    # Logged + graded here before it earns a trend_score weight.
+    'daily_weekly_alignment': _bucket_weekly_alignment,
 }
 
 

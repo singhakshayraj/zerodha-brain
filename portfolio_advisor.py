@@ -30,7 +30,7 @@ import database as db
 import market_regime
 import news_jobs
 import telegram
-from indicators import calculate_ema_series, run_all_indicators
+from indicators import calculate_ema, calculate_ema_series, run_all_indicators
 
 IST = pytz.timezone('Asia/Kolkata')
 
@@ -43,6 +43,13 @@ OVEREXTENDED_ABOVE_EMA50_PCT = 15.0
 RELATIVE_STRENGTH_LOOKBACK = 20
 CONCENTRATION_FLAG_PCT = 25.0
 NIFTY50_INDEX_TOKEN = 256265  # NSE:NIFTY 50 — standard Kite instrument token
+
+# Weekly (higher-timeframe) structure — the read a daily-only scorer is
+# blind to. ~30 weeks ≈ 150 trading days = the classic long-term weekly
+# trend line; 10 weeks is the intermediate fallback for shorter histories.
+WEEKLY_EMA_LONG = 30
+WEEKLY_EMA_MID = 10
+WEEKLY_MOMENTUM_WEEKS = 8
 
 
 def trend_consistency(closes: list, lookback: int = 20):
@@ -102,6 +109,93 @@ def volume_trend(candles: list, lookback: int = 10):
     if not prior:
         return None
     return round(recent / prior, 2)
+
+
+def resample_weekly(daily_candles: list) -> list:
+    """Group daily bars into weekly OHLCV (ISO week), oldest first. Each
+    weekly bar: open=first day's open, high/low=week extremes, close=last
+    day's close, volume=summed, timestamp=last day in the week. Pure — the
+    daily candles are already fetched, so this is free (no I/O)."""
+    from datetime import date
+    weeks, order = {}, []
+    for c in daily_candles or []:
+        ts = str(c.get('timestamp') or '')[:10]
+        if not ts or c.get('close') is None:
+            continue
+        try:
+            iso = date.fromisoformat(ts).isocalendar()
+        except ValueError:
+            continue
+        key = (iso[0], iso[1])
+        hi, lo = c.get('high'), c.get('low')
+        if key not in weeks:
+            weeks[key] = {'open': c.get('open'), 'high': hi, 'low': lo,
+                          'close': c.get('close'),
+                          'volume': c.get('volume') or 0, 'timestamp': ts}
+            order.append(key)
+        else:
+            wk = weeks[key]
+            if hi is not None:
+                wk['high'] = hi if wk['high'] is None else max(wk['high'], hi)
+            if lo is not None:
+                wk['low'] = lo if wk['low'] is None else min(wk['low'], lo)
+            wk['close'] = c.get('close')
+            wk['volume'] += c.get('volume') or 0
+            wk['timestamp'] = ts
+    return [weeks[k] for k in order]
+
+
+def weekly_trend(daily_candles: list, price: float) -> dict:
+    """Higher-timeframe structure read. UP when price holds above the weekly
+    trend EMA with non-negative multi-week momentum; DOWN the mirror;
+    SIDEWAYS when the two disagree. weekly_trend=None when there isn't enough
+    weekly history — same honest degradation as the other optional terms.
+
+    This does NOT feed the numeric trend_score yet (its weight is unproven —
+    same dark-flag discipline the trading engine uses): it's computed,
+    logged on every row, and surfaced in the reasons so the human sees a
+    daily/weekly conflict, while factor_attribution measures whether the
+    alignment actually predicts before it earns a score weight."""
+    weekly = resample_weekly(daily_candles)
+    closes = [float(w['close']) for w in weekly if w.get('close') is not None]
+    empty = {'weekly_trend': None, 'weekly_ema_long': None,
+             'weekly_ema_mid': None, 'price_vs_weekly_pct': None,
+             'weekly_weeks': len(closes)}
+    if len(closes) < WEEKLY_EMA_MID or not price:
+        return empty
+    ema_long = (calculate_ema(closes, WEEKLY_EMA_LONG)
+                if len(closes) >= WEEKLY_EMA_LONG else None)
+    ema_mid = calculate_ema(closes, WEEKLY_EMA_MID)
+    anchor = ema_long or ema_mid
+    if not anchor:
+        return empty
+    price_vs = round((price - anchor) / anchor * 100, 2)
+    mom = (closes[-1] - closes[-WEEKLY_MOMENTUM_WEEKS - 1]
+           if len(closes) >= WEEKLY_MOMENTUM_WEEKS + 1 else None)
+    above = price > anchor
+    if above and (mom is None or mom >= 0):
+        label = 'UP'
+    elif not above and (mom is None or mom <= 0):
+        label = 'DOWN'
+    else:
+        label = 'SIDEWAYS'
+    return {'weekly_trend': label, 'weekly_ema_long': ema_long,
+            'weekly_ema_mid': ema_mid, 'price_vs_weekly_pct': price_vs,
+            'weekly_weeks': len(closes)}
+
+
+def daily_weekly_alignment(daily_score: int, weekly_label: str) -> str:
+    """How the daily direction (from trend_score) and the weekly structure
+    relate — the single most decision-relevant cross-timeframe fact. None
+    when the weekly read is unavailable."""
+    if not weekly_label:
+        return None
+    daily_dir = 'UP' if daily_score >= 20 else 'DOWN' if daily_score <= -20 else 'SIDEWAYS'
+    if daily_dir == 'SIDEWAYS' or weekly_label == 'SIDEWAYS':
+        return 'NEUTRAL'
+    if daily_dir == weekly_label:
+        return 'ALIGNED_UP' if weekly_label == 'UP' else 'ALIGNED_DOWN'
+    return 'CONFLICT'
 
 
 def trend_score(ind: dict, closes: list, consistency=None,
@@ -316,6 +410,13 @@ def advise(holding: dict, daily_candles: list, history: dict = None,
     rsi = ind.get('rsi_14')
     price = last or ind.get('current_close') or 0
 
+    # Higher-timeframe (weekly) structure + how it relates to the daily
+    # direction. Surfaced in the reasons and logged, but NOT folded into the
+    # numeric score — its weight stays unproven until factor_attribution
+    # grades it (dark-flag discipline).
+    wk = weekly_trend(daily_candles, price)
+    alignment = daily_weekly_alignment(score, wk['weekly_trend'])
+
     near_support = (support is not None and price and
                     (price - support) / price * 100 <= NEAR_SUPPORT_PCT)
     oversold = rsi is not None and rsi <= OVERSOLD_RSI
@@ -352,6 +453,30 @@ def advise(holding: dict, daily_candles: list, history: dict = None,
     if vol_trend is not None and vol_trend >= 1.3:
         reasons.append(f"Volume building ({vol_trend:.1f}× the prior window) "
                        f"— the move has real participation, not a thin drift")
+    if wk['weekly_trend']:
+        anchor_wks = min(wk['weekly_weeks'], WEEKLY_EMA_LONG)
+        reasons.append(
+            f"Weekly trend {wk['weekly_trend'].lower()} — price "
+            f"{'above' if (wk['price_vs_weekly_pct'] or 0) >= 0 else 'below'} "
+            f"the ~{anchor_wks}-week EMA (higher-timeframe structure)")
+        if alignment == 'CONFLICT':
+            if score >= 20:
+                reasons.append(
+                    "⚠ Countertrend: the daily direction is up but the WEEKLY "
+                    "trend is down — treat this as a lower-conviction bounce, "
+                    "not a durable hold; honor the stop tightly")
+            else:
+                reasons.append(
+                    "Daily weakness sits inside a weekly UPTREND — this may be "
+                    "a dip rather than a breakdown; don't reflexively sell "
+                    "strength into support")
+        elif alignment == 'ALIGNED_DOWN':
+            reasons.append(
+                "Daily and weekly trends agree (both down) — the exit case is "
+                "structural, not a countertrend call")
+        elif alignment == 'ALIGNED_UP':
+            reasons.append(
+                "Daily and weekly trends agree (both up) — higher-conviction hold")
     if pnl_pct is not None and pnl_pct < 0 and base['breakeven_gain_pct'] > 15:
         reasons.append(f"Down {abs(pnl_pct):.0f}% — needs "
                        f"+{base['breakeven_gain_pct']:.0f}% from here just to "
@@ -438,6 +563,10 @@ def advise(holding: dict, daily_candles: list, history: dict = None,
             'news_sentiment': news_sent,
             'portfolio_weight_pct': portfolio_weight_pct,
             'overextended': overextended,
+            'weekly_trend': wk['weekly_trend'],
+            'weekly_ema_long': wk['weekly_ema_long'],
+            'price_vs_weekly_pct': wk['price_vs_weekly_pct'],
+            'daily_weekly_alignment': alignment,
             'history': history or None,
         },
     }
