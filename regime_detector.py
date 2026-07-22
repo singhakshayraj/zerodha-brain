@@ -20,8 +20,13 @@ class RegimeDetector:
         candles_1hour: list,
         nifty_direction: str,
         nifty_change_percent: float,
+        now: datetime = None,
     ) -> dict:
-        now = datetime.now(IST)
+        # `now` override lets a backtest/replay harness walk historical
+        # timestamps through the same intraday-clock gates live trading
+        # uses, instead of always reading the wall clock (gate #6 —
+        # decision-fidelity replay needs the real code path, not a copy).
+        now = now or datetime.now(IST)
         hour = now.hour
         minute = now.minute
         time_minutes = hour * 60 + minute

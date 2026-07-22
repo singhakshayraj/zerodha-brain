@@ -18,6 +18,7 @@ class SignalEngine:
         symbol: str,
         nifty_direction: str,
         nifty_change_percent: float,
+        now=None,
     ) -> dict:
         regime = self.regime_detector.detect(
             candles_5min or [],
@@ -25,6 +26,7 @@ class SignalEngine:
             candles_1hour or [],
             nifty_direction,
             nifty_change_percent,
+            now=now,
         )
 
         if not regime['can_trade']:
