@@ -496,3 +496,80 @@ def test_weekly_does_not_change_trend_score():
     direct = pa.trend_score(ind, closes,
                             consistency=pa.trend_consistency(closes))
     assert score == direct
+
+
+# --- portfolio_risk (whole-book view) -----------------------------------------
+
+def _advice_row(symbol, qty, avg, last, verdict='HOLD'):
+    pnl = round((last / avg - 1) * 100, 2) if avg else None
+    return {'symbol': symbol, 'quantity': qty, 'avg_price': avg,
+            'last_price': last, 'pnl_percent': pnl, 'verdict': verdict}
+
+
+def test_portfolio_risk_single_name_concentration():
+    rows = [_advice_row('BIG', 100, 100, 100),   # value 10000 = 71%
+            _advice_row('A', 10, 100, 100),       # 1000
+            _advice_row('B', 30, 100, 100)]       # 3000
+    risk = pa.portfolio_risk(rows)
+    assert risk['top_position']['symbol'] == 'BIG'
+    assert risk['top_position']['weight_pct'] > 25
+    assert any('BIG' in f and 'single-name' in f for f in risk['concentration_flags'])
+
+
+def test_portfolio_risk_sector_clustering_flag():
+    rows = [_advice_row('HDFCBANK', 10, 100, 100),
+            _advice_row('ICICIBANK', 10, 100, 100),
+            _advice_row('AXISBANK', 10, 100, 100),
+            _advice_row('INFY', 10, 100, 100)]
+    sector_map = {'HDFCBANK': 'Bank', 'ICICIBANK': 'Bank',
+                  'AXISBANK': 'Bank', 'INFY': 'IT'}
+    risk = pa.portfolio_risk(rows, sector_map=sector_map)
+    assert risk['sector_weights']['Bank'] == 75.0
+    flag = next((f for f in risk['concentration_flags'] if 'Bank' in f), None)
+    assert flag is not None and '3x' in flag
+
+
+def test_portfolio_risk_tax_loss_harvest():
+    rows = [
+        _advice_row('LOSER', 10, 200, 100, verdict='SELL'),   # -₹1000, exit
+        _advice_row('MIXED', 5, 100, 80, verdict='TRIM'),      # -₹100, exit
+        _advice_row('WINNER', 10, 100, 150, verdict='SELL'),   # green, not harvestable
+        _advice_row('REDHOLD', 10, 100, 60, verdict='HOLD'),   # red but HOLD, not an exit
+    ]
+    risk = pa.portfolio_risk(rows)
+    syms = {h['symbol'] for h in risk['tax_loss_harvest']}
+    assert syms == {'LOSER', 'MIXED'}          # only underwater + exit-verdict
+    assert risk['harvestable_loss_inr'] == 1100.0
+    # sorted worst-first
+    assert risk['tax_loss_harvest'][0]['symbol'] == 'LOSER'
+
+
+def test_portfolio_risk_empty_and_zero_value():
+    assert pa.portfolio_risk([])['total_value'] == 0.0
+    assert pa.portfolio_risk([_advice_row('X', 0, 100, 100)])['total_value'] == 0.0
+
+
+def test_build_portfolio_risk_lines_quiet_when_clean():
+    # 6 equal names (16.7% each, below the 25% single-name flag), all green,
+    # no sector map -> no flags -> no digest noise
+    rows = [_advice_row(s, 10, 100, 110) for s in ('A', 'B', 'C', 'D', 'E', 'F')]
+    assert pa.build_portfolio_risk_lines(pa.portfolio_risk(rows)) == []
+
+
+def test_build_digest_appends_risk_lines():
+    rows = [{'symbol': 'LOSER', 'verdict': 'SELL', 'trend_score': -40,
+             'pnl_percent': -50.0, 'quantity': 10, 'avg_price': 200,
+             'last_price': 100}]
+    risk = pa.portfolio_risk(rows)
+    text = pa.build_digest(rows, '2026-07-24', risk=risk)
+    assert 'Portfolio-level:' in text
+    assert 'Tax-loss harvest' in text
+
+
+def test_build_digest_risk_only_still_pushes():
+    # no actionable calls, but a concentration flag alone is worth one push
+    rows = [_advice_row('BIG', 100, 100, 100, verdict='HOLD'),
+            _advice_row('A', 5, 100, 100, verdict='HOLD')]
+    risk = pa.portfolio_risk(rows)
+    text = pa.build_digest(rows, '2026-07-24', risk=risk)
+    assert 'single-name concentration' in text

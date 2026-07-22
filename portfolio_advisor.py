@@ -19,6 +19,7 @@ Verdicts:
                     holding is bleeding capital that works harder elsewhere.
   INSUFFICIENT    — not enough daily history to say anything honest.
 """
+import json
 import time
 import uuid
 from datetime import datetime
@@ -42,6 +43,7 @@ OVEREXTENDED_RSI = 75.0
 OVEREXTENDED_ABOVE_EMA50_PCT = 15.0
 RELATIVE_STRENGTH_LOOKBACK = 20
 CONCENTRATION_FLAG_PCT = 25.0
+SECTOR_CONCENTRATION_PCT = 35.0   # a sector this heavy = correlated over-bet
 NIFTY50_INDEX_TOKEN = 256265  # NSE:NIFTY 50 — standard Kite instrument token
 
 # Weekly (higher-timeframe) structure — the read a daily-only scorer is
@@ -360,6 +362,118 @@ def tradebook_stats(rows: list) -> dict:
     for s in out.values():
         s['realized_pnl'] = round(s['realized_pnl'], 2)
     return out
+
+
+def portfolio_risk(advice_rows: list, sector_map: dict = None) -> dict:
+    """Whole-book risk view — the layer per-name scoring is structurally
+    blind to. Pure. Three reads a holdings advisor needs but a per-symbol
+    scorer can't give:
+
+    - Single-name concentration (one position dominating the book).
+    - Sector concentration, the cheap robust proxy for correlation: same-
+      sector names move together, so three PSU banks is closer to one bet
+      at 3x size than three independent positions. A true return-correlation
+      matrix is a v2 refinement; sector clustering catches the dominant risk
+      for free.
+    - Tax-loss harvest candidates: underwater names the advisor ALREADY
+      wants to exit (SELL/TRIM). Selling both acts on the weak trend and
+      realizes a capital loss that offsets gains elsewhere — real rupees for
+      a red book. (India: STT-paid equity losses offset capital gains; the
+      short- vs long-term split depends on holding period, which we don't
+      assert here.)
+
+    sector_map: {symbol: sector}. Rows without value or with INSUFFICIENT
+    data are ignored for weighting but never crash the read."""
+    sector_map = sector_map or {}
+    positions, total = [], 0.0
+    for r in advice_rows or []:
+        qty = r.get('quantity') or 0
+        last = r.get('last_price') or 0
+        val = qty * last
+        if val <= 0:
+            continue
+        positions.append({
+            'symbol': r.get('symbol'), 'value': val, 'quantity': qty,
+            'sector': sector_map.get(r.get('symbol')),
+            'pnl_percent': r.get('pnl_percent'),
+            'avg_price': r.get('avg_price'), 'last_price': last,
+            'verdict': r.get('verdict'),
+        })
+        total += val
+
+    empty = {'total_value': 0.0, 'top_position': None, 'sector_weights': {},
+             'concentration_flags': [], 'tax_loss_harvest': [],
+             'harvestable_loss_inr': 0.0}
+    if not positions or total <= 0:
+        return empty
+
+    for p in positions:
+        p['weight_pct'] = round(p['value'] / total * 100, 1)
+    top = max(positions, key=lambda p: p['weight_pct'])
+
+    sector_weights = {}
+    for p in positions:
+        s = p['sector'] or 'Unknown'
+        sector_weights[s] = round(sector_weights.get(s, 0.0) + p['weight_pct'], 1)
+
+    flags = []
+    if top['weight_pct'] >= CONCENTRATION_FLAG_PCT:
+        flags.append(f"{top['symbol']} is {top['weight_pct']:.0f}% of the book "
+                     f"— single-name concentration")
+    for s, w in sorted(sector_weights.items(), key=lambda kv: kv[1], reverse=True):
+        members = [p['symbol'] for p in positions
+                   if (p['sector'] or 'Unknown') == s]
+        if s != 'Unknown' and w >= SECTOR_CONCENTRATION_PCT and len(members) >= 2:
+            flags.append(
+                f"{s} is {w:.0f}% of the book across {len(members)} names "
+                f"({', '.join(members)}) — correlated exposure, effectively "
+                f"one bet at ~{len(members)}x size")
+
+    harvest, harvestable = [], 0.0
+    for p in positions:
+        pnl = p['pnl_percent']
+        avg = p.get('avg_price') or 0
+        if (pnl is not None and pnl < 0
+                and p['verdict'] in ('SELL', 'SELL_ON_BOUNCE', 'TRIM')
+                and avg > p['last_price']):
+            loss = (avg - p['last_price']) * p['quantity']
+            if loss > 0:
+                harvest.append({'symbol': p['symbol'],
+                                'unrealized_loss_inr': round(loss, 2),
+                                'verdict': p['verdict'],
+                                'pnl_percent': pnl})
+                harvestable += loss
+
+    return {
+        'total_value': round(total, 2),
+        'top_position': {'symbol': top['symbol'],
+                         'weight_pct': top['weight_pct']},
+        'sector_weights': sector_weights,
+        'concentration_flags': flags,
+        'tax_loss_harvest': sorted(
+            harvest, key=lambda x: x['unrealized_loss_inr'], reverse=True),
+        'harvestable_loss_inr': round(harvestable, 2),
+    }
+
+
+def build_portfolio_risk_lines(risk: dict) -> list:
+    """Telegram digest lines for the portfolio-level read. Empty list when
+    there's nothing flag-worthy — keeps the push channel quiet on a clean,
+    well-diversified book."""
+    if not risk or not risk.get('total_value'):
+        return []
+    body = [f"⚠ {f}" for f in risk.get('concentration_flags', [])]
+    harvest = risk.get('tax_loss_harvest') or []
+    if harvest:
+        names = ', '.join(
+            f"{x['symbol']} (−₹{abs(x['unrealized_loss_inr']):,.0f})"
+            for x in harvest[:4])
+        body.append(
+            f"🧾 Tax-loss harvest: the weak names already flagged for exit "
+            f"realize ~₹{risk['harvestable_loss_inr']:,.0f} in capital losses "
+            f"({names}) — offsets capital gains elsewhere (short/long-term "
+            f"split depends on holding period).")
+    return (["", "Portfolio-level:"] + body) if body else []
 
 
 def advise(holding: dict, daily_candles: list, history: dict = None,
@@ -726,13 +840,20 @@ _ACTIONABLE = ('SELL', 'SELL_ON_BOUNCE', 'TRIM')
 _DIGEST_MAX_CALLS = 12
 
 
-def build_digest(rows: list, run_date: str) -> str:
+def build_digest(rows: list, run_date: str, risk: dict = None) -> str:
     """Telegram text for the day's ACTIONABLE calls only — HOLDs are noise in
-    a push channel. Empty string = nothing worth sending today."""
+    a push channel. Empty string = nothing worth sending today. `risk` is the
+    optional portfolio_risk() read; its concentration + tax-loss lines append
+    below the per-name calls."""
     act = [r for r in rows or []
            if r.get('verdict') in _ACTIONABLE or r.get('rotation_target_symbol')]
-    if not act:
+    risk_lines = build_portfolio_risk_lines(risk)
+    if not act and not risk_lines:
         return ''
+    if not act:
+        # Nothing to trade, but a concentration/harvest flag is still worth
+        # the one push.
+        return '\n'.join([f"📋 Portfolio Advisor — {run_date}"] + risk_lines[1:])
     act.sort(key=lambda r: r.get('trend_score') or 0)
     overflow = len(act) - _DIGEST_MAX_CALLS
     act = act[:_DIGEST_MAX_CALLS]
@@ -760,6 +881,7 @@ def build_digest(rows: list, run_date: str) -> str:
         lines.append(line)
     if overflow > 0:
         lines.append(f"\n…and {overflow} more — full read on /advisor")
+    lines.extend(risk_lines)
     lines.append("\nAdvisory only — you decide. Full read: /advisor")
     return '\n'.join(lines)
 
@@ -784,10 +906,11 @@ def build_decision_keyboard(rows: list, run_date: str) -> dict:
     return {'inline_keyboard': keyboard}
 
 
-def send_daily_digest(rows: list, run_date: str) -> bool:
+def send_daily_digest(rows: list, run_date: str, risk: dict = None) -> bool:
     """One push per day after the advisor run. Dedup is durable (app_config
     'advisor_digest_date') so a manual advisor_run_now re-run doesn't
-    double-send. No-ops without the flag + both bot creds. Never raises."""
+    double-send. No-ops without the flag + both bot creds. Never raises.
+    `risk` is the optional portfolio_risk() read appended to the digest."""
     try:
         if not (config.ADVISOR_DIGEST_ENABLED
                 and config.ADVISOR_TELEGRAM_BOT_TOKEN
@@ -795,7 +918,7 @@ def send_daily_digest(rows: list, run_date: str) -> bool:
             return False
         if (db.get_config('advisor_digest_date') or '') == run_date:
             return False
-        text = build_digest(rows, run_date)
+        text = build_digest(rows, run_date, risk=risk)
         if not text:
             return False
         markup = (build_decision_keyboard(rows, run_date)
@@ -977,13 +1100,33 @@ def run_advisor(market_data) -> int:
         except Exception as e:
             print(f"[advisor] rotation pass failed (non-fatal): {e}")
 
+    # Portfolio-level risk view (whole book, not per-name): concentration,
+    # sector clustering (correlation proxy), tax-loss-harvest candidates.
+    # Non-fatal — a failure here never blocks storing the day's verdicts.
+    risk = None
+    try:
+        sector_map = {u['symbol']: u.get('sector')
+                      for u in config.NIFTY500_UNIVERSE}
+        risk = portfolio_risk(rows, sector_map=sector_map)
+        db.write_config('portfolio_risk_latest',
+                        json.dumps({**risk, 'run_date': run_date}))
+        if risk.get('concentration_flags'):
+            for f in risk['concentration_flags']:
+                print(f"[advisor.risk] {f}")
+        if risk.get('harvestable_loss_inr'):
+            print(f"[advisor.risk] tax-loss harvest available: "
+                  f"₹{risk['harvestable_loss_inr']:,.0f} across "
+                  f"{len(risk['tax_loss_harvest'])} names")
+    except Exception as e:
+        print(f"[advisor] portfolio risk read failed (non-fatal): {e}")
+
     run_id = str(uuid.uuid4())
     for row in rows:
         row['is_official'] = True
         row['run_id'] = run_id
     n = db.write_official_portfolio_advice(rows)
     print(f"[advisor] stored {n} recommendations for {run_date} (official, run_id={run_id})")
-    send_daily_digest(rows, run_date)   # non-fatal by construction
+    send_daily_digest(rows, run_date, risk=risk)   # non-fatal by construction
     return n
 
 
