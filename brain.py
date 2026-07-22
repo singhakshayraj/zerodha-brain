@@ -27,6 +27,17 @@ from trading_principles import TradingPrinciples
 IST = pytz.timezone('Asia/Kolkata')
 
 
+def _invert_for_short(live_price: float, long_stop: float, long_target: float):
+    """signal_engine always produces long-side levels (stop below price,
+    target above); a short entry mirrors them around live_price. Shared by
+    the decision log (every SELL signal, so counterfactual labeling sees
+    the direction it actually represents) and _open_short (the real
+    trade) so the two can never drift apart again."""
+    short_stop = round(live_price + (live_price - long_stop), 2)
+    short_target = round(live_price - (long_target - live_price), 2)
+    return short_stop, short_target
+
+
 def _derive_reason_code(signal: dict) -> str:
     """Machine-readable code for why a decision was NOT an entry
     (ENGINEERING_SPEC REQ-050). Derived from the engine's free-text
@@ -739,6 +750,16 @@ class TradingBrain:
                         'at': datetime.now(IST).isoformat(),
                     }
 
+                    log_stop, log_target = signal.get('stop_loss'), signal.get('target')
+                    if (signal['action'] == 'SELL' and log_stop is not None
+                            and log_target is not None):
+                        # SELL is always a hypothetical/real SHORT here (§
+                        # decision_outcomes treats every SELL as SHORT) —
+                        # log the short-oriented levels, not signal_engine's
+                        # raw long-side output.
+                        log_stop, log_target = _invert_for_short(
+                            live_price, log_stop, log_target)
+
                     decision_id = db.log_decision(
                         session_id=self.session_id,
                         symbol=symbol,
@@ -750,8 +771,8 @@ class TradingBrain:
                         live_price=live_price,
                         nifty_level=nifty_level or 0,
                         time_bucket=time_bucket,
-                        stop_loss=signal.get('stop_loss'),
-                        target=signal.get('target'),
+                        stop_loss=log_stop,
+                        target=log_target,
                         risk_reward=signal.get('risk_reward_ratio'),
                         regime=signal.get('regime', 'UNKNOWN'),
                         market_bias=signal.get('market_bias', 'NEUTRAL'),
@@ -1151,11 +1172,10 @@ class TradingBrain:
     def _open_short(self, symbol: str, exchange: str, live_price: float, signal: dict,
                     decision_id: str = None) -> None:
         capital = self.session_config['capitalDeployed']
-        # Invert stop/target for shorts: signal engine produces long-side levels.
         long_stop = signal['stop_loss']
         long_target = signal['target']
-        short_stop = round(live_price + (live_price - long_stop), 2)
-        short_target = round(live_price - (long_target - live_price), 2)
+        short_stop, short_target = _invert_for_short(
+            live_price, long_stop, long_target)
 
         print(
             f"[short_calc] {symbol}: price={live_price:.2f} "
