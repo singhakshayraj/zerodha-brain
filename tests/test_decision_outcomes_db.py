@@ -10,11 +10,19 @@ with patch.dict(os.environ, {
         import database as db
 
 
+def _result(data):
+    m = MagicMock()
+    m.data = data
+    return m
+
+
 def test_get_directional_decisions_excludes_already_labeled():
+    # hourly pagination: one hour returns [a, b], the other 23 return empty.
     tbl = MagicMock()
     tbl.select.return_value.in_.return_value.gte.return_value.lt \
-        .return_value.execute.return_value.data = [
-            {'id': 'a', 'symbol': 'X'}, {'id': 'b', 'symbol': 'Y'}]
+        .return_value.execute.side_effect = (
+            [_result([{'id': 'a', 'symbol': 'X'}, {'id': 'b', 'symbol': 'Y'}])]
+            + [_result([]) for _ in range(23)])
     outcomes_tbl = MagicMock()
     outcomes_tbl.select.return_value.in_.return_value.execute \
         .return_value.data = [{'decision_id': 'a'}]
@@ -26,6 +34,28 @@ def test_get_directional_decisions_excludes_already_labeled():
         sb.table.side_effect = table_router
         rows = db.get_directional_decisions_for_date('2026-07-15')
     assert [r['id'] for r in rows] == ['b']
+
+
+def test_get_directional_decisions_paginates_across_hours():
+    # rows in two different hours both come back (proves the loop accumulates)
+    tbl = MagicMock()
+    tbl.select.return_value.in_.return_value.gte.return_value.lt \
+        .return_value.execute.side_effect = (
+            [_result([{'id': 'a', 'symbol': 'X'}])]
+            + [_result([]) for _ in range(9)]
+            + [_result([{'id': 'z', 'symbol': 'Q'}])]
+            + [_result([]) for _ in range(13)])
+    outcomes_tbl = MagicMock()
+    outcomes_tbl.select.return_value.in_.return_value.execute \
+        .return_value.data = []
+
+    def table_router(name):
+        return outcomes_tbl if name == 'decision_outcomes' else tbl
+
+    with patch.object(db, 'supabase') as sb:
+        sb.table.side_effect = table_router
+        rows = db.get_directional_decisions_for_date('2026-07-15')
+    assert sorted(r['id'] for r in rows) == ['a', 'z']
 
 
 def test_get_directional_decisions_empty_short_circuits():

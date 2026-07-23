@@ -1229,25 +1229,36 @@ def get_inplay_symbols(date: str) -> list:
 def get_directional_decisions_for_date(run_date: str) -> list:
     """BUY/SELL decisions for run_date not yet counterfactually labeled —
     the decision_outcomes (Track C) work queue. Excludes decisions already
-    present in decision_outcomes so re-runs are cheap/idempotent."""
+    present in decision_outcomes so re-runs are cheap/idempotent.
+
+    Paginated by hour: a full data-richness day is ~1k BUY/SELL rows each
+    carrying a fat `indicators` jsonb, which overflows PostgREST's response
+    payload limit in a single query ('JSON could not be generated' 400).
+    Fetching an hour at a time keeps every response small — this is why the
+    whole thing loops instead of doing one select (don't collapse it back)."""
+    out = []
     try:
-        res = (supabase.table('brain_decisions')
-               .select('id, symbol, signal, price_at_decision, indicators, created_at')
-               .in_('signal', ['BUY', 'SELL'])
-               .gte('created_at', f'{run_date}T00:00:00')
-               .lt('created_at', f'{run_date}T23:59:59.999999')
-               .execute())
-        rows = res.data or []
-        if not rows:
-            return []
-        ids = [r['id'] for r in rows]
-        done = (supabase.table('decision_outcomes').select('decision_id')
-                .in_('decision_id', ids).execute())
-        done_ids = {r['decision_id'] for r in (done.data or [])}
-        return [r for r in rows if r['id'] not in done_ids]
+        for h in range(24):
+            start = f'{run_date}T{h:02d}:00:00'
+            end = f'{run_date}T{h + 1:02d}:00:00' if h < 23 \
+                else f'{run_date}T23:59:59.999999'
+            res = (supabase.table('brain_decisions')
+                   .select('id, symbol, signal, price_at_decision, indicators, created_at')
+                   .in_('signal', ['BUY', 'SELL'])
+                   .gte('created_at', start).lt('created_at', end)
+                   .execute())
+            rows = res.data or []
+            if not rows:
+                continue
+            ids = [r['id'] for r in rows]
+            done = (supabase.table('decision_outcomes').select('decision_id')
+                    .in_('decision_id', ids).execute())
+            done_ids = {r['decision_id'] for r in (done.data or [])}
+            out.extend(r for r in rows if r['id'] not in done_ids)
+        return out
     except Exception as e:
         print(f"[get_directional_decisions_for_date] error: {e}")
-        return []
+        return out
 
 
 def get_candles_for_symbol_from(symbol: str, after_ts: str, run_date: str) -> list:
