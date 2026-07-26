@@ -1,8 +1,9 @@
 # Paper Trading Mode
 
 Real market data + real decision pipeline + **simulated fills**. No Kite
-orders are ever placed. Built for the month-long validation run planned in
-`zerodha-trading/docs/PAPER_TRADING_ROADMAP.md` (dashboard repo).
+orders are ever placed. Part of the month-long validation run — see the
+canonical docs in the dashboard repo (`zerodha-trading/docs/`): `VISION.md`
+(the why + gates), `STATUS.md`, `ROADMAP.md`.
 
 ## How it works
 
