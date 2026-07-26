@@ -24,6 +24,7 @@ import time
 import uuid
 from datetime import datetime
 
+import numpy as np
 import pytz
 
 import config
@@ -45,6 +46,14 @@ RELATIVE_STRENGTH_LOOKBACK = 20
 CONCENTRATION_FLAG_PCT = 25.0
 SECTOR_CONCENTRATION_PCT = 35.0   # a sector this heavy = correlated over-bet
 NIFTY50_INDEX_TOKEN = 256265  # NSE:NIFTY 50 — standard Kite instrument token
+
+# portfolio_risk v2 — measured return correlation (supersedes the sector
+# proxy where daily candles are available; catches cross-sector co-movement
+# the sector map misses and sidesteps 'Unknown'-sector blind spots).
+CORR_LOOKBACK_DAYS = 60        # trailing daily returns window for the matrix
+CORR_MIN_OVERLAP = 30          # min aligned returns to trust a pair's corr
+CORR_CLUSTER_THRESHOLD = 0.7   # pairwise corr at/above this = "move together"
+CORR_CLUSTER_FLAG_PCT = 30.0   # a correlated cluster this heavy earns a flag
 
 # Weekly (higher-timeframe) structure — the read a daily-only scorer is
 # blind to. ~30 weeks ≈ 150 trading days = the classic long-term weekly
@@ -364,7 +373,96 @@ def tradebook_stats(rows: list) -> dict:
     return out
 
 
-def portfolio_risk(advice_rows: list, sector_map: dict = None) -> dict:
+def _correlation_read(positions: list, closes_by_symbol: dict) -> dict:
+    """Measured return-correlation view over the holdings that have daily
+    history — the real version of the sector proxy. Pure. Builds each name's
+    trailing daily returns, correlates them, and reports:
+      - clusters: connected groups of names all pairwise corr >= threshold
+        (these move as one bet regardless of sector label),
+      - effective_bets: 1 / (w·C·w) with weights normalized over covered
+        names — the correlation-adjusted count of independent positions
+        (equals N when uncorrelated, collapses toward 1 as the book co-moves),
+      - top_pairs: the most-correlated name pairs, for transparency.
+    Returns None when fewer than 2 names have a trustworthy aligned window."""
+    weight_of = {p['symbol']: p['weight_pct'] for p in positions}
+    series = {}
+    for p in positions:
+        sym = p['symbol']
+        closes = (closes_by_symbol or {}).get(sym)
+        if not closes or len(closes) < CORR_MIN_OVERLAP + 1:
+            continue
+        arr = np.asarray(closes[-(CORR_LOOKBACK_DAYS + 1):], dtype=float)
+        if len(arr) < CORR_MIN_OVERLAP + 1 or (arr[:-1] == 0).any():
+            continue
+        series[sym] = np.diff(arr) / arr[:-1]
+    if len(series) < 2:
+        return None
+
+    # Align every series to the shortest common tail so all pairs share dates.
+    n = min(len(r) for r in series.values())
+    if n < CORR_MIN_OVERLAP:
+        return None
+    # Drop flat (zero-variance) series — correlation is undefined for them.
+    syms = [s for s in series if np.std(series[s][-n:]) > 0]
+    syms.sort(key=lambda s: weight_of.get(s, 0.0), reverse=True)
+    if len(syms) < 2:
+        return None
+
+    corr = np.corrcoef(np.vstack([series[s][-n:] for s in syms]))
+    corr = np.clip(np.nan_to_num(corr, nan=0.0), -1.0, 1.0)
+
+    # effective number of independent bets (correlation-only proxy).
+    w = np.array([weight_of.get(s, 0.0) for s in syms], dtype=float)
+    effective_bets = None
+    if w.sum() > 0:
+        wn = w / w.sum()
+        denom = float(wn @ corr @ wn)
+        if denom > 0:
+            effective_bets = round(1.0 / denom, 1)
+
+    # Connected components on the (corr >= threshold) graph = correlation
+    # clusters. A cluster of >=2 names is a group moving together.
+    adj = corr >= CORR_CLUSTER_THRESHOLD
+    seen, clusters = set(), []
+    for i in range(len(syms)):
+        if i in seen:
+            continue
+        stack, comp = [i], []
+        while stack:
+            j = stack.pop()
+            if j in seen:
+                continue
+            seen.add(j)
+            comp.append(j)
+            for k in range(len(syms)):
+                if k != j and k not in seen and adj[j][k]:
+                    stack.append(k)
+        if len(comp) >= 2:
+            members = [syms[i] for i in comp]
+            pair_c = [corr[a][b] for x, a in enumerate(comp) for b in comp[x + 1:]]
+            clusters.append({
+                'symbols': members,
+                'weight_pct': round(sum(weight_of.get(m, 0.0) for m in members), 1),
+                'avg_corr': round(float(np.mean(pair_c)), 2),
+            })
+    clusters.sort(key=lambda c: c['weight_pct'], reverse=True)
+
+    pairs = [{'symbols': [syms[a], syms[b]], 'corr': round(float(corr[a][b]), 2)}
+             for a in range(len(syms)) for b in range(a + 1, len(syms))]
+    pairs.sort(key=lambda x: x['corr'], reverse=True)
+
+    return {
+        'lookback_days': CORR_LOOKBACK_DAYS,
+        'window_returns': int(n),
+        'names_covered': len(syms),
+        'effective_bets': effective_bets,
+        'clusters': clusters,
+        'top_pairs': pairs[:5],
+    }
+
+
+def portfolio_risk(advice_rows: list, sector_map: dict = None,
+                   closes_by_symbol: dict = None) -> dict:
     """Whole-book risk view — the layer per-name scoring is structurally
     blind to. Pure. Three reads a holdings advisor needs but a per-symbol
     scorer can't give:
@@ -372,9 +470,11 @@ def portfolio_risk(advice_rows: list, sector_map: dict = None) -> dict:
     - Single-name concentration (one position dominating the book).
     - Sector concentration, the cheap robust proxy for correlation: same-
       sector names move together, so three PSU banks is closer to one bet
-      at 3x size than three independent positions. A true return-correlation
-      matrix is a v2 refinement; sector clustering catches the dominant risk
-      for free.
+      at 3x size than three independent positions. When daily closes are
+      passed (closes_by_symbol), a measured return-correlation read (v2)
+      supersedes this proxy — clustering names by actual co-movement and
+      reporting effective_bets — and its clusters append to the flags here;
+      the sector view stays as the zero-history fallback.
     - Tax-loss harvest candidates: underwater names the advisor ALREADY
       wants to exit (SELL/TRIM). Selling both acts on the weak trend and
       realizes a capital loss that offsets gains elsewhere — real rupees for
@@ -382,8 +482,10 @@ def portfolio_risk(advice_rows: list, sector_map: dict = None) -> dict:
       short- vs long-term split depends on holding period, which we don't
       assert here.)
 
-    sector_map: {symbol: sector}. Rows without value or with INSUFFICIENT
-    data are ignored for weighting but never crash the read."""
+    sector_map: {symbol: sector}. closes_by_symbol: {symbol: [daily closes,
+    oldest first]} to enable the v2 correlation read (optional — omit for the
+    sector-proxy-only behaviour). Rows without value or with INSUFFICIENT data
+    are ignored for weighting but never crash the read."""
     sector_map = sector_map or {}
     positions, total = [], 0.0
     for r in advice_rows or []:
@@ -403,7 +505,7 @@ def portfolio_risk(advice_rows: list, sector_map: dict = None) -> dict:
 
     empty = {'total_value': 0.0, 'top_position': None, 'sector_weights': {},
              'concentration_flags': [], 'tax_loss_harvest': [],
-             'harvestable_loss_inr': 0.0}
+             'harvestable_loss_inr': 0.0, 'correlation': None}
     if not positions or total <= 0:
         return empty
 
@@ -429,6 +531,19 @@ def portfolio_risk(advice_rows: list, sector_map: dict = None) -> dict:
                 f"({', '.join(members)}) — correlated exposure, effectively "
                 f"one bet at ~{len(members)}x size")
 
+    # Measured return-correlation (v2): supersedes the sector proxy where
+    # daily candles are available. Cross-sector co-movement and 'Unknown'
+    # names the sector map can't cluster are caught here.
+    correlation = _correlation_read(positions, closes_by_symbol)
+    if correlation:
+        for cl in correlation['clusters']:
+            if cl['weight_pct'] >= CORR_CLUSTER_FLAG_PCT:
+                flags.append(
+                    f"{', '.join(cl['symbols'])} move together "
+                    f"(avg corr {cl['avg_corr']:.2f}) — {cl['weight_pct']:.0f}% of "
+                    f"the book behaving as ~1 bet, not "
+                    f"{len(cl['symbols'])} independent positions")
+
     harvest, harvestable = [], 0.0
     for p in positions:
         pnl = p['pnl_percent']
@@ -453,6 +568,7 @@ def portfolio_risk(advice_rows: list, sector_map: dict = None) -> dict:
         'tax_loss_harvest': sorted(
             harvest, key=lambda x: x['unrealized_loss_inr'], reverse=True),
         'harvestable_loss_inr': round(harvestable, 2),
+        'correlation': correlation,
     }
 
 
@@ -1017,6 +1133,7 @@ def run_advisor(market_data) -> int:
 
     run_date = datetime.now(IST).date().isoformat()
     rows = []
+    closes_by_symbol = {}   # daily closes per name → portfolio_risk v2 correlation
     for h in holdings:
         tsym = h.get('tradingsymbol')
         qty = h.get('quantity') or 0
@@ -1026,6 +1143,8 @@ def run_advisor(market_data) -> int:
         try:
             key = f'{exch}:{tsym}'
             candles = market_data.get_candles(key, 'day', 400)
+            closes_by_symbol[tsym] = [float(c['close']) for c in (candles or [])
+                                      if c.get('close') is not None]
             weight_pct = (round(qty * (h.get('last_price') or 0)
                                 / total_value * 100, 1) if total_value else None)
             # Verdict-time price: EMA of the last three 15-min closes when
@@ -1101,15 +1220,23 @@ def run_advisor(market_data) -> int:
             print(f"[advisor] rotation pass failed (non-fatal): {e}")
 
     # Portfolio-level risk view (whole book, not per-name): concentration,
-    # sector clustering (correlation proxy), tax-loss-harvest candidates.
-    # Non-fatal — a failure here never blocks storing the day's verdicts.
+    # measured return correlation (v2) with sector clustering fallback,
+    # tax-loss-harvest candidates. Non-fatal — a failure here never blocks
+    # storing the day's verdicts.
     risk = None
     try:
         sector_map = {u['symbol']: u.get('sector')
                       for u in config.NIFTY500_UNIVERSE}
-        risk = portfolio_risk(rows, sector_map=sector_map)
+        risk = portfolio_risk(rows, sector_map=sector_map,
+                              closes_by_symbol=closes_by_symbol)
         db.write_config('portfolio_risk_latest',
                         json.dumps({**risk, 'run_date': run_date}))
+        corr = risk.get('correlation')
+        if corr:
+            print(f"[advisor.risk] correlation: {corr['names_covered']} names, "
+                  f"effective_bets {corr['effective_bets']} "
+                  f"({corr['window_returns']}d window), "
+                  f"{len(corr['clusters'])} cluster(s)")
         if risk.get('concentration_flags'):
             for f in risk['concentration_flags']:
                 print(f"[advisor.risk] {f}")

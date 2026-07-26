@@ -3,6 +3,8 @@ ONLY: these tests also pin that the module never touches an order path."""
 import os
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+
 with patch.dict(os.environ, {
     'SUPABASE_URL': 'https://fake.supabase.co',
     'SUPABASE_SERVICE_KEY': 'fake-key',
@@ -547,6 +549,77 @@ def test_portfolio_risk_tax_loss_harvest():
 def test_portfolio_risk_empty_and_zero_value():
     assert pa.portfolio_risk([])['total_value'] == 0.0
     assert pa.portfolio_risk([_advice_row('X', 0, 100, 100)])['total_value'] == 0.0
+
+
+# --- portfolio_risk v2: measured return correlation ---------------------------
+
+def _closes_from_returns(rets, start=100.0):
+    """Daily close series (oldest first) from a returns array."""
+    closes = [start]
+    for r in rets:
+        closes.append(closes[-1] * (1 + r))
+    return closes
+
+
+def _corr_closes(seed=42, n=80):
+    """A,B highly correlated; C,D,E independent — deterministic per seed."""
+    rng = np.random.default_rng(seed)
+    ra = rng.normal(0, 0.012, n)
+    rb = ra + rng.normal(0, 0.002, n)            # tracks A closely
+    others = {s: rng.normal(0, 0.012, n) for s in ('C', 'D', 'E')}
+    closes = {'A': _closes_from_returns(ra), 'B': _closes_from_returns(rb)}
+    for s, r in others.items():
+        closes[s] = _closes_from_returns(r)
+    return closes
+
+
+def test_correlation_cluster_flags_comovement():
+    # five equal-weight names (20% each — no single-name flag); A & B move
+    # together, so their 40% combined exceeds the cluster-flag threshold.
+    rows = [_advice_row(s, 100, 100, 100) for s in ('A', 'B', 'C', 'D', 'E')]
+    risk = pa.portfolio_risk(rows, closes_by_symbol=_corr_closes())
+    corr = risk['correlation']
+    assert corr is not None and corr['names_covered'] == 5
+    ab = next((c for c in corr['clusters'] if set(c['symbols']) == {'A', 'B'}), None)
+    assert ab is not None and ab['avg_corr'] >= 0.7 and ab['weight_pct'] == 40.0
+    assert any('move together' in f and '~1 bet' in f
+               for f in risk['concentration_flags'])
+    # no single-name flag polluting this case
+    assert not any('single-name' in f for f in risk['concentration_flags'])
+
+
+def test_correlation_absent_without_closes():
+    # backward compatible: omit closes_by_symbol → no correlation block, no
+    # co-movement flags (sector-proxy-only behaviour preserved).
+    rows = [_advice_row(s, 100, 100, 100) for s in ('A', 'B', 'C', 'D', 'E')]
+    risk = pa.portfolio_risk(rows)
+    assert risk['correlation'] is None
+    assert not any('move together' in f for f in risk['concentration_flags'])
+
+
+def test_correlation_insufficient_history_is_none():
+    short = {'A': [100, 101, 102, 103], 'B': [100, 99, 101, 100]}
+    rows = [_advice_row('A', 100, 100, 100), _advice_row('B', 100, 100, 100)]
+    assert pa.portfolio_risk(rows, closes_by_symbol=short)['correlation'] is None
+
+
+def test_correlation_effective_bets_collapses_when_correlated():
+    # independent book → effective_bets near the name count; a book where
+    # everything shares one driver collapses toward 1.
+    rng = np.random.default_rng(7)
+    indep = {s: _closes_from_returns(rng.normal(0, 0.012, 80))
+             for s in ('A', 'B', 'C', 'D')}
+    rows = [_advice_row(s, 100, 100, 100) for s in ('A', 'B', 'C', 'D')]
+    eb_indep = pa.portfolio_risk(rows, closes_by_symbol=indep)['correlation']['effective_bets']
+
+    driver = rng.normal(0, 0.012, 80)
+    corr = {s: _closes_from_returns(driver + rng.normal(0, 0.001, 80))
+            for s in ('A', 'B', 'C', 'D')}
+    eb_corr = pa.portfolio_risk(rows, closes_by_symbol=corr)['correlation']['effective_bets']
+
+    assert eb_indep > 3.0            # ~4 independent bets
+    assert eb_corr < 1.5             # one shared bet
+    assert eb_indep > eb_corr
 
 
 def test_build_portfolio_risk_lines_quiet_when_clean():
