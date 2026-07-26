@@ -229,6 +229,14 @@ REENTRY_COOLDOWN_MIN = int(os.getenv('REENTRY_COOLDOWN_MIN', '15'))
 # ended. MARKET_CLOSED stays HARD-enforced. Paper-only: force off unless
 # PAPER_TRADING (never relax risk with real money) — see assert_safe_boot.
 DATA_COLLECTION_MODE = os.getenv('DATA_COLLECTION_MODE', 'false').strip().lower() == 'true'
+# Exception carved out of data-collection soft-stops (2026-07-27): the −3R
+# DAILY stop is enforced HARD even in data-collection mode. Measured to bleed
+# real money when overridden — 07-22 continuing past the marker went
+# −803→−1,278, 07-23 −888→−1,582. The other soft limits (trade count,
+# consecutive-loss, max-profit) stay counterfactual so the session still
+# accrues data; only the daily loss floor is honoured. Set false to restore
+# the old fully-soft behaviour.
+ENFORCE_DAILY_STOP_3R = os.getenv('ENFORCE_DAILY_STOP_3R', 'true').strip().lower() == 'true'
 # Data-richness pacing (only active under data_collection_active()):
 # the day's entry budget gets a floor of DATA_MAX_TRADES_PER_DAY (the
 # session-configured cap still logs its counterfactual), spread across the

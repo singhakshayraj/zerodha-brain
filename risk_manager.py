@@ -223,7 +223,13 @@ class RiskManager:
                              f'trades used')
 
             if soft_stop is not None:
-                if config.data_collection_active():
+                # The −3R DAILY stop is enforced HARD even in data-collection
+                # mode (measured to bleed money when overridden). Every other
+                # soft stop stays a logged counterfactual so the session keeps
+                # accruing data.
+                daily_3r_hard = (soft_stop.startswith('DAILY_STOP_3R')
+                                 and config.ENFORCE_DAILY_STOP_3R)
+                if config.data_collection_active() and not daily_3r_hard:
                     # Counterfactual: keep trading, mark where a capped run
                     # would have ended. Caller logs LIMIT_WOULD_STOP once.
                     return {

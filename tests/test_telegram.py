@@ -34,3 +34,23 @@ def test_send_message_http_error_swallowed():
     resp.raise_for_status.side_effect = Exception('403')
     with patch('telegram.requests.post', return_value=resp):
         assert telegram.send_message('tok', 'chat', 'x') is False
+
+
+def test_error_never_leaks_bot_token(capsys):
+    # requests embeds the full URL (incl the secret token) in its errors —
+    # the token must be scrubbed from every log line.
+    tok = 'SECRET123:abcDEF'
+    err = Exception(f'Conflict for url: https://api.telegram.org/bot{tok}/getUpdates')
+    with patch('telegram.requests.get', side_effect=err):
+        telegram.get_updates(tok)
+    with patch('telegram.requests.post', side_effect=err):
+        telegram.send_message(tok, 'chat', 'x')
+        telegram.answer_callback(tok, 'cbid')
+    out = capsys.readouterr().out
+    assert tok not in out
+    assert 'bot***/' in out
+
+
+def test_safe_helper_scrubs_and_passes_through():
+    assert telegram._safe(Exception('x/botTOK/y'), 'TOK') == 'x/bot***/y'
+    assert telegram._safe(Exception('no token here'), '') == 'no token here'

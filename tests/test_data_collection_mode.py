@@ -90,8 +90,22 @@ def test_max_trades_counterfactual_when_flag_on(rm):
     assert out['would_stop'].startswith('MAX_TRADES_HIT')
 
 
-def test_daily_stop_counterfactual_when_flag_on(rm):
+def test_daily_stop_HARD_even_in_data_collection(rm):
+    # 2026-07-27: the -3R daily stop is enforced HARD even in data-collection
+    # (it bled money when overridden). -800 breaches -3R (-750 on 25000@1%).
     with patch.object(config, 'data_collection_active', return_value=True), \
+         patch.object(config, 'ENFORCE_DAILY_STOP_3R', True), \
+         patch.object(rm, 'is_market_open', return_value=True):
+        out = rm.check_session_limits(_stats(total_pnl=-800.0), _config())
+    assert out['can_trade'] is False
+    assert out['reason'].startswith('DAILY_STOP_3R')
+    assert 'would_stop' not in out
+
+
+def test_daily_stop_soft_again_when_enforce_off(rm):
+    # opt-out restores the old fully-soft counterfactual behaviour
+    with patch.object(config, 'data_collection_active', return_value=True), \
+         patch.object(config, 'ENFORCE_DAILY_STOP_3R', False), \
          patch.object(rm, 'is_market_open', return_value=True):
         out = rm.check_session_limits(_stats(total_pnl=-800.0), _config())
     assert out['can_trade'] is True

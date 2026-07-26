@@ -8,6 +8,14 @@ delivers one message and never raises.
 import requests
 
 
+def _safe(err, token: str) -> str:
+    """Exception text with the bot token scrubbed. requests embeds the full
+    request URL — which contains the secret bot token — in its error strings;
+    logs are a secondary secret store, so the token must never reach them."""
+    s = str(err)
+    return s.replace(token, '***') if token else s
+
+
 def send_message(token: str, chat_id: str, text: str, timeout: int = 10,
                  reply_markup: dict = None) -> bool:
     """POST one message to a Telegram chat. Returns True on a 2xx send,
@@ -27,7 +35,7 @@ def send_message(token: str, chat_id: str, text: str, timeout: int = 10,
         ).raise_for_status()
         return True
     except Exception as e:
-        print(f"[telegram] send failed: {e}")
+        print(f"[telegram] send failed: {_safe(e, token)}")
         return False
 
 
@@ -46,7 +54,7 @@ def get_updates(token: str, offset: int = None, timeout: int = 25) -> list:
         r.raise_for_status()
         return (r.json() or {}).get('result') or []
     except Exception as e:
-        print(f"[telegram] get_updates failed: {e}")
+        print(f"[telegram] get_updates failed: {_safe(e, token)}")
         return []
 
 
@@ -64,5 +72,5 @@ def answer_callback(token: str, callback_query_id: str, text: str = '',
         ).raise_for_status()
         return True
     except Exception as e:
-        print(f"[telegram] answer_callback failed: {e}")
+        print(f"[telegram] answer_callback failed: {_safe(e, token)}")
         return False
