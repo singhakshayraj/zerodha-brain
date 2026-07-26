@@ -212,3 +212,63 @@ def test_factor_attribution_skips_ungraded_rows():
             _row(True, 2.0, price=110, ema200=100)]
     a = bt.factor_attribution(rows, min_bucket_n=1)
     assert a['graded_calls'] == 1
+
+
+# --- confidence calibration (pure) --------------------------------------------
+
+def _crow(confidence, correct):
+    return {'confidence': confidence, 'outcome_correct': correct}
+
+
+def test_calibration_curve_bins_shrinkage_and_ece():
+    # 70-80 bucket: 5 calls all right; 50-60 bucket: 5 calls all wrong.
+    rows = ([_crow(75, True) for _ in range(5)]
+            + [_crow(55, False) for _ in range(5)])
+    cal = bt.calibration_curve(rows)                 # default prior_strength=10
+    assert cal['graded_calls'] == 10
+    assert cal['base_rate_pct'] == 50.0
+    hi = next(b for b in cal['bins'] if b['label'] == '70-79')
+    lo = next(b for b in cal['bins'] if b['label'] == '50-59')
+    assert hi['empirical_hit_pct'] == 100.0 and hi['predicted_pct'] == 75.0
+    assert lo['empirical_hit_pct'] == 0.0
+    # shrinkage pulls both toward the 50% base rate: (5+10*0.5)/(5+10)=66.7,
+    # (0+10*0.5)/(5+10)=33.3
+    assert hi['calibrated_pct'] == 66.7
+    assert lo['calibrated_pct'] == 33.3
+    assert hi['low_n'] is False
+    # ECE = (5*|75-100| + 5*|55-0|)/10 = 40.0
+    assert cal['ece_pct'] == 40.0
+    assert cal['monotonic'] is True          # emp rises 0 -> 100 with confidence
+
+
+def test_calibration_curve_detects_anticalibration():
+    # mirrors the live n=21 shape: highest confidence is the WORST bucket.
+    rows = ([_crow(90, False) for _ in range(5)]
+            + [_crow(55, True) for _ in range(5)])
+    cal = bt.calibration_curve(rows)
+    assert cal['monotonic'] is False
+
+
+def test_calibration_curve_low_n_flag_and_confidence_none_excluded():
+    rows = [_crow(72, True), _crow(74, False),   # 2 in 70-80 -> low_n
+            _crow(None, True)]                    # no confidence -> excluded
+    cal = bt.calibration_curve(rows)
+    assert cal['graded_calls'] == 2
+    b = next(b for b in cal['bins'] if b['label'] == '70-79')
+    assert b['n'] == 2 and b['low_n'] is True
+
+
+def test_calibration_curve_empty():
+    cal = bt.calibration_curve([])
+    assert cal['graded_calls'] == 0 and cal['bins'] == []
+    assert cal['ece_pct'] is None and cal['monotonic'] is None
+
+
+def test_calibrated_confidence_lookup_and_fallback():
+    table = bt.calibration_curve([_crow(75, True) for _ in range(5)]
+                                 + [_crow(55, False) for _ in range(5)])
+    assert bt.calibrated_confidence(75, table) == (66.7, False)
+    # no matching bucket (60-70 empty) -> raw fallback, flagged low_n
+    assert bt.calibrated_confidence(65, table) == (65, True)
+    assert bt.calibrated_confidence(80, None) == (80, True)   # no table
+    assert bt.calibrated_confidence(None, table) == (None, True)

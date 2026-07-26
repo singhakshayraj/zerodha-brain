@@ -27,6 +27,7 @@ from datetime import datetime
 import numpy as np
 import pytz
 
+import advisor_backtest
 import config
 import database as db
 import market_regime
@@ -1225,6 +1226,31 @@ def run_advisor(market_data) -> int:
                           f"({target['score']}, {target['reason']})")
         except Exception as e:
             print(f"[advisor] rotation pass failed (non-fatal): {e}")
+
+    # Confidence calibration (Pillar 1, DARK): rebuild the reliability curve
+    # from the graded track record, store it, and stamp each row with the
+    # measured hit-rate for its confidence bucket. Self-refreshing so it stays
+    # current without waiting for an on-demand grade_advice run. Logged only —
+    # the live `confidence` and verdict are untouched until the curve earns
+    # promotion (monotonic on enough calls). Non-fatal.
+    try:
+        calib_table = advisor_backtest.calibration_curve(
+            db.get_evaluated_advice_with_features())
+        if calib_table.get('graded_calls'):
+            db.write_config('advisor_calibration_latest',
+                            json.dumps({**calib_table, 'built_at': run_date}))
+            for row in rows:
+                cc, low_n = advisor_backtest.calibrated_confidence(
+                    row.get('confidence'), calib_table)
+                ind = row.setdefault('indicators', {})
+                ind['calibrated_confidence'] = cc
+                ind['calibration_low_n'] = low_n
+            print(f"[advisor.calib] built + dark-attached "
+                  f"(n={calib_table['graded_calls']}, "
+                  f"ECE {calib_table['ece_pct']}pp, "
+                  f"monotonic {calib_table['monotonic']})")
+    except Exception as e:
+        print(f"[advisor] calibration (dark) failed (non-fatal): {e}")
 
     # Portfolio-level risk view (whole book, not per-name): concentration,
     # measured return correlation (v2) with sector clustering fallback,

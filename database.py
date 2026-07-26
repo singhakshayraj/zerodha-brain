@@ -880,7 +880,7 @@ def get_evaluated_advice_with_features() -> list:
         return _fetch_all(
             supabase.table('portfolio_advice')
             .select('run_date, symbol, verdict, trend_score, trigger_type, '
-                    'last_price, indicators, outcome_correct, '
+                    'confidence, last_price, indicators, outcome_correct, '
                     'outcome_return_pct, outcome_vs_nifty_pct')
             .eq('is_official', True)
             .not_.is_('evaluated_at', 'null')

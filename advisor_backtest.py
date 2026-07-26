@@ -356,3 +356,80 @@ def factor_attribution(rows: list, min_bucket_n: int = 5) -> dict:
         'factors': factors,
         'ranked_by_separation': ranked,
     }
+
+
+# --- Confidence calibration (advisor god-mode Pillar 1) -------------------
+# The advisor's confidence is a hand-picked heuristic: min(90, 50+|score|//2).
+# A *calibrated* confidence of 70 should mean 70% of such calls come true. This
+# builds the reliability curve — predicted confidence vs empirical hit-rate —
+# so the heuristic can eventually be REPLACED by a measured mapping instead of
+# guessed. DARK by construction: computed, stored, and dark-attached to rows,
+# but NEVER folded into the live confidence/verdict until the curve is both
+# monotonic and rests on enough calls (VISION §7: change on evidence, and n≈21
+# in one regime is nowhere near that — the shrinkage below keeps small buckets
+# honest by pulling them toward the base rate).
+
+_CALIB_BINS = [(50, 60), (60, 70), (70, 80), (80, 90), (90, 101)]
+
+
+def calibration_curve(rows: list, prior_strength: int = 10) -> dict:
+    """Reliability curve over graded advice: bucket calls by their stated
+    confidence, compare each bucket's predicted confidence to its empirical
+    hit-rate. Pure. `calibrated_pct` is the hit-rate shrunk toward the base
+    rate by a Beta(prior_strength) prior, so a 2-call bucket can't swing the
+    mapping. `ece_pct` = sample-weighted mean gap between predicted and
+    empirical (0 = perfectly calibrated); `monotonic` = does empirical
+    hit-rate rise with confidence (the property a usable confidence needs)."""
+    judged = [r for r in rows if r.get('outcome_correct') is not None
+              and r.get('confidence') is not None]
+    n = len(judged)
+    if not n:
+        return {'graded_calls': 0, 'base_rate_pct': None, 'bins': [],
+                'ece_pct': None, 'monotonic': None, 'prior_strength': prior_strength}
+
+    base = sum(1 for r in judged if r['outcome_correct']) / n
+    bins = []
+    for lo, hi in _CALIB_BINS:
+        b = [r for r in judged if lo <= r['confidence'] < hi]
+        if not b:
+            continue
+        bn = len(b)
+        hits = sum(1 for r in b if r['outcome_correct'])
+        pred = sum(r['confidence'] for r in b) / bn
+        shrunk = (hits + prior_strength * base) / (bn + prior_strength)
+        bins.append({
+            'lo': lo, 'hi': hi, 'label': f'{lo}-{hi - 1}', 'n': bn,
+            'predicted_pct': round(pred, 1),
+            'empirical_hit_pct': round(hits / bn * 100, 1),
+            'calibrated_pct': round(shrunk * 100, 1),
+            'low_n': bn < 5,
+        })
+
+    ece = sum(b['n'] * abs(b['predicted_pct'] - b['empirical_hit_pct'])
+              for b in bins) / n
+    emp = [b['empirical_hit_pct'] for b in bins]
+    monotonic = (all(x <= y for x, y in zip(emp, emp[1:]))
+                 if len(emp) >= 2 else None)
+    return {
+        'graded_calls': n,
+        'base_rate_pct': round(base * 100, 1),
+        'bins': bins,
+        'ece_pct': round(ece, 1),
+        'monotonic': monotonic,
+        'prior_strength': prior_strength,
+    }
+
+
+def calibrated_confidence(confidence, table: dict):
+    """Dark lookup: raw heuristic confidence → the measured (shrunk) hit-rate
+    for its bucket. Returns (value, low_n). Falls back to the raw confidence
+    (flagged low_n) whenever there's no table or no matching bucket — so it is
+    always safe to attach to a row without changing behaviour."""
+    if confidence is None:
+        return None, True
+    if not table or not table.get('bins'):
+        return confidence, True
+    for b in table['bins']:
+        if b['lo'] <= confidence < b['hi']:
+            return b['calibrated_pct'], b['low_n']
+    return confidence, True

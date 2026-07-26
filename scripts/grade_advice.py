@@ -24,8 +24,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import json
+from datetime import datetime
+
 import advisor_backtest
 import database as db
+from advisor_backtest import IST
 
 
 def _print_track_record(summary: dict):
@@ -73,6 +77,25 @@ def _print_attribution(attrib: dict):
               f"{', '.join(unranked)})")
 
 
+def _print_calibration(cal: dict):
+    n = cal.get('graded_calls', 0)
+    print(f"\n=== Confidence calibration ({n} graded calls) ===")
+    if not n:
+        print("Needs graded calls first. Once enough accumulate this shows "
+              "whether a stated confidence of X actually means an X% hit-rate.")
+        return
+    mono = cal['monotonic']
+    print(f"base rate: {cal['base_rate_pct']}%   ECE: {cal['ece_pct']}pp   "
+          f"monotonic: {mono}   (shrink prior k={cal['prior_strength']})")
+    print("DARK — logged only; the live confidence is NOT reweighted until the "
+          "curve is monotonic on enough calls.\n")
+    print(f"  {'bucket':<8} {'n':>3}  {'predicted':>9}  {'empirical':>9}  {'calibrated':>10}")
+    for b in cal['bins']:
+        flag = ' [low-n]' if b['low_n'] else ''
+        print(f"  {b['label']:<8} {b['n']:>3}  {b['predicted_pct']:>8}%  "
+              f"{b['empirical_hit_pct']:>8}%  {b['calibrated_pct']:>9}%{flag}")
+
+
 def main(attrib_only: bool):
     if not attrib_only:
         token = db.get_enc_token()
@@ -87,9 +110,18 @@ def main(attrib_only: bool):
             graded = advisor_backtest.run_backtest_pass(md)
             print(f"[grade_advice] graded {graded} newly-due advice rows")
 
+    features = db.get_evaluated_advice_with_features()
     _print_track_record(advisor_backtest.get_track_record_summary())
-    _print_attribution(advisor_backtest.factor_attribution(
-        db.get_evaluated_advice_with_features()))
+    _print_attribution(advisor_backtest.factor_attribution(features))
+
+    # Confidence calibration (Pillar 1): compute + persist the reliability
+    # curve so the daily advisor run can dark-attach calibrated_confidence.
+    cal = advisor_backtest.calibration_curve(features)
+    _print_calibration(cal)
+    if cal.get('graded_calls'):
+        db.write_config('advisor_calibration_latest',
+                        json.dumps({**cal, 'built_at': datetime.now(IST).isoformat()}))
+        print("\n[grade_advice] stored advisor_calibration_latest")
 
 
 if __name__ == '__main__':
