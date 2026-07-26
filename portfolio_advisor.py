@@ -22,7 +22,7 @@ Verdicts:
 import json
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import pytz
@@ -30,6 +30,7 @@ import pytz
 import advisor_backtest
 import config
 import database as db
+import stock_agent
 import market_regime
 import news_jobs
 import telegram
@@ -1062,6 +1063,36 @@ def send_daily_digest(rows: list, run_date: str, risk: dict = None) -> bool:
         return False
 
 
+def _capture_stock_timeline(rows: list) -> None:
+    """Per-stock agent (mechanical): append each holding's current mechanical
+    state to its observation timeline (hourly-deduped so frequent intraday
+    refreshes don't flood it), and attach the evolution summary to every row's
+    indicators so the verdict reads how the stock has been trending. DARK /
+    additive — never changes a verdict. Non-fatal."""
+    try:
+        sector_of = {u['symbol']: u.get('sector')
+                     for u in config.NIFTY500_UNIVERSE}
+        phase = stock_agent.observation_phase()
+        hour_ago = (datetime.now(IST) - timedelta(hours=1)).isoformat()
+        already = db.stock_symbols_observed_since(hour_ago)
+        captured = 0
+        for row in rows:
+            sym = row.get('symbol')
+            if not sym:
+                continue
+            if sym not in already:
+                if db.insert_stock_observation(stock_agent.build_observation(
+                        sym, row, sector=sector_of.get(sym), phase=phase)):
+                    captured += 1
+            recent = db.get_recent_observations(sym, limit=24)
+            row.setdefault('indicators', {})['timeline_summary'] = \
+                stock_agent.summarize_timeline(recent)
+        print(f"[advisor.agent] captured {captured}/{len(rows)} stock "
+              f"observations (phase {phase}); summaries attached")
+    except Exception as e:
+        print(f"[advisor] stock-agent capture failed (non-fatal): {e}")
+
+
 def run_advisor(market_data) -> int:
     """Analyze every real holding and store today's advice. ADVISORY ONLY —
     reads holdings + candles, writes portfolio_advice, places nothing.
@@ -1252,6 +1283,9 @@ def run_advisor(market_data) -> int:
     except Exception as e:
         print(f"[advisor] calibration (dark) failed (non-fatal): {e}")
 
+    # Per-stock agent timeline (mechanical, DARK): capture + summarize.
+    _capture_stock_timeline(rows)
+
     # Portfolio-level risk view (whole book, not per-name): concentration,
     # measured return correlation (v2) with sector clustering fallback,
     # tax-loss-harvest candidates. Non-fatal — a failure here never blocks
@@ -1375,6 +1409,10 @@ def run_advisor_lite(market_data) -> int:
             rows.append({'run_date': run_date, **advice})
         except Exception as e:
             print(f"[advisor.lite] {tsym} failed (skipped): {e}")
+
+    # Per-stock agent timeline (mechanical, DARK): hourly-deduped capture so
+    # the intraday cadence feeds the timeline without flooding it.
+    _capture_stock_timeline(rows)
 
     run_id = str(uuid.uuid4())
     for row in rows:

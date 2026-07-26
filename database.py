@@ -890,6 +890,41 @@ def get_evaluated_advice_with_features() -> list:
         return []
 
 
+def insert_stock_observation(row: dict) -> bool:
+    """One per-stock timeline row (stock_agent.build_observation output).
+    Non-fatal — a capture failure never blocks the advisory run."""
+    try:
+        supabase.table('stock_observations').insert(row).execute()
+        return True
+    except Exception as e:
+        print(f"[insert_stock_observation] {row.get('symbol')}: {e}")
+        return False
+
+
+def get_recent_observations(symbol: str, limit: int = 24) -> list:
+    """A symbol's most recent timeline rows, oldest-first (for summarize)."""
+    try:
+        res = (supabase.table('stock_observations').select('*')
+               .eq('symbol', symbol)
+               .order('observed_at', desc=True).limit(limit).execute())
+        return list(reversed(res.data or []))
+    except Exception as e:
+        print(f"[get_recent_observations] {symbol}: {e}")
+        return []
+
+
+def stock_symbols_observed_since(ts_iso: str) -> set:
+    """Symbols with at least one observation since ts_iso — the hourly-dedup
+    filter so frequent intraday refreshes don't flood the timeline."""
+    try:
+        res = (supabase.table('stock_observations').select('symbol')
+               .gte('observed_at', ts_iso).execute())
+        return {r['symbol'] for r in (res.data or [])}
+    except Exception as e:
+        print(f"[stock_symbols_observed_since] error: {e}")
+        return set()
+
+
 def write_official_portfolio_advice(rows: list) -> int:
     """The day's ONE canonical advisory batch (rotation scan + digest +
     backtest-eligible) — is_official=True on every row. Same-day re-run
