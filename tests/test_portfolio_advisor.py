@@ -597,6 +597,22 @@ def test_correlation_absent_without_closes():
     assert not any('move together' in f for f in risk['concentration_flags'])
 
 
+def test_correlation_digest_line_present_and_quiet():
+    # clustered book → the 🔗 effective-bets line shows in the digest;
+    # a book with no clusters keeps the channel quiet.
+    rows = [_advice_row(s, 100, 100, 100) for s in ('A', 'B', 'C', 'D', 'E')]
+    risk = pa.portfolio_risk(rows, closes_by_symbol=_corr_closes())
+    lines = pa.build_portfolio_risk_lines(risk)
+    assert any('Effective bets' in ln and 'A+B' in ln for ln in lines)
+
+    rng = np.random.default_rng(3)
+    indep = {s: _closes_from_returns(rng.normal(0, 0.012, 80))
+             for s in ('A', 'B', 'C', 'D', 'E')}
+    quiet = pa.portfolio_risk(rows, closes_by_symbol=indep)
+    assert not any('Effective bets' in ln
+                   for ln in pa.build_portfolio_risk_lines(quiet))
+
+
 def test_correlation_insufficient_history_is_none():
     short = {'A': [100, 101, 102, 103], 'B': [100, 99, 101, 100]}
     rows = [_advice_row('A', 100, 100, 100), _advice_row('B', 100, 100, 100)]

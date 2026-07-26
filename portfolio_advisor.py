@@ -579,6 +579,13 @@ def build_portfolio_risk_lines(risk: dict) -> list:
     if not risk or not risk.get('total_value'):
         return []
     body = [f"⚠ {f}" for f in risk.get('concentration_flags', [])]
+    corr = risk.get('correlation')
+    if corr and corr.get('effective_bets') is not None and corr.get('clusters'):
+        groups = '; '.join('+'.join(c['symbols']) for c in corr['clusters'])
+        body.append(
+            f"🔗 Effective bets: ~{corr['effective_bets']} of "
+            f"{corr['names_covered']} — names moving together ({groups}) count "
+            f"as fewer independent positions than the raw holding count.")
     harvest = risk.get('tax_loss_harvest') or []
     if harvest:
         names = ', '.join(
