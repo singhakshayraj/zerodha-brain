@@ -1422,3 +1422,63 @@ def run_advisor_lite(market_data) -> int:
     print(f"[advisor.lite] stored {n} intraday snapshots for {run_date} "
           f"(run_id={run_id})")
     return n
+
+
+def run_timeline_capture(market_data) -> int:
+    """Always-on per-stock capture (agent P2): a lightweight pass that ONLY
+    appends a mechanical observation per holding to the timeline — no rotation
+    scan, no digest, no advice-row write. Driven by the scheduler's pre-open
+    and post-close slots so the per-stock timeline keeps building outside the
+    intraday advisory window, whenever a token is live. Read-only w.r.t.
+    orders; hourly-deduped inside _capture_stock_timeline. Per-symbol failures
+    skip that symbol."""
+    try:
+        holdings = market_data.kite.get_holdings() or []
+    except Exception as e:
+        print(f"[advisor.capture] holdings fetch failed: {e}")
+        return 0
+    if not holdings:
+        return 0
+
+    for h in holdings:
+        tsym = h.get('tradingsymbol')
+        token = h.get('instrument_token')
+        if tsym and token:
+            key = f"{h.get('exchange') or 'NSE'}:{tsym}"
+            market_data._instrument_cache[key] = token
+
+    history = tradebook_stats(db.get_tradebook())
+    nifty_closes, nifty_candles = [], []
+    try:
+        market_data._instrument_cache['NSE:NIFTY 50'] = NIFTY50_INDEX_TOKEN
+        nifty_candles = completed_bars(
+            market_data.get_candles('NSE:NIFTY 50', 'day', 400) or [])
+        nifty_closes = [float(c['close']) for c in nifty_candles
+                        if c.get('close') is not None]
+    except Exception as e:
+        print(f"[advisor.capture] nifty benchmark unavailable (non-fatal): {e}")
+    regime = market_regime.get_market_regime(nifty_candles)['regime']
+
+    rows = []
+    for h in holdings:
+        tsym = h.get('tradingsymbol')
+        qty = h.get('quantity') or 0
+        if not tsym or qty <= 0:
+            continue
+        try:
+            key = f"{h.get('exchange') or 'NSE'}:{tsym}"
+            candles = market_data.get_candles(key, 'day', 400)
+            advice = advise({
+                'symbol': tsym, 'quantity': qty,
+                'average_price': h.get('average_price'),
+                'last_price': h.get('last_price'),
+            }, candles or [], history=history.get(tsym),
+               nifty_closes=nifty_closes, news_sent=news_sentiment(tsym),
+               regime=regime)
+            rows.append(advice)
+        except Exception as e:
+            print(f"[advisor.capture] {tsym} skipped: {e}")
+
+    _capture_stock_timeline(rows)
+    print(f"[advisor.capture] timeline pass done: {len(rows)} holdings")
+    return len(rows)

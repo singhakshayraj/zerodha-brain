@@ -662,3 +662,51 @@ def test_build_digest_risk_only_still_pushes():
     risk = pa.portfolio_risk(rows)
     text = pa.build_digest(rows, '2026-07-24', risk=risk)
     assert 'single-name concentration' in text
+
+
+# --- run_timeline_capture (per-stock agent P2) --------------------------------
+
+def test_run_timeline_capture_inserts_observation():
+    md = _md([{'tradingsymbol': 'INFY', 'exchange': 'NSE', 'quantity': 5,
+               'average_price': 1500.0, 'last_price': 1074.0,
+               'instrument_token': 408065}],
+             _candles(250, start=1500, step=-1.5))
+    md._instrument_cache = {}
+    inserted = []
+    with patch.object(pa.db, 'get_tradebook', return_value=[]), \
+         patch.object(pa.db, 'stock_symbols_observed_since', return_value=set()), \
+         patch.object(pa.db, 'get_recent_observations', return_value=[]), \
+         patch.object(pa.db, 'insert_stock_observation',
+                      side_effect=lambda r: inserted.append(r) or True):
+        n = pa.run_timeline_capture(md)
+    assert n == 1
+    assert len(inserted) == 1
+    obs = inserted[0]
+    assert obs['symbol'] == 'INFY' and obs['payload']['fundamentals'] is None
+    assert 'trend_score' in obs
+    # advisory only — no order path was ever touched
+    for name in ('place_buy_order', 'place_sell_order', 'place_order'):
+        assert not getattr(md.kite, name).called
+
+
+def test_run_timeline_capture_no_holdings_noop():
+    md = _md([], [])
+    md._instrument_cache = {}
+    assert pa.run_timeline_capture(md) == 0
+
+
+def test_run_timeline_capture_hourly_dedup_skips_insert():
+    md = _md([{'tradingsymbol': 'INFY', 'exchange': 'NSE', 'quantity': 5,
+               'average_price': 1500.0, 'last_price': 1074.0,
+               'instrument_token': 408065}],
+             _candles(250, start=1500, step=-1.5))
+    md._instrument_cache = {}
+    inserted = []
+    with patch.object(pa.db, 'get_tradebook', return_value=[]), \
+         patch.object(pa.db, 'stock_symbols_observed_since', return_value={'INFY'}), \
+         patch.object(pa.db, 'get_recent_observations', return_value=[]), \
+         patch.object(pa.db, 'insert_stock_observation',
+                      side_effect=lambda r: inserted.append(r) or True):
+        n = pa.run_timeline_capture(md)
+    assert n == 1              # holding still processed
+    assert inserted == []      # but already-observed-this-hour -> no insert

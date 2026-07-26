@@ -256,6 +256,54 @@ def _maybe_kick_weekly_profiles() -> None:
         print(f"[SCHEDULER] profiles kick errored (non-fatal): {e}")
 
 
+_timeline_capture_slots = set()   # (date, phase) already captured this process
+
+
+def _maybe_capture_timeline() -> None:
+    """Per-stock agent (P2) — always-on timeline capture in the two windows
+    the advisor refresh loop doesn't cover: PRE_OPEN (08:45–09:14) and
+    POST_CLOSE (15:35–16:30) IST. The intraday window is already captured by
+    the advisor refresh (hourly-deduped). Once per (day, phase) when a live
+    token exists; daemon thread; non-fatal. Read-only w.r.t. orders."""
+    if config.QA_MODE:
+        return
+    try:
+        now = datetime.now(IST)
+        today = now.date().isoformat()
+        if now.weekday() > 4 or today in config.NSE_HOLIDAYS:
+            return
+        m = now.hour * 60 + now.minute
+        if (8 * 60 + 45) <= m <= (9 * 60 + 14):
+            phase = 'PRE_OPEN'
+        elif (15 * 60 + 35) <= m <= (16 * 60 + 30):
+            phase = 'POST_CLOSE'
+        else:
+            return
+        key = (today, phase)
+        if key in _timeline_capture_slots:
+            return
+        token = db.get_enc_token()
+        if not token or not _token_is_live(token):
+            return
+        _timeline_capture_slots.add(key)
+
+        def _run():
+            try:
+                import portfolio_advisor
+                from market_data import MarketData
+                n = portfolio_advisor.run_timeline_capture(
+                    MarketData(KiteClient(token)))
+                print(f"[SCHEDULER] timeline capture ({phase}) done: "
+                      f"{n} holdings")
+            except Exception as e:
+                print(f"[SCHEDULER] timeline capture ({phase}) failed "
+                      f"(non-fatal): {e}")
+
+        threading.Thread(target=_run, daemon=True, name='timeline').start()
+    except Exception as e:
+        print(f"[SCHEDULER] timeline capture errored (non-fatal): {e}")
+
+
 def _report_stale_token() -> None:
     """One durable token_incident + feed line per stale episode (deduped)."""
     global _stale_token_reported
@@ -467,6 +515,8 @@ def run():
             _maybe_token_preflight()
             # Weekly profiles get their post-close window (15:40+).
             _maybe_kick_weekly_profiles()
+            # Per-stock agent: pre-open + post-close timeline capture (P2).
+            _maybe_capture_timeline()
             # Portfolio advisor: once per day when a live token exists.
             # Advisory-only, independent of trading sessions; never blocks
             # the loop (runs on a daemon thread).
