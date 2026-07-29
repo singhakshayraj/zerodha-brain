@@ -29,6 +29,26 @@ MONDAY = 13
 
 def _reset():
     scheduler._advisor_running = False
+    scheduler._advisor_started_at = None
+
+
+def test_running_flag_blocks_when_fresh():
+    # a genuinely in-flight advisor (started just now) must not double-fire
+    _reset()
+    scheduler._advisor_running = True
+    scheduler._advisor_started_at = datetime.now(IST)
+    at_window = datetime(2026, 7, MONDAY, 10, 0, tzinfo=IST)
+    _fire(at_window, have_official=False).assert_not_called()
+
+
+def test_stale_running_flag_self_heals_and_fires():
+    # P-17: a wedged advisor thread (>10min) must not strand the day — the
+    # flag resets and the run retries.
+    _reset()
+    scheduler._advisor_running = True
+    scheduler._advisor_started_at = datetime(2000, 1, 1, tzinfo=IST)  # ancient
+    at_window = datetime(2026, 7, MONDAY, 10, 0, tzinfo=IST)
+    _fire(at_window, have_official=False).assert_called_once()
 
 
 def _cfg(advisor_run_now='', enc_token='tok'):

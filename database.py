@@ -925,6 +925,21 @@ def stock_symbols_observed_since(ts_iso: str) -> set:
         return set()
 
 
+def stock_symbols_observed_today_in_phase(ist_date: str, phase: str) -> set:
+    """Symbols already captured TODAY in a specific phase — the dedup for the
+    once-per-day PRE_OPEN/POST_CLOSE snapshots. Distinct from the hourly filter
+    above: a POST_CLOSE (15:35) must NOT be deduped against a 15:2X intraday
+    refresh, so this keys on (phase, today) instead of a rolling hour."""
+    try:
+        start_ist = f"{ist_date}T00:00:00+05:30"
+        res = (supabase.table('stock_observations').select('symbol')
+               .eq('phase', phase).gte('observed_at', start_ist).execute())
+        return {r['symbol'] for r in (res.data or [])}
+    except Exception as e:
+        print(f"[stock_symbols_observed_today_in_phase] error: {e}")
+        return set()
+
+
 def write_official_portfolio_advice(rows: list) -> int:
     """The day's ONE canonical advisory batch (rotation scan + digest +
     backtest-eligible) — is_official=True on every row. Same-day re-run

@@ -736,8 +736,16 @@ def _capture_stock_timeline(rows: list) -> None:
         sector_of = {u['symbol']: u.get('sector')
                      for u in config.NIFTY500_UNIVERSE}
         phase = stock_agent.observation_phase()
-        hour_ago = (datetime.now(IST) - timedelta(hours=1)).isoformat()
-        already = db.stock_symbols_observed_since(hour_ago)
+        # Phase-aware dedup. INTRADAY refreshes fire often → hourly dedup so the
+        # timeline isn't flooded. PRE_OPEN/POST_CLOSE are once-a-day snapshots →
+        # dedup per (phase, today), NOT hourly: otherwise a 15:2X intraday
+        # capture hourly-deduped the 15:35 POST_CLOSE into oblivion (P-15).
+        if phase == 'INTRADAY':
+            cutoff = (datetime.now(IST) - timedelta(hours=1)).isoformat()
+            already = db.stock_symbols_observed_since(cutoff)
+        else:
+            today = datetime.now(IST).date().isoformat()
+            already = db.stock_symbols_observed_today_in_phase(today, phase)
         captured = 0
         for row in rows:
             sym = row.get('symbol')

@@ -666,25 +666,40 @@ def test_build_digest_risk_only_still_pushes():
 
 # --- run_timeline_capture (per-stock agent P2) --------------------------------
 
-def test_run_timeline_capture_inserts_observation():
+def _md_infy():
     md = _md([{'tradingsymbol': 'INFY', 'exchange': 'NSE', 'quantity': 5,
                'average_price': 1500.0, 'last_price': 1074.0,
                'instrument_token': 408065}],
              _candles(250, start=1500, step=-1.5))
     md._instrument_cache = {}
+    return md
+
+
+def _run_capture(md, phase, hourly=None, phase_today=None):
+    """Run run_timeline_capture with a pinned phase + patched dedup helpers;
+    returns the list of inserted observation rows."""
     inserted = []
-    with patch.object(pa.db, 'get_tradebook', return_value=[]), \
-         patch.object(pa.db, 'stock_symbols_observed_since', return_value=set()), \
+    with patch.object(pa.stock_agent, 'observation_phase', return_value=phase), \
+         patch.object(pa.db, 'get_tradebook', return_value=[]), \
+         patch.object(pa.db, 'stock_symbols_observed_since',
+                      return_value=hourly if hourly is not None else set()), \
+         patch.object(pa.db, 'stock_symbols_observed_today_in_phase',
+                      return_value=phase_today if phase_today is not None else set()), \
          patch.object(pa.db, 'get_recent_observations', return_value=[]), \
          patch.object(pa.db, 'insert_stock_observation',
                       side_effect=lambda r: inserted.append(r) or True):
         n = pa.run_timeline_capture(md)
-    assert n == 1
-    assert len(inserted) == 1
+    return n, inserted
+
+
+def test_run_timeline_capture_inserts_observation():
+    n, inserted = _run_capture(_md_infy(), 'INTRADAY')
+    assert n == 1 and len(inserted) == 1
     obs = inserted[0]
     assert obs['symbol'] == 'INFY' and obs['payload']['fundamentals'] is None
     assert 'trend_score' in obs
-    # advisory only — no order path was ever touched
+    md = _md_infy()  # order-path pin
+    _run_capture(md, 'INTRADAY')
     for name in ('place_buy_order', 'place_sell_order', 'place_order'):
         assert not getattr(md.kite, name).called
 
@@ -695,18 +710,22 @@ def test_run_timeline_capture_no_holdings_noop():
     assert pa.run_timeline_capture(md) == 0
 
 
-def test_run_timeline_capture_hourly_dedup_skips_insert():
-    md = _md([{'tradingsymbol': 'INFY', 'exchange': 'NSE', 'quantity': 5,
-               'average_price': 1500.0, 'last_price': 1074.0,
-               'instrument_token': 408065}],
-             _candles(250, start=1500, step=-1.5))
-    md._instrument_cache = {}
-    inserted = []
-    with patch.object(pa.db, 'get_tradebook', return_value=[]), \
-         patch.object(pa.db, 'stock_symbols_observed_since', return_value={'INFY'}), \
-         patch.object(pa.db, 'get_recent_observations', return_value=[]), \
-         patch.object(pa.db, 'insert_stock_observation',
-                      side_effect=lambda r: inserted.append(r) or True):
-        n = pa.run_timeline_capture(md)
-    assert n == 1              # holding still processed
-    assert inserted == []      # but already-observed-this-hour -> no insert
+def test_run_timeline_capture_intraday_hourly_dedup_skips():
+    # INTRADAY: an observation in the last hour dedups the insert.
+    n, inserted = _run_capture(_md_infy(), 'INTRADAY', hourly={'INFY'})
+    assert n == 1 and inserted == []
+
+
+def test_run_timeline_capture_postclose_bypasses_hourly_dedup():
+    # P-15 fix: POST_CLOSE must NOT be blocked by a recent intraday capture
+    # (hourly filter says INFY seen), only by a same-phase capture today.
+    n, inserted = _run_capture(_md_infy(), 'POST_CLOSE',
+                               hourly={'INFY'}, phase_today=set())
+    assert n == 1 and len(inserted) == 1
+    assert inserted[0]['phase'] == 'POST_CLOSE'
+
+
+def test_run_timeline_capture_postclose_once_per_day():
+    # already captured POST_CLOSE today for INFY -> skip.
+    n, inserted = _run_capture(_md_infy(), 'POST_CLOSE', phase_today={'INFY'})
+    assert n == 1 and inserted == []

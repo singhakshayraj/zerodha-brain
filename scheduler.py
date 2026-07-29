@@ -67,6 +67,7 @@ def _token_is_live(token: str) -> bool:
 # lucky redeploy reset the flag. DB-backed dedup fixes both that and the
 # redeploy-fragility in one move.
 _advisor_running = False
+_advisor_started_at = None   # when the current advisor thread began (staleness)
 _preflight_date = None
 
 
@@ -154,9 +155,21 @@ def _maybe_run_advisor() -> None:
     Runs on a daemon thread so the scheduler loop never waits on candle
     fetches. Skipped in QA (synthetic market has no real holdings) and on
     non-trading days."""
-    global _advisor_running
-    if config.QA_MODE or _advisor_running:
+    global _advisor_running, _advisor_started_at
+    if config.QA_MODE:
         return
+    if _advisor_running:
+        # Staleness self-heal (P-17): a wedged advisor thread must not strand
+        # the whole day. On 2026-07-28 the run fired ~5h late; if a thread hangs
+        # (e.g. a slow/hung Kite call), reset the flag after 10min so the gate
+        # can retry instead of silently blocking every tick.
+        stale = (_advisor_started_at and
+                 (datetime.now(IST) - _advisor_started_at).total_seconds() > 600)
+        if not stale:
+            return
+        print("[SCHEDULER] advisor thread stale >10min — resetting the running "
+              "flag so today's run can retry")
+        _advisor_running = False
     now = _now_ist()
     today = now.date().isoformat()
     if now.weekday() > 4 or today in config.NSE_HOLIDAYS:
@@ -185,8 +198,16 @@ def _maybe_run_advisor() -> None:
 
     token = db.get_enc_token()
     if not token or not _token_is_live(token):
+        # The silent killer — log it so a stalled advisor is diagnosable from
+        # logs alone (P-17); the time-based skips above are normal + frequent
+        # and deliberately stay quiet.
+        print(f"[SCHEDULER] advisor gate ({'official' if is_official_run else 'lite'})"
+              f" → skip: no live token")
         return
     _advisor_running = True
+    _advisor_started_at = datetime.now(IST)
+    print(f"[SCHEDULER] advisor gate → running "
+          f"({'forced' if forced else 'official' if is_official_run else 'lite'})")
 
     def _run():
         global _advisor_running
@@ -256,7 +277,8 @@ def _maybe_kick_weekly_profiles() -> None:
         print(f"[SCHEDULER] profiles kick errored (non-fatal): {e}")
 
 
-_timeline_capture_slots = set()   # (date, phase) already captured this process
+_timeline_capture_slots = set()      # (date, phase) SUCCESSFULLY captured
+_timeline_capture_inflight = set()   # (date, phase) a thread is running now
 
 
 def _maybe_capture_timeline() -> None:
@@ -280,12 +302,14 @@ def _maybe_capture_timeline() -> None:
         else:
             return
         key = (today, phase)
-        if key in _timeline_capture_slots:
+        if key in _timeline_capture_slots or key in _timeline_capture_inflight:
             return
         token = db.get_enc_token()
         if not token or not _token_is_live(token):
+            print(f"[SCHEDULER] timeline capture ({phase}) skipped — "
+                  f"no live token in the window")
             return
-        _timeline_capture_slots.add(key)
+        _timeline_capture_inflight.add(key)
 
         def _run():
             try:
@@ -293,11 +317,15 @@ def _maybe_capture_timeline() -> None:
                 from market_data import MarketData
                 n = portfolio_advisor.run_timeline_capture(
                     MarketData(KiteClient(token)))
+                _timeline_capture_slots.add(key)   # mark done only on success
                 print(f"[SCHEDULER] timeline capture ({phase}) done: "
                       f"{n} holdings")
             except Exception as e:
+                # NOT marked done → retries on the next tick within the window.
                 print(f"[SCHEDULER] timeline capture ({phase}) failed "
-                      f"(non-fatal): {e}")
+                      f"(will retry): {e}")
+            finally:
+                _timeline_capture_inflight.discard(key)
 
         threading.Thread(target=_run, daemon=True, name='timeline').start()
     except Exception as e:
