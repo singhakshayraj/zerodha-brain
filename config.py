@@ -288,6 +288,14 @@ KELLY_SAFETY_MULTIPLIER = 0.33  # fractional Kelly: use 33% of full Kelly
 # does not work on OMS for retail authentication
 TRADING_MODE_FORCE = 'HOLDINGS_ONLY'
 
+# The /quote/ltp endpoint 400s on a retail enctoken (same reason as above), so
+# the paper broker's live-LTP fetch is guaranteed to fail — every fill already
+# falls back to the brain's hint_price. Default OFF so we skip the doomed HTTP
+# call + the log spam it produced (400 InputException per fill). Flip ON only
+# with a full Kite Connect subscription that grants /quote access.
+PAPER_QUOTE_LTP_ENABLED = os.getenv(
+    'PAPER_QUOTE_LTP_ENABLED', 'false').strip().lower() == 'true'
+
 # NSE 2026 holidays (equity segment; cross-checked cleartax + groww
 # against the NSE circular, 2026-07-06). Nov 8 Diwali Muhurat is a Sunday —
 # weekend check covers it.

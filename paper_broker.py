@@ -58,7 +58,12 @@ class PaperBroker:
 
     def _live_price(self, kite: KiteClient, symbol: str, exchange: str):
         """Fetch real LTP for the instrument. Returns None if unavailable —
-        a paper fill without a real price would poison the dataset."""
+        a paper fill without a real price would poison the dataset. Skipped
+        entirely on a retail enctoken (config.PAPER_QUOTE_LTP_ENABLED off):
+        /quote/ltp 400s there, so the call was pure waste + log spam and the
+        fill falls back to hint_price regardless."""
+        if not config.PAPER_QUOTE_LTP_ENABLED:
+            return None
         instrument = f"{exchange}:{self._clean_symbol(symbol)}"
         try:
             data = kite.get_ltp([instrument]) or {}

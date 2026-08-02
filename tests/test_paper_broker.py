@@ -58,33 +58,33 @@ def test_charges_scale_with_turnover():
 
 def test_buy_fill_price_above_ltp():
     b = _broker()
-    result = b.place_buy_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10)
+    result = b.place_buy_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10, hint_price=100.0)
     assert result is not None
     assert result['price'] > 100.0   # adverse: buy pays up
 
 
 def test_sell_fill_price_below_ltp():
     b = _broker()
-    result = b.place_sell_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10)
+    result = b.place_sell_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10, hint_price=100.0)
     assert result is not None
     assert result['price'] < 100.0   # adverse: sell receives less
 
 
 def test_short_fill_behaves_like_sell():
     b = _broker()
-    result = b.place_short_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10)
+    result = b.place_short_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10, hint_price=100.0)
     assert result['price'] < 100.0
 
 
 def test_cover_fill_behaves_like_buy():
     b = _broker()
-    result = b.cover_short_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10)
+    result = b.cover_short_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10, hint_price=100.0)
     assert result['price'] > 100.0
 
 
 def test_fill_value_matches_price_times_quantity():
     b = _broker()
-    result = b.place_buy_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10)
+    result = b.place_buy_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10, hint_price=100.0)
     assert result['value'] == result['price'] * 10
     assert result['quantity'] == 10
     assert result['status'] == 'COMPLETE'
@@ -94,14 +94,14 @@ def test_fill_value_matches_price_times_quantity():
 
 def test_fill_exposes_reference_price_and_bps():
     b = _broker()
-    result = b.place_buy_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10)
+    result = b.place_buy_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10, hint_price=100.0)
     assert result['reference_price'] == 100.0     # intended (ltp)
     assert result['slippage_bps'] > 0             # adverse cost, positive
 
 
 def test_buy_slippage_bps_reflects_fill_above_reference():
     b = _broker()
-    result = b.place_buy_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10)
+    result = b.place_buy_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10, hint_price=100.0)
     # bps recomputed from the decomposed fields matches the reported value
     expected = round((result['price'] - result['reference_price'])
                      / result['reference_price'] * 10000, 2)
@@ -110,7 +110,7 @@ def test_buy_slippage_bps_reflects_fill_above_reference():
 
 def test_sell_slippage_bps_positive_though_fill_below_reference():
     b = _broker()
-    result = b.place_sell_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10)
+    result = b.place_sell_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10, hint_price=100.0)
     assert result['price'] < result['reference_price']
     assert result['slippage_bps'] > 0   # adverse magnitude, always positive
 
@@ -131,11 +131,31 @@ def test_fill_uses_hint_price_when_ltp_unavailable():
 
 
 def test_fill_ignores_zero_or_negative_ltp():
+    # quote-path guard: a bad LTP is ignored (needs the flag on to exercise it)
     kite = MagicMock()
     kite.get_ltp.return_value = {'NSE:INFY': {'last_price': -5.0}}
     b = _broker()
-    result = b.place_buy_order(kite, 'NSE:INFY', 'NSE', 10)
+    with patch.object(config, 'PAPER_QUOTE_LTP_ENABLED', True):
+        result = b.place_buy_order(kite, 'NSE:INFY', 'NSE', 10)
     assert result is None
+
+
+def test_quote_ltp_skipped_on_retail_token_by_default():
+    # default (retail): the doomed /quote call is NOT made; hint_price fills.
+    kite = _kite(ltp=100.0)
+    b = _broker()
+    result = b.place_buy_order(kite, 'NSE:INFY', 'NSE', 10, hint_price=100.0)
+    assert result is not None and result['reference_price'] == 100.0
+    kite.get_ltp.assert_not_called()
+
+
+def test_quote_ltp_used_when_flag_enabled():
+    kite = _kite(ltp=100.0)
+    b = _broker()
+    with patch.object(config, 'PAPER_QUOTE_LTP_ENABLED', True):
+        result = b.place_buy_order(kite, 'NSE:INFY', 'NSE', 10)
+    assert result is not None and result['reference_price'] == 100.0
+    kite.get_ltp.assert_called_once()
 
 
 def test_fill_logs_order_failed_activity_when_session_id_set():
