@@ -200,6 +200,7 @@ class TradingBrain:
         self._symbol_trades_today = {}   # symbol -> entries opened today
         self._hour_trades = {}           # IST hour -> entries opened
         self._entry_deferred_logged = set()  # (symbol, reason) dedup per day
+        self._outside_open_logged = set()  # symbols with a WOULD_BLOCK row (P-07)
         # Last computed indicator state per symbol — reused as the exit-time
         # snapshot (P4/exit-state) instead of recomputing TA inside the ~30s
         # exit path. 'at'/'cycle' make staleness visible to analysis.
@@ -912,6 +913,8 @@ class TradingBrain:
                             print(f"[brain] Already long {symbol}, skipping duplicate BUY")
                         elif self._cooldown_gate(symbol):
                             pass   # re-entry cooldown (flag-gated) suppressed it
+                        elif self._open_window_gate(symbol, 'BUY'):
+                            pass   # outside opening window (flag-gated) suppressed it
                         else:
                             block = self._entry_block(
                                 symbol, remaining_trades, trades_this_cycle,
@@ -967,6 +970,8 @@ class TradingBrain:
                         ):
                             if self._cooldown_gate(symbol):
                                 pass   # would short, but re-entry cooldown (flag) suppressed it
+                            elif self._open_window_gate(symbol, 'SHORT'):
+                                pass   # outside opening window (flag-gated) suppressed it
                             else:
                                 block = self._entry_block(
                                     symbol, remaining_trades, trades_this_cycle,
@@ -1625,6 +1630,42 @@ class TradingBrain:
              'cooldown_min': config.REENTRY_COOLDOWN_MIN})
         return False
 
+    def _open_window_gate(self, symbol: str, side: str) -> bool:
+        """Entry guard (dark, P-07/T4). Returns True if the caller should SKIP
+        this entry. T4 found the opening hour is the only +EV bucket —
+        expectancy falls monotonically through the day. Every entry AFTER the
+        open window logs what a trade-only-open filter WOULD have suppressed;
+        only actually blocks when the flag is on (measure before enabling,
+        VISION §7). WOULD-block activity deduped per symbol per session to keep
+        the feed readable — the graded surface is the trade's own entry_time."""
+        now = datetime.now(IST)
+        window_end = now.replace(hour=config.OPEN_WINDOW_END_HOUR,
+                                 minute=config.OPEN_WINDOW_END_MIN,
+                                 second=0, microsecond=0)
+        if now <= window_end:
+            return False   # inside the opening window — always allow
+        mins_after = (now - window_end).total_seconds() / 60.0
+        end_hhmm = f"{config.OPEN_WINDOW_END_HOUR:02d}:{config.OPEN_WINDOW_END_MIN:02d}"
+        if config.TRADE_ONLY_OPEN_ENABLED:
+            print(f"[open_window] skip {side} {symbol} — {mins_after:.0f}m "
+                  f"after {end_hhmm} (outside +EV window)")
+            self._log_activity_safe(
+                'OUTSIDE_OPEN_BLOCKED', symbol,
+                f"{side} {symbol} {mins_after:.0f}m after {end_hhmm} — entry blocked",
+                {'side': side, 'minutes_after_open': round(mins_after, 1),
+                 'window_end': end_hhmm})
+            return True
+        # flag off — record what it WOULD have blocked (once per symbol), allow
+        if symbol not in self._outside_open_logged:
+            self._outside_open_logged.add(symbol)
+            self._log_activity_safe(
+                'OUTSIDE_OPEN_WOULD_BLOCK', symbol,
+                f"trade-only-open would block {side} {symbol} "
+                f"({mins_after:.0f}m after {end_hhmm}) — disabled",
+                {'side': side, 'minutes_after_open': round(mins_after, 1),
+                 'window_end': end_hhmm})
+        return False
+
     def _log_activity_safe(self, activity_type: str, symbol: str,
                            message: str, data: dict) -> None:
         try:
@@ -1808,6 +1849,37 @@ class TradingBrain:
         quote = self.market_data._holdings_cache.get(key, {}) or {}
         return quote.get('price') or quote.get('last_price') or 0
 
+    def _stop_fill_price(self, trade: dict, current_price: float,
+                         is_short: bool) -> float:
+        """Model a resting broker-side stop-market fill for a STOP_LOSS_HIT
+        (P-05). The ~30s exit poll catches price after it has drifted past the
+        stop, so filling at `current_price` books the poll-latency tail as loss
+        (measured STOP_LOSS_HIT avg −1.62R vs the −1R the stop is sized for).
+        Cap the fill a bounded band (config.PAPER_STOP_SLIPPAGE_CAP_R × the
+        entry→stop risk-per-share) past the stop: genuine slippage inside the
+        band is kept, the poll-latency tail beyond it is trimmed. Never returns
+        a fill better than the stop itself, so no fabricated favourable fills.
+        cap ≤ 0 (or a degenerate stop) → raw `current_price`, pre-P-05 behaviour."""
+        cap = config.PAPER_STOP_SLIPPAGE_CAP_R
+        entry = trade.get('entry_price')
+        stop = trade.get('stop_loss_price')
+        if cap <= 0 or not entry or not stop:
+            return current_price
+        risk_ps = abs(entry - stop)
+        if risk_ps <= 0:
+            return current_price
+        band = cap * risk_ps
+        if is_short:
+            # short stop sits ABOVE entry; a worse fill is a HIGHER price.
+            capped = min(current_price, stop + band)
+        else:
+            # long stop sits BELOW entry; a worse fill is a LOWER price.
+            capped = max(current_price, stop - band)
+        if capped != current_price:
+            print(f"[stop_cap] {trade.get('symbol')} stop fill {current_price} "
+                  f"→ {round(capped, 2)} (cap {cap}R past stop {stop})")
+        return capped
+
     def _evaluate_exit(self, trade: dict, current_price: float) -> bool:
         """Stop → target → time-stop for ONE open trade, priority order
         (REQ-051). Returns True if the position was exited. May end the
@@ -1831,14 +1903,18 @@ class TradingBrain:
             elif current_price <= trade['target_price']:
                 should_exit, exit_reason = True, 'TARGET_HIT'
             if should_exit:
-                self._cover_short(trade, current_price)
+                fill_px = (self._stop_fill_price(trade, current_price, True)
+                           if exit_reason == 'STOP_LOSS_HIT' else current_price)
+                self._cover_short(trade, fill_px)
         else:
             if current_price <= trade['stop_loss_price']:
                 should_exit, exit_reason = True, 'STOP_LOSS_HIT'
             elif current_price >= trade['target_price']:
                 should_exit, exit_reason = True, 'TARGET_HIT'
             if should_exit:
-                self._execute_sell_by_trade(trade, current_price, exit_reason)
+                fill_px = (self._stop_fill_price(trade, current_price, False)
+                           if exit_reason == 'STOP_LOSS_HIT' else current_price)
+                self._execute_sell_by_trade(trade, fill_px, exit_reason)
 
         # Time-stop (REQ-051): only if stop/target did NOT fire, preserving
         # the stop→target→time-stop priority. Flag-gated.

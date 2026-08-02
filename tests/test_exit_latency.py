@@ -49,9 +49,12 @@ def _long(stop=98, target=110, entry_time=None):
 # --- fresh price is used for exits ---
 
 def test_exit_uses_fresh_price_not_stale_cache():
+    # cap off so this asserts the SELECTED price (fresh vs cache), not the
+    # P-05 stop-fill cap — that's covered in test_stop_fill_cap.py.
     b = _brain([_long()], fresh_price=95.0)   # below stop 98
     with patch('brain.db.get_open_trades', return_value=b._open_trades), \
          patch('brain.db.log_brain_activity'), \
+         patch.object(config, 'PAPER_STOP_SLIPPAGE_CAP_R', 0.0), \
          patch.object(b, '_execute_sell_by_trade') as sell:
         b._check_and_close_positions()
     sell.assert_called_once()
@@ -66,6 +69,7 @@ def test_exit_falls_back_to_cache_when_fresh_unavailable():
     b.market_data._holdings_cache = {'NSE:INFY': {'price': 94.0}}
     with patch('brain.db.get_open_trades', return_value=b._open_trades), \
          patch('brain.db.log_brain_activity'), \
+         patch.object(config, 'PAPER_STOP_SLIPPAGE_CAP_R', 0.0), \
          patch.object(b, '_execute_sell_by_trade') as sell:
         b._check_and_close_positions()
     sell.assert_called_once()

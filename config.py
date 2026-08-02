@@ -147,6 +147,17 @@ MARKET_BREADTH_MIN_SAMPLES = int(os.getenv('MARKET_BREADTH_MIN_SAMPLES', '5'))
 PAPER_TRADING = os.getenv('PAPER_TRADING', 'false').strip().lower() == 'true'
 PAPER_SLIPPAGE_PCT = float(os.getenv('PAPER_SLIPPAGE_PCT', '0.05'))  # adverse fill %
 
+# STOP_LOSS_HIT fill realism (P-05). The exit checker polls ~every 30s, so a
+# stop breach fills at whatever price the poll caught — which has already
+# drifted past the stop (measured STOP_LOSS_HIT avg −1.62R vs the −1R the stop
+# is sized for; the ~0.62R blow-through is poll latency, not real slippage).
+# A real trader rests a stop-market order broker-side that triggers intra-tick;
+# this models that by capping the stop-exit fill a bounded band past the stop:
+# worst fill = stop − CAP_R × risk-per-share (long) / stop + CAP_R × … (short).
+# Genuine slippage up to the cap is preserved; only the poll-latency tail is
+# trimmed. 0 disables (fills at the raw polled price, the pre-P-05 behaviour).
+PAPER_STOP_SLIPPAGE_CAP_R = float(os.getenv('PAPER_STOP_SLIPPAGE_CAP_R', '0.25'))
+
 # ── Startup interlocks ──────────────────────────────────────────────────────
 # Both failure modes here are one env-var typo away and catastrophic:
 #   1. QA_MODE against the production DB writes synthetic-market garbage into
@@ -220,6 +231,16 @@ CIRCUIT_BREAKER_CONSECUTIVE_LOSSES = 3
 # so we can measure the effect on collected data before turning it on.
 REENTRY_COOLDOWN_ENABLED = os.getenv('REENTRY_COOLDOWN_ENABLED', 'false').strip().lower() == 'true'
 REENTRY_COOLDOWN_MIN = int(os.getenv('REENTRY_COOLDOWN_MIN', '15'))
+
+# Trade-only-open filter (P-07 / T4). T4 found the opening hour (09:xx) is the
+# ONLY +EV bucket — expectancy falls monotonically through the day. This is a
+# flag-gated DARK feature: every entry AFTER the open window logs a would-block
+# counterfactual; it only actually suppresses when enabled. Measure the effect
+# on collected sessions before turning it on (VISION §7). Window end 10:15 IST
+# = the end of the first trading hour.
+TRADE_ONLY_OPEN_ENABLED = os.getenv('TRADE_ONLY_OPEN_ENABLED', 'false').strip().lower() == 'true'
+OPEN_WINDOW_END_HOUR = int(os.getenv('OPEN_WINDOW_END_HOUR', '10'))
+OPEN_WINDOW_END_MIN = int(os.getenv('OPEN_WINDOW_END_MIN', '15'))
 
 # Data-collection mode: let the session run its full day instead of throttling
 # the dataset at a fixed trade count / soft loss stop. When on, the SOFT session
