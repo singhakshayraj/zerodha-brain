@@ -12,6 +12,7 @@ with patch.dict(os.environ, {
     with patch('supabase.create_client', return_value=MagicMock()):
         import database  # noqa
 
+import advisor_scoring
 import portfolio_advisor as pa
 
 
@@ -479,7 +480,10 @@ def test_advise_flags_countertrend_conflict():
     forced_down = {'weekly_trend': 'DOWN', 'weekly_ema_long': 130.0,
                    'weekly_ema_mid': 128.0, 'price_vs_weekly_pct': -2.0,
                    'weekly_weeks': 35}
-    with patch.object(pa, 'weekly_trend', return_value=forced_down):
+    # advise() calls weekly_trend internally; since the split it lives in
+    # advisor_scoring, so patch it there (patching pa.weekly_trend, the facade
+    # re-export, would not intercept advise's internal call).
+    with patch.object(advisor_scoring, 'weekly_trend', return_value=forced_down):
         out = pa.advise(h, daily)
     assert out['trend_score'] >= 20                       # daily is up
     assert out['indicators']['daily_weekly_alignment'] == 'CONFLICT'
