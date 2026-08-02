@@ -102,9 +102,13 @@ def score_universe(market_data, universe: list = None, nifty_closes: list = None
                 consistency=trend_consistency(closes),
                 rel_strength=relative_strength(closes, nifty_closes or []),
                 news_sent=None, regime=regime)
+            # Weekly structure of the candidate — the entry-quality gate reads
+            # it to refuse rotating INTO a weekly downtrend (FA4/P-09, dark).
+            wk = weekly_trend(candles, closes[-1] if closes else None)
             out[sym] = {'symbol': sym, 'score': score,
                         'sector': entry.get('sector'),
-                        'last_close': closes[-1] if closes else None}
+                        'last_close': closes[-1] if closes else None,
+                        'weekly': wk['weekly_trend']}
         except Exception as e:
             print(f"[advisor.scan] {sym} skipped: {e}")
     if out:
@@ -117,6 +121,7 @@ def score_universe(market_data, universe: list = None, nifty_closes: list = None
 
 from advisor_rotation import (  # noqa: F401  facade re-export
     ROTATION_DEPLOY_FRACTION, find_rotation_candidate, size_rotation,
+    rotation_entry_quality,
 )
 
 
@@ -342,6 +347,38 @@ def run_advisor(market_data) -> int:
                         row.get('verdict'), row.get('quantity'),
                         row.get('last_price'), target.get('last_close'))
                     row.update(sizing)
+
+                    # Entry-quality read on the target (FA4/P-09, dark). Stash
+                    # the structured flags on indicators.rotation_entry_quality
+                    # (gradeable) and log; only refuse/resize when enabled.
+                    eq = rotation_entry_quality(target, sizing, total_value)
+                    if isinstance(row.get('indicators'), dict):
+                        row['indicators']['rotation_entry_quality'] = eq
+                    if eq['would_block'] or eq['would_resize']:
+                        print(f"[advisor.rotation.quality] {target['symbol']} "
+                              f"weekly={eq['weekly_trend']} "
+                              f"single_name={eq['single_name_pct']}% "
+                              f"block={eq['would_block']} resize={eq['would_resize']} "
+                              f"(enforced={config.ROTATION_QUALITY_ENABLED})")
+                    if config.ROTATION_QUALITY_ENABLED and eq['would_block']:
+                        # Refuse a countertrend rotation: drop the target + sizing,
+                        # keep the underlying HOLD/SELL verdict on the name.
+                        for k in ('rotation_target_symbol', 'rotation_target_score',
+                                  'rotation_reason', 'rotation_sell_qty',
+                                  'rotation_freed_inr', 'rotation_buy_qty',
+                                  'rotation_buy_price'):
+                            row.pop(k, None)
+                        row['reasons'] = (row.get('reasons') or []) + [
+                            f"Rotation into {target['symbol']} refused — its weekly "
+                            f"trend is down (countertrend entry)."]
+                        continue
+                    if (config.ROTATION_QUALITY_ENABLED and eq['would_resize']
+                            and sizing.get('rotation_buy_price')):
+                        # Trim the buy to the single-name cap.
+                        cap_val = total_value * config.ROTATION_MAX_SINGLE_NAME_PCT / 100
+                        capped_qty = int(cap_val // sizing['rotation_buy_price'])
+                        row['rotation_buy_qty'] = max(0, capped_qty)
+                        sizing['rotation_buy_qty'] = row['rotation_buy_qty']
                     size_note = ''
                     if sizing.get('rotation_buy_qty'):
                         size_note = (f" Size: sell {sizing['rotation_sell_qty']} "

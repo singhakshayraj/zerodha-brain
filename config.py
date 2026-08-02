@@ -499,6 +499,18 @@ ROTATION_MAX_EXIT_SCORE = int(os.getenv('ROTATION_MAX_EXIT_SCORE', '-20'))
 ROTATION_MIN_TARGET_SCORE = int(os.getenv('ROTATION_MIN_TARGET_SCORE', '50'))
 ROTATION_MIN_GAP = int(os.getenv('ROTATION_MIN_GAP', '40'))
 
+# Rotation entry-quality (FA4 / P-06→P-09). A rotation says "sell the weak name,
+# buy this stronger one" — but the target still needs to be a QUALITY entry, not
+# just a higher score: don't rotate INTO a weekly downtrend, and don't let one
+# rotation buy blow past a sane single-name weight. DARK by default: the checks
+# are computed + stashed on indicators.rotation_entry_quality (gradeable) and
+# logged, but only actually refuse/resize the rotation when ENABLED — measure
+# the effect on collected advisor runs first (VISION §7).
+ROTATION_QUALITY_ENABLED = os.getenv(
+    'ROTATION_QUALITY_ENABLED', 'false').strip().lower() == 'true'
+ROTATION_MAX_SINGLE_NAME_PCT = float(
+    os.getenv('ROTATION_MAX_SINGLE_NAME_PCT', '20'))
+
 # ── Advisor accountability backtest (Portfolio Advisor phase 3) ─────────────
 # Judges every stored verdict against realized price action after a fixed
 # trading-day horizon; the aggregate is the advisor's public track record.

@@ -177,3 +177,53 @@ def test_run_advisor_rotation_failure_never_blocks_verdicts():
         n = pa.run_advisor(md)
     assert n == 1
     assert 'rotation_target_symbol' not in up.call_args.args[0][0]
+
+
+# --- rotation entry-quality (FA4 / P-09, dark) --------------------------------
+
+def _sizing(buy_qty=10, buy_price=100.0):
+    return {'rotation_sell_qty': 5, 'rotation_freed_inr': 500.0,
+            'rotation_buy_qty': buy_qty, 'rotation_buy_price': buy_price}
+
+
+def test_entry_quality_flags_weekly_downtrend():
+    eq = pa.rotation_entry_quality({'symbol': 'X', 'weekly': 'DOWN'},
+                                   _sizing(), total_value=100000)
+    assert eq['weekly_downtrend'] is True
+    assert eq['would_block'] is True
+
+
+def test_entry_quality_clean_target_no_flags():
+    eq = pa.rotation_entry_quality({'symbol': 'X', 'weekly': 'UP'},
+                                   _sizing(buy_qty=1, buy_price=100.0),
+                                   total_value=100000)  # ₹100 in ₹100k = 0.1%
+    assert eq['weekly_downtrend'] is False
+    assert eq['would_block'] is False
+    assert eq['over_single_name_cap'] is False
+
+
+def test_entry_quality_flags_over_single_name_cap():
+    # buy ₹30k into a ₹100k book = 30% > 20% cap
+    eq = pa.rotation_entry_quality({'symbol': 'X', 'weekly': 'UP'},
+                                   _sizing(buy_qty=300, buy_price=100.0),
+                                   total_value=100000)
+    assert eq['single_name_pct'] == 30.0
+    assert eq['over_single_name_cap'] is True
+    assert eq['would_resize'] is True
+    assert eq['would_block'] is False   # over-concentration resizes, never blocks
+
+
+def test_entry_quality_handles_missing_total_value():
+    eq = pa.rotation_entry_quality({'symbol': 'X', 'weekly': 'UP'},
+                                   _sizing(), total_value=0)
+    assert eq['single_name_pct'] is None
+    assert eq['over_single_name_cap'] is False
+
+
+def test_find_rotation_candidate_passes_weekly_through():
+    scored = {'T': {'symbol': 'T', 'score': 80, 'sector': 'IT',
+                    'last_close': 100.0, 'weekly': 'DOWN'}}
+    target = pa.find_rotation_candidate(-40, 'IT', scored, min_gap=40,
+                                        min_target_score=50)
+    assert target is not None
+    assert target['weekly'] == 'DOWN'

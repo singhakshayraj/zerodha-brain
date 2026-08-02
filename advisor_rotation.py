@@ -33,7 +33,8 @@ def find_rotation_candidate(exit_score: int, sector: str, scored: dict,
             if qualifies(c):
                 return {'symbol': c['symbol'], 'score': c['score'],
                         'sector': c.get('sector'), 'reason': reason,
-                        'last_close': c.get('last_close')}
+                        'last_close': c.get('last_close'),
+                        'weekly': c.get('weekly')}
     return None
 
 
@@ -57,3 +58,36 @@ def size_rotation(verdict: str, qty: int, last_price: float,
                                       // target_price)
         out['rotation_buy_price'] = round(float(target_price), 2)
     return out
+
+
+def rotation_entry_quality(target: dict, sizing: dict,
+                           total_value: float) -> dict:
+    """Entry-quality read on a rotation TARGET (FA4/P-09, DARK). A rotation is
+    only good if the destination is a quality entry, not merely a higher score:
+      - weekly_downtrend: the target's weekly structure is DOWN — buying a name
+        whose higher timeframe is falling is a countertrend entry (would_block).
+      - single_name_pct: what % of the portfolio this one rotation buy would
+        become; over ROTATION_MAX_SINGLE_NAME_PCT is an over-concentration
+        (would_resize, not block).
+    Pure — returns the structured flags; the caller stashes them on
+    indicators.rotation_entry_quality and only enforces when the flag is on.
+    Correlated-cluster weight (the 3rd FA4 lever) is deferred: cluster
+    membership isn't computed for non-held names yet."""
+    weekly = target.get('weekly')
+    weekly_downtrend = weekly == 'DOWN'
+    buy_qty = sizing.get('rotation_buy_qty') or 0
+    buy_price = sizing.get('rotation_buy_price') or 0
+    buy_val = buy_qty * buy_price
+    single_name_pct = (round(buy_val / total_value * 100, 1)
+                       if total_value and buy_val else None)
+    over_single_name = (single_name_pct is not None
+                        and single_name_pct > config.ROTATION_MAX_SINGLE_NAME_PCT)
+    return {
+        'weekly_trend': weekly,
+        'weekly_downtrend': weekly_downtrend,
+        'single_name_pct': single_name_pct,
+        'over_single_name_cap': over_single_name,
+        'single_name_cap_pct': config.ROTATION_MAX_SINGLE_NAME_PCT,
+        'would_block': weekly_downtrend,      # refuse countertrend entries
+        'would_resize': over_single_name,     # trim the buy to the cap
+    }
