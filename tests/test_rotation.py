@@ -227,3 +227,26 @@ def test_find_rotation_candidate_passes_weekly_through():
                                         min_target_score=50)
     assert target is not None
     assert target['weekly'] == 'DOWN'
+
+
+# --- apply_rotation_quality: dark by default, enforces when enabled (P-09) ---
+
+def test_apply_rotation_quality_dark_returns_false(monkeypatch):
+    monkeypatch.setattr(config, 'ROTATION_QUALITY_ENABLED', False)
+    row = {'indicators': {}, 'rotation_target_symbol': 'X'}
+    blocked = pa.apply_rotation_quality(row, {'symbol': 'X', 'weekly': 'DOWN'},
+                                        _sizing(), total_value=100000)
+    assert blocked is False                              # dark → never refuses
+    assert row['rotation_target_symbol'] == 'X'          # untouched
+    assert row['indicators']['rotation_entry_quality']['weekly_downtrend'] is True
+
+
+def test_apply_rotation_quality_enabled_blocks_weekly_downtrend(monkeypatch):
+    monkeypatch.setattr(config, 'ROTATION_QUALITY_ENABLED', True)
+    row = {'indicators': {}, 'reasons': [], 'rotation_target_symbol': 'X',
+           'rotation_buy_qty': 10}
+    blocked = pa.apply_rotation_quality(row, {'symbol': 'X', 'weekly': 'DOWN'},
+                                        _sizing(), total_value=100000)
+    assert blocked is True                               # refused
+    assert 'rotation_target_symbol' not in row           # rotation dropped
+    assert any('refused' in r for r in row['reasons'])

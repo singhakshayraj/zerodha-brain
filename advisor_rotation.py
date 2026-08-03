@@ -91,3 +91,38 @@ def rotation_entry_quality(target: dict, sizing: dict,
         'would_block': weekly_downtrend,      # refuse countertrend entries
         'would_resize': over_single_name,     # trim the buy to the cap
     }
+
+
+def apply_rotation_quality(row: dict, target: dict, sizing: dict,
+                           total_value: float) -> bool:
+    """Attach the dark entry-quality flags to `row.indicators` and, when
+    ROTATION_QUALITY_ENABLED, refuse or resize the rotation IN PLACE (FA4/P-09).
+    Returns True iff the rotation was refused — the caller should then skip the
+    rest of the rotation-reason build for that row. Dark by default: computes +
+    stashes + logs, changes nothing, returns False."""
+    eq = rotation_entry_quality(target, sizing, total_value)
+    if isinstance(row.get('indicators'), dict):
+        row['indicators']['rotation_entry_quality'] = eq
+    if eq['would_block'] or eq['would_resize']:
+        print(f"[advisor.rotation.quality] {target['symbol']} "
+              f"weekly={eq['weekly_trend']} single_name={eq['single_name_pct']}% "
+              f"block={eq['would_block']} resize={eq['would_resize']} "
+              f"(enforced={config.ROTATION_QUALITY_ENABLED})")
+    if config.ROTATION_QUALITY_ENABLED and eq['would_block']:
+        # Refuse a countertrend rotation: drop the target + sizing, keep the
+        # underlying HOLD/SELL verdict on the name.
+        for k in ('rotation_target_symbol', 'rotation_target_score',
+                  'rotation_reason', 'rotation_sell_qty', 'rotation_freed_inr',
+                  'rotation_buy_qty', 'rotation_buy_price'):
+            row.pop(k, None)
+        row['reasons'] = (row.get('reasons') or []) + [
+            f"Rotation into {target['symbol']} refused — its weekly "
+            f"trend is down (countertrend entry)."]
+        return True
+    if (config.ROTATION_QUALITY_ENABLED and eq['would_resize']
+            and sizing.get('rotation_buy_price')):
+        cap_val = total_value * config.ROTATION_MAX_SINGLE_NAME_PCT / 100
+        capped_qty = int(cap_val // sizing['rotation_buy_price'])
+        row['rotation_buy_qty'] = max(0, capped_qty)
+        sizing['rotation_buy_qty'] = row['rotation_buy_qty']
+    return False
