@@ -434,3 +434,25 @@ def test_heartbeat_thread_calls_update_heartbeat():
         t.join(timeout=1)
 
     assert len(call_log) >= 1
+
+
+# --- P-20: advisor refresh + timeline capture run INSIDE the trading loop ---
+
+def test_advisor_gates_fire_inside_the_trading_loop():
+    """Full-day sessions (since ENFORCE_DAILY_STOP_3R went soft) sit in the inner
+    trading loop 09:30→15:25; the advisor + timeline gates must run there too,
+    not only in the outer idle loop, or the advisor stops refreshing all session
+    (08-03: last refresh 11:50)."""
+    order = []
+    brain = _make_brain()
+    brain.run_cycle.side_effect = lambda: order.append('cycle')
+    with patch('scheduler._maybe_run_advisor', side_effect=lambda: order.append('advisor')), \
+         patch('scheduler._maybe_capture_timeline', side_effect=lambda: order.append('timeline')), \
+         patch('scheduler._session_still_active', return_value=True), \
+         patch('scheduler._lock_lost', return_value=False):
+        _run_scheduler(['START', 'RUNNING', 'STOP'], brain=brain, market_open=True)
+    assert 'cycle' in order, order
+    # both gates fire in the same inner-loop pass, right after the cycle
+    after_cycle = order[order.index('cycle'):]
+    assert 'advisor' in after_cycle, order
+    assert 'timeline' in after_cycle, order

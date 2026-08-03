@@ -787,6 +787,20 @@ def run():
 
                         brain.run_cycle()
 
+                        # [P-20] Keep the advisor refresh + per-stock timeline
+                        # capture alive DURING a session, not only in the outer
+                        # idle loop. Full-day sessions (since ENFORCE_DAILY_STOP_3R
+                        # went soft) sit in this inner loop 09:30→15:25, so the
+                        # advisor otherwise stops refreshing for the whole session
+                        # (08-03: last refresh 11:50). Both are daemon-threaded +
+                        # idempotent/interval-gated, so calling them each cycle is
+                        # cheap and never blocks the trade loop.
+                        try:
+                            _maybe_run_advisor()
+                            _maybe_capture_timeline()
+                        except Exception as e:
+                            print(f"[SCHEDULER] in-session advisor tick failed (non-fatal): {e}")
+
                         # Sleep in short slices so a STOP is obeyed in seconds,
                         # not at the next 5-minute cycle boundary — the blind
                         # 300s sleep was the race window behind the lost-STOP
