@@ -196,7 +196,7 @@ def test_run_cycle_buy_with_existing_short_covers():
                 with patch.object(brain, '_check_and_close_positions'):
                     with patch.object(brain, '_is_past_ist', return_value=False):
                         with patch.object(brain, '_cover_short',
-                                          side_effect=lambda t, p: cover_called.append(t['id'])):
+                                          side_effect=lambda t, p, is_stop=False: cover_called.append(t['id'])):
                             with patch.object(brain, '_maybe_log_market_context'):
                                 brain.run_cycle()
 
@@ -546,10 +546,12 @@ def test_check_and_close_short_stop_hit():
             with patch('brain.db.write_config'):
                 with patch('brain.db.update_heartbeat'):
                     with patch.object(brain, '_cover_short',
-                                      side_effect=lambda t, p: cover_called.append('STOP')):
+                                      side_effect=lambda t, p, is_stop=False: cover_called.append(('STOP', is_stop))):
                         brain._check_and_close_positions()
 
-    assert 'STOP' in cover_called
+    # P-05: a short stop must flag is_stop so the paper broker skips the
+    # double slippage on top of the already-capped fill.
+    assert ('STOP', True) in cover_called
 
 
 def test_check_and_close_short_target_hit():
@@ -567,10 +569,11 @@ def test_check_and_close_short_target_hit():
             with patch('brain.db.write_config'):
                 with patch('brain.db.update_heartbeat'):
                     with patch.object(brain, '_cover_short',
-                                      side_effect=lambda t, p: cover_called.append('TARGET')):
+                                      side_effect=lambda t, p, is_stop=False: cover_called.append(('TARGET', is_stop))):
                         brain._check_and_close_positions()
 
-    assert 'TARGET' in cover_called
+    # A target cover is not a stop → no is_stop flag (normal slippage applies).
+    assert ('TARGET', False) in cover_called
 
 
 def test_check_and_close_circuit_breaker():

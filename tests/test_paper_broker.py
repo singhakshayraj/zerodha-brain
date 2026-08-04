@@ -70,6 +70,28 @@ def test_sell_fill_price_below_ltp():
     assert result['price'] < 100.0   # adverse: sell receives less
 
 
+def test_model_stop_skips_slippage_but_keeps_charges():
+    # P-05: a STOP_LOSS_HIT fill is already capped a band past the stop by
+    # brain._stop_fill_price, so the broker must NOT apply PAPER_SLIPPAGE_PCT
+    # again (double-counting slippage pushed realized R past the -1.25R cap).
+    # Real transaction charges still adverse the fill.
+    b = _broker()
+    normal = b.place_sell_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10,
+                                hint_price=100.0)
+    capped = b.place_sell_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10,
+                                hint_price=100.0, model_stop=True)
+    assert capped['reference_price'] == 100.0
+    assert capped['price'] < 100.0            # charges still applied
+    assert capped['price'] > normal['price']  # but no extra slippage
+    # cover side (short stop) mirrors the sell side
+    cover = b.cover_short_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10,
+                               hint_price=100.0, model_stop=True)
+    normal_cover = b.cover_short_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10,
+                                      hint_price=100.0)
+    assert cover['price'] > 100.0             # charges still adverse (buy up)
+    assert cover['price'] < normal_cover['price']  # no extra slippage
+
+
 def test_short_fill_behaves_like_sell():
     b = _broker()
     result = b.place_short_order(_kite(ltp=100.0), 'NSE:INFY', 'NSE', 10, hint_price=100.0)

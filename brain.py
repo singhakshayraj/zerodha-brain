@@ -1279,7 +1279,8 @@ class TradingBrain:
                 'pnl_percent': 0,
             })
 
-    def _cover_short(self, trade: dict, current_price: float) -> None:
+    def _cover_short(self, trade: dict, current_price: float,
+                     is_stop: bool = False) -> None:
         symbol = trade['symbol']
         exchange = trade.get('exchange', 'NSE')
         qty = trade.get('quantity') or 0
@@ -1288,7 +1289,8 @@ class TradingBrain:
 
         result = self.order_manager.cover_short_order(
             self.kite, symbol, exchange, qty,
-            **({'hint_price': current_price} if config.PAPER_TRADING else {})
+            **({'hint_price': current_price, 'model_stop': is_stop}
+               if config.PAPER_TRADING else {})
         )
         if result:
             entry_value = trade.get('entry_value') or 0
@@ -1905,7 +1907,8 @@ class TradingBrain:
             if should_exit:
                 fill_px = (self._stop_fill_price(trade, current_price, True)
                            if exit_reason == 'STOP_LOSS_HIT' else current_price)
-                self._cover_short(trade, fill_px)
+                self._cover_short(trade, fill_px,
+                                  is_stop=exit_reason == 'STOP_LOSS_HIT')
         else:
             if current_price <= trade['stop_loss_price']:
                 should_exit, exit_reason = True, 'STOP_LOSS_HIT'
@@ -2027,7 +2030,9 @@ class TradingBrain:
             trade['symbol'],
             trade['exchange'],
             qty,
-            **({'hint_price': current_price} if config.PAPER_TRADING else {})
+            **({'hint_price': current_price,
+                'model_stop': exit_reason == 'STOP_LOSS_HIT'}
+               if config.PAPER_TRADING else {})
         )
 
         if result:

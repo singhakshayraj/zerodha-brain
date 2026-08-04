@@ -75,7 +75,8 @@ class PaperBroker:
             return None
 
     def _fill(self, kite: KiteClient, symbol: str, exchange: str,
-              quantity: int, side: str, hint_price: float = None):
+              quantity: int, side: str, hint_price: float = None,
+              model_stop: bool = False):
         """Simulate a MARKET fill at live LTP adjusted for slippage.
         side: 'BUY' pays up, 'SELL' receives less — always adverse.
 
@@ -83,7 +84,15 @@ class PaperBroker:
         decision (holdings cache / candle close). Used when the LTP quote
         endpoint is unavailable — /quote does not work with retail enctoken
         auth (see TRADING_MODE_FORCE in config.py), so without this fallback
-        every paper fill fails."""
+        every paper fill fails.
+
+        model_stop: this is a STOP_LOSS_HIT exit whose fill was already capped a
+        bounded band past the stop by brain._stop_fill_price (P-05). The cap
+        band IS the slippage model for a resting stop-market fill, so applying
+        PAPER_SLIPPAGE_PCT again double-counts slippage and pushes realized R
+        past the −1.25R cap (measured −1.40R avg / −1.60R worst on 2026-08-04).
+        When set, fill AT hint_price with no extra adverse slippage; real
+        transaction charges still apply (every exit pays them)."""
         ltp = self._live_price(kite, symbol, exchange)
         if ltp is None and hint_price and hint_price > 0:
             ltp = hint_price
@@ -102,8 +111,13 @@ class PaperBroker:
                     pass
             return None
 
-        slip = config.PAPER_SLIPPAGE_PCT / 100.0
-        price = ltp * (1 + slip) if side == 'BUY' else ltp * (1 - slip)
+        if model_stop:
+            # P-05: cap band already models the stop-market slippage — don't
+            # apply it twice. Charges below still adverse the fill.
+            price = ltp
+        else:
+            slip = config.PAPER_SLIPPAGE_PCT / 100.0
+            price = ltp * (1 + slip) if side == 'BUY' else ltp * (1 - slip)
 
         # Fold real transaction charges into the fill price adversely
         # (charges/share on top of slippage), so they flow through
@@ -144,11 +158,13 @@ class PaperBroker:
         return self._fill(kite, symbol, exchange, quantity, 'BUY', hint_price)
 
     def place_sell_order(self, kite: KiteClient, symbol: str, exchange: str,
-                         quantity: int, hint_price: float = None):
+                         quantity: int, hint_price: float = None,
+                         model_stop: bool = False):
         # No CNC safety lock needed: nothing real can be sold. The brain only
         # calls this to close paper longs it opened itself.
         print(f"[PAPER] SELL order: {symbol} x{quantity}")
-        return self._fill(kite, symbol, exchange, quantity, 'SELL', hint_price)
+        return self._fill(kite, symbol, exchange, quantity, 'SELL', hint_price,
+                          model_stop=model_stop)
 
     def place_short_order(self, kite: KiteClient, symbol: str, exchange: str,
                           quantity: int, hint_price: float = None):
@@ -156,9 +172,11 @@ class PaperBroker:
         return self._fill(kite, symbol, exchange, quantity, 'SELL', hint_price)
 
     def cover_short_order(self, kite: KiteClient, symbol: str, exchange: str,
-                          quantity: int, hint_price: float = None):
+                          quantity: int, hint_price: float = None,
+                          model_stop: bool = False):
         print(f"[PAPER] COVER order: {symbol} x{quantity}")
-        return self._fill(kite, symbol, exchange, quantity, 'BUY', hint_price)
+        return self._fill(kite, symbol, exchange, quantity, 'BUY', hint_price,
+                          model_stop=model_stop)
 
     def square_off_all(self, kite: KiteClient, open_trades: list) -> None:
         # SHORTs must be bought back (cover), not sold again — selling an
