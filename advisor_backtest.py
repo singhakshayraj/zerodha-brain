@@ -110,6 +110,8 @@ def run_backtest_pass(market_data, horizon_days: int = None) -> int:
 
     candle_cache = {}
     evaluated = 0
+    not_due = 0
+    errors = 0
     for row in queue:
         try:
             run_date, symbol = row['run_date'], row['symbol']
@@ -134,7 +136,8 @@ def run_backtest_pass(market_data, horizon_days: int = None) -> int:
                         key, 'day', 400) or []
                 bars = _bars_from(candle_cache[symbol], run_date)
                 if len(bars) < horizon:
-                    continue                      # not due yet
+                    not_due += 1                  # candles short of the horizon
+                    continue
                 end_bar = bars[horizon - 1]
                 price_then = float(end_bar['close'])
                 fwd = (price_then - base_price) / base_price * 100
@@ -152,11 +155,15 @@ def run_backtest_pass(market_data, horizon_days: int = None) -> int:
             if db.update_advice_outcome(run_date, symbol, outcome):
                 evaluated += 1
         except Exception as e:
+            errors += 1
             print(f"[backtest] {row.get('symbol')} skipped: {e}")
-    if evaluated:
-        print(f"[backtest] evaluated {evaluated} advice rows "
-              f"(MICRO {config.ADVISOR_BACKTEST_HORIZON_DAYS}d / "
-              f"MACRO {config.ADVISOR_BACKTEST_MACRO_HORIZON_DAYS}d horizons)")
+    # Always log the pass tally — a due-but-never-graded backlog (the 2026-08
+    # starvation: 38 matured rows silently unevaluated) is only diagnosable if
+    # every pass reports due/graded/not-due/errors, not just the happy path.
+    print(f"[backtest] pass: queued={len(queue)} graded={evaluated} "
+          f"not_due={not_due} errors={errors} "
+          f"(MICRO {config.ADVISOR_BACKTEST_HORIZON_DAYS}d / "
+          f"MACRO {config.ADVISOR_BACKTEST_MACRO_HORIZON_DAYS}d horizons)")
     return evaluated
 
 

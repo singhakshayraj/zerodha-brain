@@ -128,6 +128,36 @@ def test_backtest_empty_queue_noop():
     md.get_candles.assert_not_called()
 
 
+def test_backtest_pass_logs_tally(capsys):
+    # Phase-1 diagnostics: every pass must report queued/graded/not_due/errors so
+    # a matured-but-ungraded backlog (the 2026-08 starvation) is visible in logs.
+    rows = [
+        {'run_date': '2026-07-01', 'symbol': 'AAA', 'verdict': 'SELL',
+         'last_price': 100.0},          # due -> graded
+        {'run_date': '2026-07-10', 'symbol': 'AAA', 'verdict': 'SELL',
+         'last_price': 90.0},           # only 1 bar after -> not_due
+        {'run_date': '2026-07-01', 'symbol': 'BAD', 'verdict': 'SELL',
+         'last_price': 100.0},          # candle fetch raises -> errors
+    ]
+
+    def candles(key, interval, days):
+        if 'BAD' in key:
+            raise Exception('boom')
+        if key == 'NSE:NIFTY 50':
+            return []
+        return _TEN
+
+    md = MagicMock()
+    md._instrument_cache = {}
+    md.get_candles.side_effect = candles
+    with patch.object(bt.db, 'get_unevaluated_advice', return_value=rows), \
+         patch.object(bt.db, 'update_advice_outcome', return_value=True):
+        n = bt.run_backtest_pass(md, horizon_days=10)
+    assert n == 1
+    out = capsys.readouterr().out
+    assert 'queued=3 graded=1 not_due=1 errors=1' in out
+
+
 # --- track-record summary ---------------------------------------------------------
 
 def test_track_record_summary_aggregates():

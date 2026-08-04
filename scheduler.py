@@ -137,6 +137,28 @@ def _parse_iso_dt(value) -> "datetime | None":
         return None
 
 
+def _grade_advice_catchup(token: str) -> None:
+    """Grade every currently-due, unevaluated advice row on a background thread.
+
+    Runs once at session start, where a token is proven live — the once/day
+    official-advisor branch (`_maybe_run_advisor`) missed maturity days during
+    token gaps and starved the backlog to 38 matured-but-ungraded rows by
+    2026-08. A single `run_backtest_pass` re-queries and drains the whole
+    backlog, so one reliable call per session keeps the advisor track record
+    honest. Read-only (daily candles), advisory — never touches orders."""
+    def _run():
+        try:
+            import advisor_backtest
+            from market_data import MarketData
+            md = MarketData(KiteClient(token))
+            n = advisor_backtest.run_backtest_pass(md)
+            print(f"[SCHEDULER] advice grading catch-up: graded {n} due rows")
+        except Exception as e:
+            print(f"[SCHEDULER] advice grading catch-up failed (non-fatal): {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _maybe_run_advisor() -> None:
     """Portfolio advisory (ADVISORY ONLY — no orders).
 
@@ -727,6 +749,14 @@ def run():
 
                     interval = session_config.get('tradeIntervalSeconds', 300)
                     print(f"Brain running. Interval: {interval}s")
+
+                    # Grade any matured-but-unevaluated advice NOW — a token is
+                    # proven live at session start (unlike the once/day official-
+                    # advisor branch, which starved the backlog to 38 rows by
+                    # 2026-08). One pass drains every currently-due row; daemon-
+                    # threaded so it never delays the trade loop.
+                    if config.ADVISOR_BACKTEST_ENABLED:
+                        _grade_advice_catchup(token)
 
                     def _end(reason: str, call_end_session: bool = True) -> None:
                         # The brain owns the whole session teardown: square-off
