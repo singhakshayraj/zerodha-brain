@@ -247,6 +247,15 @@ def _maybe_run_advisor() -> None:
                     except Exception as e:
                         print(f"[SCHEDULER] advisor backtest failed "
                               f"(non-fatal): {e}")
+                # Paper-portfolio (P-14): act on today's official verdicts across
+                # both virtual books. Advisory-only; never touches orders.
+                if config.ADVISOR_PAPER_ENABLED:
+                    try:
+                        import advisor_paper
+                        advisor_paper.run_paper_portfolio(md)
+                    except Exception as e:
+                        print(f"[SCHEDULER] advisor paper-portfolio failed "
+                              f"(non-fatal): {e}")
                 # Weekly stock profiles (M3): no-ops during market hours (the
                 # builder refuses to run next to the live loop); actually
                 # fires from the post-close slot below or an off-hours run.

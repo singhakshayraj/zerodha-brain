@@ -558,4 +558,10 @@ from db_stocks import (  # noqa: E402,F401  facade re-export
     level_pack_exists, inplay_locked, get_level_pack_map, get_inplay_symbols,
     get_directional_decisions_for_date, get_candles_for_symbol_from, insert_decision_outcome, add_holdings_to_universe,
 )
+# ── Advisor paper-portfolio access (P-14 phase 2) ──
+# Physically in db_paper.py; re-exported so db.<name> keeps working.
+from db_paper import (  # noqa: E402,F401  facade re-export
+    paper_positions, insert_paper_positions, update_paper_position,
+    upsert_paper_equity, paper_equity_curve, paper_book_exists,
+)
 

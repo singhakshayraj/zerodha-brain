@@ -524,6 +524,25 @@ ADVISOR_BACKTEST_HORIZON_DAYS = int(
 ADVISOR_BACKTEST_MACRO_HORIZON_DAYS = int(
     os.getenv('ADVISOR_BACKTEST_MACRO_HORIZON_DAYS', '30'))
 
+# ── Advisor paper-portfolio (P-14 phase 2) ──────────────────────────────────
+# Two virtual books that ACT on the advisor's verdicts so we can measure
+# wins/losses, not just per-call alpha. Advisory-only — never places an order.
+#   MANAGEMENT: seeded from real holdings; applies HOLD/SELL/TRIM/rotation;
+#     baseline = the same holdings frozen (the do-nothing counterfactual).
+#   PICKING: fixed cash; buys the rotation/scan target names, exits at horizon.
+# DARK by default (collect first, VISION §7); runs on each official advisor pass.
+ADVISOR_PAPER_ENABLED = os.getenv(
+    'ADVISOR_PAPER_ENABLED', 'true').strip().lower() == 'true'
+# Starting cash for the PICKING book (₹).
+ADVISOR_PAPER_PICKING_CAPITAL = float(
+    os.getenv('ADVISOR_PAPER_PICKING_CAPITAL', '100000'))
+# Cap any single PICKING position at this fraction of starting capital.
+ADVISOR_PAPER_MAX_SINGLE_NAME_PCT = float(
+    os.getenv('ADVISOR_PAPER_MAX_SINGLE_NAME_PCT', '0.10'))
+# Trading-day horizon after which a PICKING position is closed for a win/loss.
+ADVISOR_PAPER_PICK_HORIZON_DAYS = int(
+    os.getenv('ADVISOR_PAPER_PICK_HORIZON_DAYS', '10'))
+
 # ── Market Regime Filter (Portfolio Advisor upgrade, 2026-07-12) ────────────
 # Classifies the Nifty 50 tape before the holdings scan so the advisor can
 # adapt: demand a wider rotation gap in chop (don't churn capital on noise),
