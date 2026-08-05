@@ -1,40 +1,48 @@
 #!/usr/bin/env bash
-# One-command brain deploy — uploads the working tree AND stamps GIT_SHA in the
-# same step, so decisions are never stamped "unknown" again.
+# One-command brain deploy — push to GitHub, which is what actually deploys.
 #
-# WHY: deploys here are manual `railway up` (the service is not GitHub-connected)
-# and the tarball does NOT include .git, so config._resolve_git_sha() falls back
-# to the GIT_SHA env var. That var was hand-bumped as a separate step and once
-# got forgotten -> 07-24 sessions stamped "unknown". This makes the two steps
-# atomic. Run from the brain repo root; market closed (a restart is triggered).
+# WHY (2026-08-05 incident): this service AUTO-DEPLOYS from GitHub
+# (`railway status` → repo: singhakshayraj/zerodha-brain). The old script ran
+# `railway up` (a local-tarball deploy); that image was then silently superseded
+# by a GitHub rebuild at origin/main, so three unpushed commits (P-05 + advisor
+# paper-portfolio) ran nowhere and a whole session logged the OLD build
+# (git_sha c689ed4). The ONLY reliable deploy is `git push origin main`:
+# it triggers CI (test-brain.yml) + the auto-deploy, and the GitHub build ships
+# .git so config._resolve_git_sha() stamps the real HEAD sha (no manual GIT_SHA).
 #
-# Usage: ./scripts/deploy.sh
+# This script refuses to "succeed" unless the code is committed AND pushed, so a
+# dirty/unpushed tree can never again masquerade as deployed.
+#
+# Usage: ./scripts/deploy.sh          (run from the brain repo root)
 set -euo pipefail
 
-SERVICE="${RAILWAY_SERVICE:-zerodha-brain}"
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 SHA="$(git rev-parse --short=12 HEAD)"
 
-if [ -n "$(git status --porcelain)" ]; then
-  echo "WARNING: working tree is dirty — you are deploying uncommitted code."
-  echo "         GIT_SHA will be stamped $SHA (the last commit), which will NOT"
-  echo "         match what is actually running. Commit first for a truthful SHA."
-  read -r -p "Continue anyway? [y/N] " ans
-  [ "$ans" = "y" ] || { echo "Aborted."; exit 1; }
+if [ "$BRANCH" != "main" ]; then
+  echo "ABORT: on branch '$BRANCH', not main. The service deploys origin/main only."
+  exit 1
 fi
 
-echo "==> Deploying $SHA to service '$SERVICE' ..."
-railway up --service "$SERVICE"
+if [ -n "$(git status --porcelain)" ]; then
+  echo "ABORT: uncommitted changes — they will NOT deploy. Commit first, then re-run."
+  git status --short
+  exit 1
+fi
 
-echo "==> Stamping GIT_SHA=$SHA (survives the tarball deploy) ..."
-railway variables --set "GIT_SHA=$SHA" --service "$SERVICE"
+echo "==> Pushing $SHA to origin/main (this is the deploy) ..."
+git push origin main
 
-echo "==> Done. Verify next session: trading_sessions.git_sha == $SHA"
 echo ""
-echo "==> Auto-start-on-build routine (a deploy restarts the brain):"
-echo "    • Mid-session deploy  → the brain AUTO-RESUMES (reads brain_status=RUNNING,"
-echo "      finds the active RUNNING session, resumes it). Confirm: heartbeat RUNNING."
+echo "==> Pushed. GitHub now builds + auto-deploys, gated by CI (test-brain.yml)."
+echo "    Watch the build:   railway deployment list        # newest = SUCCESS when live"
+echo "    Confirm it's live: latest brain_decisions.indicators.git_sha == $SHA"
+echo ""
+echo "==> Restart behaviour (the deploy restarts the brain):"
+echo "    • Mid-session deploy  → brain AUTO-RESUMES the active RUNNING session."
+echo "      Confirm: heartbeat status RUNNING + git_sha flips to $SHA on new decisions."
 echo "    • No active session + market open (>=09:15 IST, trading day) → set"
-echo "      brain_status=START to start a fresh session (autopilot is suppressed"
-echo "      once a session has already run today)."
+echo "      brain_status=START for a fresh session (autopilot is suppressed once a"
+echo "      session has already run today)."
 echo "    • NEVER START before 09:15 — creates a dead MARKET_CLOSED session that"
 echo "      blocks autopilot for the rest of the day."
