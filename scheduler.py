@@ -159,6 +159,31 @@ def _grade_advice_catchup(token: str) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _label_decisions_catchup() -> None:
+    """Counterfactual-label recent unlabeled decisions (Track C) on a background
+    thread. Reads only brain_decisions + the candle archive — NO token needed.
+    label_decisions.py was manual-only and nobody ran it after 2026-07-23, so
+    the decision→outcome dataset (the feed for the P-21 edge study + any
+    data-derived signal) starved for weeks. One catch-up per session over a
+    trailing window keeps it fresh; label_decisions_for_date skips rows already
+    labeled, so re-runs are cheap and idempotent."""
+    def _run():
+        try:
+            import decision_outcomes
+            from datetime import date, timedelta
+            total = 0
+            # Yesterday back 10 days — today's candles aren't archived until
+            # post-close, so today isn't labelable at session start anyway.
+            for i in range(1, 11):
+                d = (date.today() - timedelta(days=i)).isoformat()
+                total += decision_outcomes.label_decisions_for_date(d)
+            print(f"[SCHEDULER] decision-labeling catch-up: labeled {total} rows")
+        except Exception as e:
+            print(f"[SCHEDULER] decision-labeling catch-up failed (non-fatal): {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _maybe_run_advisor() -> None:
     """Portfolio advisory (ADVISORY ONLY — no orders).
 
@@ -766,6 +791,9 @@ def run():
                     # threaded so it never delays the trade loop.
                     if config.ADVISOR_BACKTEST_ENABLED:
                         _grade_advice_catchup(token)
+                    # Track C: label recent decisions for the edge study (P-21).
+                    # Candle-archive only, no token; daemon-threaded.
+                    _label_decisions_catchup()
 
                     def _end(reason: str, call_end_session: bool = True) -> None:
                         # The brain owns the whole session teardown: square-off
