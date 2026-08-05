@@ -308,6 +308,15 @@ def run_paper_portfolio(md, run_date: str = None) -> bool:
         print(f"[paper] no official advice for {run_date} — skip")
         return False
 
+    # Warm holdings tokens so MTM candle fetch works from a cold MarketData too
+    # (get_candles' /quote token fallback 400s on a retail enctoken — see
+    # advisor_backtest). Non-holding rotation/scan targets resolve via the
+    # Nifty-500 map in _candles.
+    try:
+        md.refresh_holdings_cache()
+    except Exception as e:
+        print(f"[paper] holdings warm failed (non-fatal): {e}")
+
     cache = {}
     # Seed once (idempotent — only if the book has no positions / no anchor yet).
     if not db.paper_book_exists(MANAGEMENT):

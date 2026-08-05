@@ -100,6 +100,18 @@ def run_backtest_pass(market_data, horizon_days: int = None) -> int:
     if not queue:
         return 0
 
+    # Warm holdings instrument tokens FIRST. get_candles resolves an uncached
+    # symbol's token via /quote, which 400s on a retail enctoken — so a cold
+    # MarketData (the session-start catch-up + grade_advice CLI both build one)
+    # fetched no candles for any holding, and every due row was wrongly counted
+    # not-due and never graded (2026-08 backfill stalled at +4). Holdings API
+    # carries instrument_token and works on a retail token, so this fills the
+    # cache and makes grading self-sufficient regardless of caller.
+    try:
+        market_data.refresh_holdings_cache()
+    except Exception as e:
+        print(f"[backtest] holdings warm failed (non-fatal): {e}")
+
     # One Nifty fetch serves every row (index token pinned; best-effort).
     nifty_candles = []
     try:
