@@ -122,7 +122,7 @@ def run_backtest_pass(market_data, horizon_days: int = None) -> int:
 
     candle_cache = {}
     evaluated = 0
-    not_due = 0
+    not_due = {}          # horizon -> count, so a backlog is readable by class
     errors = 0
     for row in queue:
         try:
@@ -148,7 +148,11 @@ def run_backtest_pass(market_data, horizon_days: int = None) -> int:
                         key, 'day', 400) or []
                 bars = _bars_from(candle_cache[symbol], run_date)
                 if len(bars) < horizon:
-                    not_due += 1                  # candles short of the horizon
+                    # Candles short of the horizon. Tally BY horizon: a
+                    # standing backlog is ~85% MACRO (30d) and looks like
+                    # starvation against a 10d mental model (2026-08-06
+                    # misdiagnosis) unless the split is visible.
+                    not_due[horizon] = not_due.get(horizon, 0) + 1
                     continue
                 end_bar = bars[horizon - 1]
                 price_then = float(end_bar['close'])
@@ -172,8 +176,10 @@ def run_backtest_pass(market_data, horizon_days: int = None) -> int:
     # Always log the pass tally — a due-but-never-graded backlog (the 2026-08
     # starvation: 38 matured rows silently unevaluated) is only diagnosable if
     # every pass reports due/graded/not-due/errors, not just the happy path.
+    by_horizon = ' '.join(f"{h}d={n}" for h, n in sorted(not_due.items()))
     print(f"[backtest] pass: queued={len(queue)} graded={evaluated} "
-          f"not_due={not_due} errors={errors} "
+          f"not_due={sum(not_due.values())} [{by_horizon or 'none'}] "
+          f"errors={errors} "
           f"(MICRO {config.ADVISOR_BACKTEST_HORIZON_DAYS}d / "
           f"MACRO {config.ADVISOR_BACKTEST_MACRO_HORIZON_DAYS}d horizons)")
     return evaluated

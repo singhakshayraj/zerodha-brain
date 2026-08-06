@@ -155,7 +155,9 @@ def test_backtest_pass_logs_tally(capsys):
         n = bt.run_backtest_pass(md, horizon_days=10)
     assert n == 1
     out = capsys.readouterr().out
-    assert 'queued=3 graded=1 not_due=1 errors=1' in out
+    # not_due is split by horizon so a MACRO-heavy backlog can't be misread
+    # as starvation against a 10d mental model (2026-08-06).
+    assert 'queued=3 graded=1 not_due=1 [10d=1] errors=1' in out
 
 
 # --- track-record summary ---------------------------------------------------------
