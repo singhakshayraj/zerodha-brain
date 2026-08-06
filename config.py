@@ -274,6 +274,19 @@ DATA_MAX_NEW_TRADES_PER_HOUR = int(os.getenv('DATA_MAX_NEW_TRADES_PER_HOUR', '6'
 # unrealism, still rich.
 DATA_MAX_CONCURRENT_POSITIONS = int(
     os.getenv('DATA_MAX_CONCURRENT_POSITIONS', '8'))
+# Universe BREADTH for data collection. Every session to date has analysed the
+# same ~46 names (holdings + Nifty 50), so the dataset re-samples one narrow
+# slice of the market: 1,883 decisions on 2026-08-06 across 46 symbols. Any
+# edge study is then reading a handful of large caps over and over, and cannot
+# tell a real effect from those specific names.
+#
+# Under data_collection_active() only, rotate this many Nifty 500 names into
+# the universe each session — sector-balanced and rotating by date, so the
+# dataset walks the whole index over consecutive sessions instead of drilling
+# the same names. Bounded on purpose: per-cycle analysis cost scales with
+# universe size, and the 300s inter-cycle budget (KNOWN_ISSUES W1: analysis
+# ~160s at 46 symbols) is what keeps the cadence honest. 0 disables.
+DATA_UNIVERSE_ROTATION_N = int(os.getenv('DATA_UNIVERSE_ROTATION_N', '40'))
 
 # News collector (NEWS_CORRELATION_PLAN): a decoupled periodic job fetches
 # ticker-tagged financial news + sentiment into news_events, out of the trading

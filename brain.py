@@ -339,13 +339,42 @@ class TradingBrain:
                         added += 1
                 print(f"Added {added} {source_label} stocks to universe")
 
+            # Breadth for data collection: rotate a bounded, sector-balanced
+            # slice of the Nifty 500 in on top. Wrapped because a universe that
+            # fails to widen is a worse day of data; a universe that raises is
+            # no session at all.
+            if config.data_collection_active() and config.DATA_UNIVERSE_ROTATION_N > 0:
+                try:
+                    slice_rows = self.rotating_universe_slice(
+                        config.NIFTY500_UNIVERSE,
+                        exclude=set(self.universe),
+                        n=config.DATA_UNIVERSE_ROTATION_N,
+                        day=datetime.now(IST).date(),
+                    )
+                    for row in slice_rows:
+                        sym = f"NSE:{row['symbol']}"
+                        token = int(row['instrument_token'])
+                        self.universe[sym] = {
+                            'symbol': row['symbol'],
+                            'exchange': 'NSE',
+                            'instrument_token': token,
+                            'source': 'nifty500_rot',
+                            'sector': row.get('sector'),
+                        }
+                        self.market_data._instrument_cache[sym] = token
+                    sectors = len({r.get('sector') for r in slice_rows})
+                    print(f"Added {len(slice_rows)} nifty500_rot stocks to universe "
+                          f"({sectors} sectors, rotating daily)")
+                except Exception as e:
+                    print(f"[brain] universe rotation skipped (non-fatal): {e}")
+
             print(f"Universe: {len(self.universe)} stocks (mode: {stock_universe})")
 
             print("[brain] Verifying instrument tokens...")
             index_map = {
                 sym: data['instrument_token']
                 for sym, data in self.universe.items()
-                if data.get('source') in ('nifty50', 'nifty_next50')
+                if data.get('source') in ('nifty50', 'nifty_next50', 'nifty500_rot')
             }
             bad_tokens = self.market_data.verify_instrument_tokens(index_map)
             if bad_tokens:
@@ -1031,7 +1060,7 @@ class TradingBrain:
                 index_map = {
                     sym: data['instrument_token']
                     for sym, data in self.universe.items()
-                    if data.get('source') in ('nifty50', 'nifty_next50')
+                    if data.get('source') in ('nifty50', 'nifty_next50', 'nifty500_rot')
                 }
                 bad = self.market_data.verify_instrument_tokens(index_map)
                 if bad:
@@ -1510,6 +1539,67 @@ class TradingBrain:
         except Exception as e:
             print(f"[timing_features] failed (non-fatal): {e}")
             return {'cycle': current_cycle}
+
+    @staticmethod
+    def rotating_universe_slice(pool: list, exclude: set, n: int, day) -> list:
+        """Pick `n` Nifty 500 names to widen the session universe with.
+
+        Two properties matter and neither is optional:
+
+        **Sector-balanced** — round-robin across sectors rather than taking the
+        first n alphabetically, so a slice spans Financial Services *and*
+        Realty *and* Textiles. Taking n at random would over-weight the big
+        sectors by construction (Financial Services alone is 101 of 500).
+
+        **Rotating by date** — each sector's list is rotated by the day's
+        ordinal before picking, so consecutive sessions draw different names
+        and the dataset walks the whole index instead of re-sampling one slice.
+        Deterministic: the same day always yields the same slice, so a session
+        can restart mid-day without changing its universe underneath itself.
+
+        Pure and side-effect free — `day` is injected, so this is testable
+        without freezing the clock. Never raises on a malformed pool row.
+        """
+        if n <= 0 or not pool:
+            return []
+        by_sector: dict = {}
+        for row in pool:
+            sym = (row or {}).get('symbol')
+            token = (row or {}).get('instrument_token') or 0
+            if not sym or token <= 0:
+                continue
+            if f"NSE:{sym}" in exclude:
+                continue
+            by_sector.setdefault(row.get('sector') or 'UNKNOWN', []).append(row)
+
+        epoch = day.toordinal()
+        # Rotate each sector's (sorted) list by the day — sorted first so the
+        # rotation is over a stable order, not CSV row order.
+        for sec, rows in by_sector.items():
+            rows.sort(key=lambda r: r['symbol'])
+            k = epoch % len(rows)
+            by_sector[sec] = rows[k:] + rows[:k]
+
+        picked, cursor = [], 0
+        sectors = sorted(by_sector)
+        # Offset which sector leads, too — otherwise the same sector always
+        # gets the extra name when n doesn't divide evenly.
+        if sectors:
+            s0 = epoch % len(sectors)
+            sectors = sectors[s0:] + sectors[:s0]
+        while len(picked) < n:
+            took = False
+            for sec in sectors:
+                rows = by_sector[sec]
+                if cursor < len(rows):
+                    picked.append(rows[cursor])
+                    took = True
+                    if len(picked) >= n:
+                        break
+            if not took:          # every sector exhausted
+                break
+            cursor += 1
+        return picked
 
     @staticmethod
     def _fill_leg(result: dict) -> dict:
