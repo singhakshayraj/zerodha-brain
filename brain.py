@@ -907,7 +907,8 @@ class TradingBrain:
                             None,
                         )
                         if short_match:
-                            self._cover_short(short_match, live_price)
+                            self._cover_short(short_match, live_price,
+                                              exit_reason='BRAIN_SIGNAL')
                             self.traded_symbols_this_cycle.add(symbol)
                         elif long_match:
                             print(f"[brain] Already long {symbol}, skipping duplicate BUY")
@@ -1280,7 +1281,14 @@ class TradingBrain:
             })
 
     def _cover_short(self, trade: dict, current_price: float,
-                     is_stop: bool = False) -> None:
+                     is_stop: bool = False,
+                     exit_reason: str = 'COVER_SHORT') -> None:
+        """Close one open SHORT. `exit_reason` mirrors the long side's reason
+        (P-27/B2): until 08-06 every short exit — stop, target, time-stop, EOD,
+        session-end — was written as the single reason 'COVER_SHORT', so every
+        exit_reason bucket silently measured LONGs only and the [P-05]
+        STOP_LOSS_HIT verdict described half the book. The side is already
+        carried by position_type, so the reason is free to say *why*."""
         symbol = trade['symbol']
         exchange = trade.get('exchange', 'NSE')
         qty = trade.get('quantity') or 0
@@ -1303,7 +1311,7 @@ class TradingBrain:
                 'exit_time': datetime.now(IST).isoformat(),
                 'exit_price': result['price'],
                 'exit_value': result['value'],
-                'exit_reason': 'COVER_SHORT',
+                'exit_reason': exit_reason,
                 'pnl': pnl,
                 'pnl_percent': pnl_pct,
                 'r_multiple': _r_multiple(trade, pnl),
@@ -1325,8 +1333,8 @@ class TradingBrain:
                 session_id=self.session_id,
                 activity_type='POSITION_EXIT',
                 symbol=symbol,
-                message=f"COVER {symbol} — P&L: ₹{pnl:.2f}",
-                data={'exit_reason': 'COVER_SHORT', 'pnl': pnl, 'pnl_percent': pnl_pct},
+                message=f"COVER {symbol} — {exit_reason} — P&L: ₹{pnl:.2f}",
+                data={'exit_reason': exit_reason, 'pnl': pnl, 'pnl_percent': pnl_pct},
             )
 
     def _record_close_outcome(self, symbol: str, pnl: float) -> None:
@@ -1507,12 +1515,23 @@ class TradingBrain:
     def _fill_leg(result: dict) -> dict:
         """One execution leg {reference_price, fill_price, slippage_bps} from a
         broker fill. Only the paper broker decomposes slippage, so the real
-        path (no reference_price) yields nothing."""
-        return {
+        path (no reference_price) yields nothing.
+
+        `model_stop` marks a stop-triggered fill that skipped PAPER_SLIPPAGE_PCT
+        (P-05). It was passed *into* the broker but never came back out, so the
+        fix left no trace in the data and could not be verified (P-27) — the
+        broker now returns it and it is persisted here. `charges_bps` splits the
+        charge component out of the total adverse deviation for the same reason."""
+        leg = {
             'reference_price': result['reference_price'],
             'fill_price': result['price'],
             'slippage_bps': result.get('slippage_bps'),
         }
+        if result.get('charges_bps') is not None:
+            leg['charges_bps'] = result['charges_bps']
+        if result.get('model_stop'):
+            leg['model_stop'] = True
+        return leg
 
     def _execution_entry(self, result: dict):
         """execution jsonb for an entry fill, or None if not decomposed."""
@@ -1817,7 +1836,7 @@ class TradingBrain:
             if not price:
                 price = self.market_data.get_live_price_for_nifty50(key) or 0
             try:
-                self._cover_short(s, price)
+                self._cover_short(s, price, exit_reason='EOD_CLOSE')
             except Exception as e:
                 print(f"[eod] Failed to cover {s.get('symbol')}: {e}")
 
@@ -1908,7 +1927,8 @@ class TradingBrain:
                 fill_px = (self._stop_fill_price(trade, current_price, True)
                            if exit_reason == 'STOP_LOSS_HIT' else current_price)
                 self._cover_short(trade, fill_px,
-                                  is_stop=exit_reason == 'STOP_LOSS_HIT')
+                                  is_stop=exit_reason == 'STOP_LOSS_HIT',
+                                  exit_reason=exit_reason)
         else:
             if current_price <= trade['stop_loss_price']:
                 should_exit, exit_reason = True, 'STOP_LOSS_HIT'
@@ -1930,7 +1950,8 @@ class TradingBrain:
                     print(f"[time_stop] {trade['symbol']} open {mins:.0f}m "
                           f">= {limit}m — cutting (dead money)")
                     if is_short:
-                        self._cover_short(trade, current_price)
+                        self._cover_short(trade, current_price,
+                                          exit_reason='TIME_STOP')
                     else:
                         self._execute_sell_by_trade(trade, current_price, 'TIME_STOP')
                     should_exit = True
@@ -2169,7 +2190,7 @@ class TradingBrain:
                 try:
                     if t.get('position_type') == 'SHORT':
                         print(f"[square_off] Covering short: {t['symbol']} x{t.get('quantity', 0)}")
-                        self._cover_short(t, price)
+                        self._cover_short(t, price, exit_reason='SESSION_END')
                     else:
                         print(f"[square_off] Closing long: {t['symbol']} x{t.get('quantity', 0)}")
                         self._execute_sell_by_trade(t, price, 'SESSION_END')
@@ -2181,7 +2202,22 @@ class TradingBrain:
                     print(f"[square_off] Error closing {t['symbol']}: {e}")
 
                 # Force-close in DB if Kite order failed — prevents stale OPEN trades
-                if trade_still_open:
+                if trade_still_open and not t.get('entry_price'):
+                    # The entry never filled (the row was created, then the
+                    # order path failed or threw before update_trade_entry), so
+                    # there is no position to square off. Closing it as
+                    # SQUARE_OFF_FAILED with a fabricated exit price minted a
+                    # phantom trade — null entry, ₹0 P&L, no r_multiple — that
+                    # inflated the raw trade count by 1 and tripped the
+                    # bad_null_entry integrity check (P-28). ORDER_FAILED is the
+                    # truthful reason and is already exempt from that check.
+                    print(f"[square_off] {t['symbol']} never entered — ORDER_FAILED")
+                    db.close_trade(t['id'], {
+                        'exit_reason': 'ORDER_FAILED',
+                        'pnl': 0,
+                        'pnl_percent': 0,
+                    })
+                elif trade_still_open:
                     entry_val = t.get('entry_value') or 0
                     is_short = t.get('position_type') == 'SHORT'
                     exit_val = (price or 0) * (t.get('quantity') or 0)

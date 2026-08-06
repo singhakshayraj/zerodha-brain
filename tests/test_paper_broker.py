@@ -90,6 +90,15 @@ def test_model_stop_skips_slippage_but_keeps_charges():
                                       hint_price=100.0)
     assert cover['price'] > 100.0             # charges still adverse (buy up)
     assert cover['price'] < normal_cover['price']  # no extra slippage
+    # P-27: the flag must come back OUT of the broker, or the fix leaves no
+    # trace in the data and cannot be verified from a session's trades.
+    assert capped['model_stop'] is True
+    assert cover['model_stop'] is True
+    assert normal['model_stop'] is False
+    # ...and the residual adverse bps on a model_stop fill is ALL charges,
+    # which is what made it look like slippage was still being applied.
+    assert capped['charges_bps'] == capped['slippage_bps']
+    assert normal['charges_bps'] < normal['slippage_bps']
 
 
 def test_short_fill_behaves_like_sell():

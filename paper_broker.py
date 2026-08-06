@@ -124,6 +124,7 @@ class PaperBroker:
         # entry_price/exit_price into P&L without any schema change.
         charges = _zerodha_intraday_charges(side, price, quantity)
         per_share = charges / quantity if quantity else 0.0
+        pre_charge = price
         price = round(price + per_share if side == 'BUY' else price - per_share, 2)
         order_id = _paper_order_id()
 
@@ -134,6 +135,13 @@ class PaperBroker:
         ref = round(ltp, 2)
         adverse = (price - ltp) if side == 'BUY' else (ltp - price)
         slippage_bps = round((adverse / ltp) * 10000, 2) if ltp else 0.0
+        # Charges are folded into the same adverse deviation, so slippage_bps
+        # alone can't say whether PAPER_SLIPPAGE_PCT was applied — surface the
+        # charge component separately (P-27: a model_stop fill still shows
+        # ~6bps adverse, and that residue is charges, not slippage). Measured
+        # off the same rounded fill so the two components sum to the total.
+        charge_part = abs(price - pre_charge)
+        charges_bps = round((charge_part / ltp) * 10000, 2) if ltp else 0.0
 
         print(
             f"[PAPER] {side} filled: {symbol} x{quantity} @ ₹{price} "
@@ -148,6 +156,8 @@ class PaperBroker:
             'value': price * quantity,
             'reference_price': ref,
             'slippage_bps': slippage_bps,
+            'charges_bps': charges_bps,
+            'model_stop': bool(model_stop),
         }
 
     # ── OrderManager-compatible interface ────────────────────────────────────

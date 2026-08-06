@@ -196,7 +196,7 @@ def test_run_cycle_buy_with_existing_short_covers():
                 with patch.object(brain, '_check_and_close_positions'):
                     with patch.object(brain, '_is_past_ist', return_value=False):
                         with patch.object(brain, '_cover_short',
-                                          side_effect=lambda t, p, is_stop=False: cover_called.append(t['id'])):
+                                          side_effect=lambda t, p, is_stop=False, exit_reason='COVER_SHORT': cover_called.append(t['id'])):
                             with patch.object(brain, '_maybe_log_market_context'):
                                 brain.run_cycle()
 
@@ -546,12 +546,12 @@ def test_check_and_close_short_stop_hit():
             with patch('brain.db.write_config'):
                 with patch('brain.db.update_heartbeat'):
                     with patch.object(brain, '_cover_short',
-                                      side_effect=lambda t, p, is_stop=False: cover_called.append(('STOP', is_stop))):
+                                      side_effect=lambda t, p, is_stop=False, exit_reason='COVER_SHORT': cover_called.append(('STOP', is_stop, exit_reason))):
                         brain._check_and_close_positions()
 
     # P-05: a short stop must flag is_stop so the paper broker skips the
     # double slippage on top of the already-capped fill.
-    assert ('STOP', True) in cover_called
+    assert ('STOP', True, 'STOP_LOSS_HIT') in cover_called
 
 
 def test_check_and_close_short_target_hit():
@@ -569,11 +569,11 @@ def test_check_and_close_short_target_hit():
             with patch('brain.db.write_config'):
                 with patch('brain.db.update_heartbeat'):
                     with patch.object(brain, '_cover_short',
-                                      side_effect=lambda t, p, is_stop=False: cover_called.append(('TARGET', is_stop))):
+                                      side_effect=lambda t, p, is_stop=False, exit_reason='COVER_SHORT': cover_called.append(('TARGET', is_stop, exit_reason))):
                         brain._check_and_close_positions()
 
     # A target cover is not a stop → no is_stop flag (normal slippage applies).
-    assert ('TARGET', False) in cover_called
+    assert ('TARGET', False, 'TARGET_HIT') in cover_called
 
 
 def test_check_and_close_circuit_breaker():
@@ -636,11 +636,12 @@ def test_end_session_squares_off_all_positions():
                                 with patch.object(brain, '_execute_sell_by_trade',
                                                   side_effect=lambda t, p, r: sell_calls.append(t['id'])):
                                     with patch.object(brain, '_cover_short',
-                                                      side_effect=lambda t, p: cover_calls.append(t['id'])):
+                                                      side_effect=lambda t, p, exit_reason=None: cover_calls.append((t['id'], exit_reason))):
                                         brain.end_session('MANUAL_STOP')
 
     assert 't1' in sell_calls
-    assert 't2' in cover_calls
+    # P-27: the short leg records SESSION_END too, not a blanket COVER_SHORT
+    assert ('t2', 'SESSION_END') in cover_calls
 
 
 # ---- resume_stats (brain-restart mid-session) --------------------------------
@@ -776,3 +777,32 @@ def test_initialize_holdings_only_adds_no_index_stocks():
     assert 'NSE:DMART' not in brain.universe
     called_map = mock_md.verify_instrument_tokens.call_args[0][0]
     assert called_map == {}
+
+
+def test_end_session_never_filled_trade_closes_as_order_failed():
+    """P-28: a row whose entry never filled (null entry_price, null quantity)
+    used to be force-closed as SQUARE_OFF_FAILED with a fabricated exit price —
+    a phantom trade that inflated the raw count by 1 and tripped the
+    bad_null_entry integrity check. It is an ORDER_FAILED, and nothing else."""
+    brain = _make_brain()
+    ghost = {'id': 'g1', 'symbol': 'INFY', 'exchange': 'NSE',
+             'position_type': 'LONG', 'quantity': None,
+             'entry_price': None, 'entry_value': None}
+    brain.market_data._holdings_cache = {'NSE:INFY': {'price': 1165.50}}
+
+    with patch('brain.db.end_session'), \
+         patch('brain.db.write_config'), \
+         patch('brain.db.log_brain_activity'), \
+         patch('brain.db.update_heartbeat'), \
+         patch('brain.logger.clear_context'), \
+         patch('brain.logger.info'), \
+         patch('brain.db.close_trade') as close, \
+         patch('brain.db.get_open_trades') as mock_open:
+        # still open after the (no-op) exit attempt → hits the force-close path
+        mock_open.side_effect = [[ghost], [ghost], []]
+        brain.end_session('MANUAL_STOP')
+
+    payload = close.call_args[0][1]
+    assert payload['exit_reason'] == 'ORDER_FAILED'
+    assert payload['pnl'] == 0
+    assert 'exit_price' not in payload

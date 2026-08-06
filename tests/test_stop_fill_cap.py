@@ -121,3 +121,41 @@ def test_evaluate_exit_caps_short_stop():
         # short, price 105 above stop 102 → STOP_LOSS_HIT, fill capped to 102.5
         b._evaluate_exit(_short(), 105.0)
         assert cover.call_args[0][1] == 102.5
+
+
+# --- P-27: short exits must carry the real reason, not a blanket COVER_SHORT ---
+
+def test_evaluate_exit_passes_reason_through_for_shorts():
+    """Until 08-06 every short exit was written as 'COVER_SHORT', so
+    STOP_LOSS_HIT / TARGET_HIT / TIME_STOP measured LONGs only — the [P-05]
+    verdict ('−1.252R, on target') described half the book."""
+    for price, expected in ((105.0, 'STOP_LOSS_HIT'), (89.0, 'TARGET_HIT')):
+        b = _brain()
+        with patch.object(config, 'PAPER_STOP_SLIPPAGE_CAP_R', 0.25), \
+             patch.object(b, '_update_excursion'), \
+             patch.object(b, '_cover_short') as cover:
+            b._evaluate_exit(_short(), price)
+            assert cover.call_args.kwargs['exit_reason'] == expected
+
+
+def test_cover_short_writes_the_given_reason():
+    b = _brain()
+    b.kite = MagicMock()
+    b.order_manager = MagicMock()
+    b.order_manager.cover_short_order.return_value = {
+        'order_id': 'o1', 'price': 102.5, 'quantity': 10, 'value': 1025.0,
+        'reference_price': 102.5, 'slippage_bps': 0.0, 'charges_bps': 0.0,
+        'model_stop': True,
+    }
+    with patch.object(b, '_excursion_fields', return_value={}), \
+         patch.object(b, '_exit_state', return_value={}), \
+         patch.object(b, '_record_close_outcome'), \
+         patch('brain.db.close_trade') as close, \
+         patch('brain.db.update_stock_score'), \
+         patch('brain.db.log_brain_activity'):
+        b._cover_short(_short(), 102.5, is_stop=True,
+                       exit_reason='STOP_LOSS_HIT')
+        payload = close.call_args[0][1]
+        assert payload['exit_reason'] == 'STOP_LOSS_HIT'
+        # and the model_stop flag survives into the persisted execution blob
+        assert payload['execution']['exit']['model_stop'] is True
