@@ -161,7 +161,15 @@ def _close_position(pos: dict, price: float, run_date: str, reason: str) -> None
 def _apply_management(rows: list, run_date: str, md, cache: dict) -> None:
     """SELL → close, TRIM → close half (book the win/loss on the trimmed lot,
     keep the rest), rotation → sell the freed qty and buy the target, HOLD →
-    nothing. Acts on the current open MANAGEMENT positions."""
+    nothing. Acts on the current open MANAGEMENT positions.
+
+    A name can carry a SELL/TRIM verdict *and* a rotation target in the same
+    run — the rotation is the same shares leaving, not a second sale. `remaining`
+    tracks how many shares are actually still held as the legs apply, so each
+    share is realized exactly once (P-24: the 08-06 seed booked 7 names twice,
+    a full SELL_VERDICT close *and* a full ROTATION_OUT close with identical
+    P&L, then zeroed the closed row's qty — −₹71,512.79 recorded vs a true
+    −₹39,983.84)."""
     open_by_sym = {}
     for p in db.paper_positions(MANAGEMENT, open_only=True):
         open_by_sym.setdefault(p['symbol'], p)
@@ -171,10 +179,12 @@ def _apply_management(rows: list, run_date: str, md, cache: dict) -> None:
         verdict = (r.get('verdict') or '').upper()
         pos = open_by_sym.get(sym)
         px = _last_close(md, sym, cache, fallback=r.get('last_price'))
+        remaining = int(pos['qty']) if pos else 0
         if pos and verdict in ('SELL', 'SELL_ON_BOUNCE'):
             _close_position(pos, px, run_date, 'SELL_VERDICT')
+            remaining = 0   # every share is realized on the closed row
         elif pos and verdict == 'TRIM':
-            half = int(pos['qty']) // 2
+            half = remaining // 2
             if half > 0:
                 # book the trimmed lot as a realized close; shrink the remainder
                 trimmed_row = _open_position(MANAGEMENT, sym, pos['source'], r,
@@ -187,24 +197,31 @@ def _apply_management(rows: list, run_date: str, md, cache: dict) -> None:
                 trimmed_row['realized_pnl'] = round((px - e) * half, 2)
                 trimmed_row['return_pct'] = round((px - e) / e * 100, 3) if e else 0.0
                 new_positions.append(trimmed_row)
-                db.update_paper_position(pos['id'], {'qty': int(pos['qty']) - half})
-        # rotation: sell freed qty from the holding, buy the target name
+                remaining -= half
+                db.update_paper_position(pos['id'], {'qty': remaining})
+        # rotation: sell whatever of the freed qty is still held, buy the target
         tgt = r.get('rotation_target_symbol')
-        sell_qty = int(r.get('rotation_sell_qty') or 0)
-        if pos and tgt and sell_qty > 0 and config.ROTATION_ADVISOR_ENABLED:
+        want_sell = int(r.get('rotation_sell_qty') or 0)
+        if pos and tgt and want_sell > 0 and config.ROTATION_ADVISOR_ENABLED:
             e = float(pos['entry_price'])
-            sell_qty = min(sell_qty, int(pos['qty']))
-            rot_out = _open_position(MANAGEMENT, sym, pos['source'], r,
-                                     sell_qty, e, pos['entry_date'])
-            rot_out.update({'is_open': False, 'exit_price': px, 'exit_date': run_date,
-                            'exit_reason': 'ROTATION_OUT',
-                            'realized_pnl': round((px - e) * sell_qty, 2),
-                            'return_pct': round((px - e) / e * 100, 3) if e else 0.0})
-            new_positions.append(rot_out)
-            db.update_paper_position(pos['id'], {'qty': max(0, int(pos['qty']) - sell_qty)})
+            sell_qty = min(want_sell, remaining)
+            if sell_qty > 0:
+                rot_out = _open_position(MANAGEMENT, sym, pos['source'], r,
+                                         sell_qty, e, pos['entry_date'])
+                rot_out.update({'is_open': False, 'exit_price': px, 'exit_date': run_date,
+                                'exit_reason': 'ROTATION_OUT',
+                                'realized_pnl': round((px - e) * sell_qty, 2),
+                                'return_pct': round((px - e) / e * 100, 3) if e else 0.0})
+                new_positions.append(rot_out)
+                remaining -= sell_qty
+                db.update_paper_position(pos['id'], {'qty': remaining})
+            # The BUY leg runs either way: when SELL already closed the name the
+            # proceeds are real, only the exit row would have been a duplicate.
+            # Size it off the intended sell qty, capped at what was held.
+            funded_qty = min(want_sell, int(pos['qty']))
             buy_px = float(r.get('rotation_buy_price') or _last_close(md, tgt, cache))
             buy_qty = int(r.get('rotation_buy_qty') or 0) or (
-                int((px * sell_qty) / buy_px) if buy_px else 0)
+                int((px * funded_qty) / buy_px) if buy_px else 0)
             if buy_qty > 0 and buy_px > 0:
                 new_positions.append(
                     _open_position(MANAGEMENT, tgt, 'ROTATION', r, buy_qty, buy_px, run_date))

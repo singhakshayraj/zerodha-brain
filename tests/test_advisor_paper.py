@@ -225,3 +225,43 @@ def test_disabled_flag_skips():
     md = _md({'AAA': [100]})
     with patch.object(config, 'ADVISOR_PAPER_ENABLED', False):
         assert _run(fake, md) is False
+
+
+def test_sell_plus_rotation_realizes_each_share_once():
+    """P-24: a name can carry a SELL verdict *and* a rotation target in the same
+    run — the rotation is the same shares leaving, not a second sale. The 08-06
+    seed booked 7 names twice (full SELL_VERDICT close + full ROTATION_OUT close,
+    identical P&L) and zeroed the closed row's qty: −₹71,512.79 recorded against
+    a true −₹39,983.84."""
+    rows = [_row('AAA', 'SELL', qty=10, avg=100, last=110,
+                 rotation_target_symbol='ZZZ', rotation_sell_qty=10,
+                 rotation_buy_price=50.0, rotation_buy_qty=20)]
+    fake = FakeDB(rows)
+    md = _md({'AAA': [100, 105, 110], 'ZZZ': [50, 50, 50]})
+    with patch.object(config, 'ROTATION_ADVISOR_ENABLED', True):
+        _run(fake, md)
+    mgmt = fake.paper_positions('MANAGEMENT')
+    closed_aaa = [p for p in mgmt if p['symbol'] == 'AAA' and not p['is_open']]
+    assert len(closed_aaa) == 1                       # one exit, not two
+    assert closed_aaa[0]['exit_reason'] == 'SELL_VERDICT'
+    assert closed_aaa[0]['qty'] == 10                 # closed row keeps its qty
+    assert closed_aaa[0]['realized_pnl'] == 100.0     # (110-100) x 10, once
+    # the rotation BUY still happens — the proceeds are real
+    assert [p for p in mgmt if p['symbol'] == 'ZZZ' and p['is_open']]
+
+
+def test_trim_plus_rotation_cannot_sell_more_than_held():
+    """The rotation leg used the pre-TRIM qty and then overwrote the trim's
+    shrink, so a 10-share holding could shed 5 (trim) + 10 (rotation)."""
+    rows = [_row('AAA', 'TRIM', qty=10, avg=100, last=110,
+                 rotation_target_symbol='ZZZ', rotation_sell_qty=10,
+                 rotation_buy_price=50.0, rotation_buy_qty=10)]
+    fake = FakeDB(rows)
+    md = _md({'AAA': [100, 105, 110], 'ZZZ': [50, 50, 50]})
+    with patch.object(config, 'ROTATION_ADVISOR_ENABLED', True):
+        _run(fake, md)
+    aaa = [p for p in fake.paper_positions('MANAGEMENT') if p['symbol'] == 'AAA']
+    sold = sum(int(p['qty']) for p in aaa if not p['is_open'])
+    held = sum(int(p['qty']) for p in aaa if p['is_open'])
+    assert sold + held == 10          # shares are conserved
+    assert sold == 10 and held == 0   # trimmed 5, rotated the remaining 5
