@@ -3,14 +3,27 @@
 # IST) — `railway variables --set` restarts the brain, which would truncate a
 # running session's data collection.
 #
-# Context. Measured on 2026-08-06 (session 16f23213, 77 trades, 1,883 decisions
-# across only 46 symbols), the ENTRY_DEFERRED tally was:
-#     HOURLY_PACE     44   <-- the binding cap
-#     CYCLE_LIMIT     13
-#     CONCURRENT_CAP   1   (cap 20 — not binding)
-#     SYMBOL_DAY_CAP   1   (cap  6 — not binding)
-# 77 trades over ~5.5h is ~14/hour against a live cap of 15: the book is
-# pressing hard against the hourly gate and nothing else.
+# Context — REVISED 2026-08-08 on 08-07's live evidence. The numbers below are
+# current; do not "adjust before running" (an earlier STATUS note said to, and
+# was stale).
+#
+# Originally measured on 2026-08-06 (session 16f23213, 77 trades, 1,883
+# decisions across only 46 symbols): HOURLY_PACE 44 / CYCLE_LIMIT 13 /
+# CONCURRENT_CAP 1 / SYMBOL_DAY_CAP 1.
+#
+# Then [P-31] roughly doubled the universe (46 -> 86 symbols), which moved the
+# constraint, and 08-07 settled where it landed ([C4]): across 20 cycles the
+# tally stayed at CYCLE_LIMIT 3 -- ALL of them in cycle 1's opening burst, none
+# after -- while entries per IST hour ran 11 / 8 / 15, and 15 is exactly
+# DATA_MAX_NEW_TRADES_PER_HOUR.
+#
+# So the hourly cap is what actually binds: 15 -> 25 is the lever that matters,
+# and 8 -> 12 on the cycle cap is close to irrelevant (kept anyway -- it only
+# widens the opening burst, and costs nothing).
+#
+# Caveat carried from [C1]: 08-07 was a 2h50m session because the enc_token was
+# never pasted, so it is a thin read on pacing. The deeper constraint that day
+# was session LENGTH, not pacing.
 #
 # The DIVERSITY half of this is already shipped in code (brain 18b34f9,
 # DATA_UNIVERSE_ROTATION_N=40, sector-balanced Nifty 500 rotation) and needs no
