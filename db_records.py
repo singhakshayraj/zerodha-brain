@@ -360,3 +360,112 @@ def get_evaluated_advice_with_features() -> list:
     except Exception as e:
         print(f"[get_evaluated_advice_with_features] error: {e}")
         return []
+
+
+# ── [P-25] User executions (real-money accountability) ──────────────────────
+
+def get_advice_snapshots(lookback_days: int = None) -> list:
+    """The implicit holdings time series: one entry per advice run, ascending.
+
+    Shaped for user_executions.detect_executions. Paginated — history is well
+    past PostgREST's 1000-row default and a silent truncation here would look
+    exactly like the user having sold everything before the cutoff.
+    """
+    try:
+        q = (database.supabase.table('portfolio_advice')
+             .select('id,run_id,symbol,quantity,avg_price,last_price,created_at')
+             .order('created_at'))
+        if lookback_days:
+            from datetime import datetime, timedelta
+            cutoff = (datetime.utcnow() - timedelta(days=lookback_days)).date().isoformat()
+            q = q.gte('run_date', cutoff)
+        rows = _fetch_all(q)
+    except Exception as e:
+        print(f"[get_advice_snapshots] error: {e}")
+        return []
+
+    by_run: dict = {}
+    for r in rows:
+        run_id = r.get('run_id')
+        if not run_id or not r.get('symbol'):
+            continue
+        snap = by_run.setdefault(run_id, {
+            'run_id': run_id, 'run_at': r.get('created_at'), 'holdings': {},
+        })
+        if r.get('created_at') and r['created_at'] < snap['run_at']:
+            snap['run_at'] = r['created_at']
+        snap['holdings'][r['symbol']] = {
+            'quantity': r.get('quantity') or 0,
+            'avg_price': r.get('avg_price'),
+            'last_price': r.get('last_price'),
+        }
+    return sorted(by_run.values(), key=lambda s: s['run_at'])
+
+
+def get_advice_at(symbol: str, at_ts) -> dict:
+    """The advice standing for `symbol` at `at_ts` — the most recent row at or
+    before it. That is what the user was actually reacting to; using the
+    latest row instead would score them against advice written afterwards."""
+    try:
+        res = (database.supabase.table('portfolio_advice')
+               .select('id,verdict,run_date,created_at')
+               .eq('symbol', symbol).lte('created_at', str(at_ts))
+               .order('created_at', desc=True).limit(1).execute())
+        return (res.data or [None])[0]
+    except Exception as e:
+        print(f"[get_advice_at] {symbol} error: {e}")
+        return None
+
+
+def was_rotation_target(symbol: str, at_ts) -> bool:
+    """Had the advisor suggested rotating INTO this name at or before `at_ts`?
+    Distinguishes 'bought what we suggested' from 'bought something we never
+    mentioned', which must not be scored as following advice."""
+    try:
+        res = (database.supabase.table('portfolio_advice')
+               .select('id').eq('rotation_target_symbol', symbol)
+               .lte('created_at', str(at_ts)).limit(1).execute())
+        return bool(res.data)
+    except Exception as e:
+        print(f"[was_rotation_target] {symbol} error: {e}")
+        return False
+
+
+def insert_user_executions(rows: list) -> int:
+    """Upsert on the natural key so backfills and per-session syncs can be
+    re-run safely. Returns the number of rows accepted."""
+    if not rows:
+        return 0
+    try:
+        payload = []
+        for r in rows:
+            payload.append({
+                'symbol': r['symbol'], 'side': r['side'],
+                'quantity': int(r['quantity']),
+                'price': r.get('price'),
+                'price_is_estimated': bool(r.get('price_is_estimated')),
+                'detected_at': str(r['detected_at']),
+                'prev_run_id': r.get('prev_run_id'), 'run_id': r.get('run_id'),
+                'advice_id': r.get('advice_id'),
+                'verdict_at_time': r.get('verdict_at_time'),
+                'followed_advice': r.get('followed_advice'),
+                'inferred': bool(r.get('inferred', True)),
+                'notes': r.get('notes'),
+            })
+        res = (database.supabase.table('user_executions')
+               .upsert(payload, on_conflict='symbol,side,quantity,detected_at')
+               .execute())
+        return len(res.data or [])
+    except Exception as e:
+        print(f"[insert_user_executions] error ({len(rows)} rows): {e}")
+        return 0
+
+
+def get_user_executions(limit: int = 200) -> list:
+    try:
+        res = (database.supabase.table('user_executions').select('*')
+               .order('detected_at', desc=True).limit(limit).execute())
+        return res.data or []
+    except Exception as e:
+        print(f"[get_user_executions] error: {e}")
+        return []

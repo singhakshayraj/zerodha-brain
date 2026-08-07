@@ -292,6 +292,17 @@ def _maybe_run_advisor() -> None:
             else:
                 n = portfolio_advisor.run_advisor_lite(md)
                 print(f"[SCHEDULER] advisor (intraday refresh) done: {n} holdings analyzed")
+
+            # [P-25] Real-money accountability. Runs after EITHER branch,
+            # because the intraday refresh is what gives the holdings series
+            # its ~8-minute resolution — a sale shows up as the holding
+            # shrinking on the very next pass. Bounded lookback; the advice
+            # rows it diffs were just written above.
+            try:
+                import user_executions
+                user_executions.run_user_executions()
+            except Exception as e:
+                print(f"[SCHEDULER] user-execution sync failed (non-fatal): {e}")
         except Exception as e:
             print(f"[SCHEDULER] advisor failed (non-fatal): {e}")
         finally:

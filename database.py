@@ -564,4 +564,9 @@ from db_paper import (  # noqa: E402,F401  facade re-export
     paper_positions, insert_paper_positions, update_paper_position,
     upsert_paper_equity, paper_equity_curve, paper_book_exists,
 )
+# ── [P-25] Real-money accountability (user executions) ──
+from db_records import (  # noqa: E402,F401  facade re-export
+    get_advice_snapshots, get_advice_at, was_rotation_target,
+    insert_user_executions, get_user_executions,
+)
 
