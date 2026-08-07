@@ -21,8 +21,15 @@ from build_nifty500_tokens import build_rows      # noqa: E402
 # --- config pin -------------------------------------------------------------
 
 def test_nifty500_pin_loaded():
-    assert len(config.NIFTY500_UNIVERSE) == 500
-    assert len(config.NIFTY500_INSTRUMENT_TOKENS) == 500
+    # A RANGE, not == 500. The pin tracks a real index whose membership moves:
+    # names get delisted or renamed between reconstitutions, and a dead pin is
+    # dropped rather than kept (JBCHEPHARM went in 2026-08-08, finding [C2] —
+    # its token 400s on every scan). An exact count would fail on the next
+    # legitimate change and teach whoever hits it to just bump the number.
+    # The band still catches the thing worth catching: a truncated or
+    # half-written CSV.
+    assert 450 <= len(config.NIFTY500_UNIVERSE) <= 510
+    assert len(config.NIFTY500_INSTRUMENT_TOKENS) == len(config.NIFTY500_UNIVERSE)
     # spot-check against the independently hand-pinned NIFTY50 dict
     assert (config.NIFTY500_INSTRUMENT_TOKENS['NSE:RELIANCE']
             == config.NIFTY50_INSTRUMENT_TOKENS['NSE:RELIANCE'])
@@ -59,7 +66,9 @@ def test_build_rows_joins_and_reports_missing():
 
 def test_universe_rows_shape_never_touches_engine_columns():
     rows = universe_rows()
-    assert len(rows) == 500
+    # every pinned row maps to exactly one seed row (count band: see
+    # test_nifty500_pin_loaded)
+    assert len(rows) == len(config.NIFTY500_UNIVERSE)
     r = rows[0]
     assert r['is_nifty500'] is True and r['is_active'] is True
     assert r['exchange'] == 'NSE'
