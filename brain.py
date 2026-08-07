@@ -550,18 +550,22 @@ class TradingBrain:
                 if key in prices_snapshot
                 or self.market_data._instrument_cache.get(key, 0) > 0
             }
-            holdings_count = sum(
-                1 for d in analyzable.values() if d.get('source') == 'holdings'
-            )
-            nifty_count = len(analyzable) - holdings_count
-            print(f"[brain] Analyzing {len(analyzable)} stocks "
-                  f"({holdings_count} holdings, {nifty_count} nifty50)")
+            # Break the mix out by source. Lumping everything non-holdings into
+            # "nifty50" hid the rotated Nifty 500 names inside that count from
+            # the day [P-31] shipped (87 stocks logged as "20 holdings, 67
+            # nifty50" when 40 of the 67 were rotated) — which would mislead
+            # exactly the audit that later tries to attribute breadth.
+            by_source: dict = {}
+            for d in analyzable.values():
+                by_source[d.get('source') or 'unknown'] = by_source.get(
+                    d.get('source') or 'unknown', 0) + 1
+            mix = ", ".join(f"{n} {src}" for src, n in sorted(by_source.items()))
+            print(f"[brain] Analyzing {len(analyzable)} stocks ({mix})")
 
             db.log_brain_activity(
                 session_id=self.session_id,
                 activity_type='CYCLE_START',
-                message=f"Cycle {current_cycle} — Scanning {len(analyzable)} stocks "
-                        f"({holdings_count} holdings, {nifty_count} nifty50)",
+                message=f"Cycle {current_cycle} — Scanning {len(analyzable)} stocks ({mix})",
             )
 
             # Step 4 — real market context from universe breadth (replaces
