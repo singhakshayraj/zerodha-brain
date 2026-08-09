@@ -233,6 +233,96 @@ def trend_score(ind: dict, closes: list, consistency=None,
     return max(-100, min(100, score))
 
 
+def build_counter_case(verdict: str, score: int, price: float,
+                       support: float = None, resistance: float = None,
+                       ema_21: float = None, ema_200: float = None,
+                       rsi: float = None, alignment: str = None,
+                       overextended: bool = False) -> str:
+    """The case AGAINST the verdict, in the verdict's own numbers. [P-33]
+
+    `reasons` is confirmatory by construction: every line explains why the call
+    is right. That makes a verdict unfalsifiable in the only way that matters —
+    nothing is written down that could later be checked and found wrong. This
+    states the opposite side, with the level that would settle it.
+
+    Source: `thesis-tracker` ("a thesis should be falsifiable — if nothing could
+    disprove it, it's not a thesis"; "track disconfirming evidence as rigorously
+    as confirming evidence") + `deal-screening`'s bull-case/bear-case pairing.
+    See docs/reference/FINSERV_PLUGINS.md §B.
+
+    Pure and total: returns '' only for INSUFFICIENT, so a caller can assert
+    every real verdict carries one. Levels are included only when known — a
+    counter-case that invents a number is worse than a vague one.
+    """
+    if verdict == 'INSUFFICIENT':
+        return ''
+
+    def lvl(v):
+        return f"₹{v:.2f}" if isinstance(v, (int, float)) and v else None
+
+    sup, res, e21 = lvl(support), lvl(resistance), lvl(ema_21)
+    weak_score = abs(score) < 40
+    parts = []
+
+    if verdict == 'HOLD':
+        parts.append(
+            f"The hold fails if {sup} gives way on a daily close"
+            if sup else
+            "The hold fails on a decisive daily breakdown — but no swing "
+            "support is identified, so there is no clean level to watch, "
+            "which is itself a reason for less conviction")
+        if alignment == 'CONFLICT':
+            parts.append("the weekly trend already disagrees with the daily, so "
+                         "this is a countertrend hold and the weekly usually wins")
+        if weak_score:
+            parts.append(f"the score is only +{score}, closer to mixed than to a "
+                         f"strong uptrend — a small deterioration flips it")
+        if rsi and rsi >= 70:
+            parts.append(f"RSI {rsi:.0f} is overbought, so upside from here is "
+                         f"being bought late")
+    elif verdict == 'TRIM' and overextended:
+        parts.append("Trimming an intact uptrend caps the upside, and an "
+                     "extended trend can stay extended for weeks")
+        if e21:
+            parts.append(f"if it holds {e21} the trim was premature and you "
+                         f"bought back higher")
+        if not weak_score:
+            parts.append(f"the score is +{score}, a genuinely strong trend to be "
+                         f"selling into")
+    elif verdict == 'TRIM':
+        parts.append("Mixed structure cuts both ways — de-risking here books a "
+                     "loss on what may just be noise")
+        if sup:
+            parts.append(f"if {sup} holds, the position never needed trimming")
+    elif verdict == 'SELL_ON_BOUNCE':
+        parts.append("The bounce may simply not come")
+        if sup:
+            parts.append(f"if {sup} breaks first you will have sold lower than "
+                         f"an immediate exit would have")
+        if res:
+            parts.append(f"and if it runs past {res} instead, the downtrend read "
+                         f"was wrong outright")
+    elif verdict == 'SELL':
+        parts.append("Selling with no support nearby is selling into weakness, "
+                     "which is exactly where reversals start")
+        if e21:
+            parts.append(f"reclaiming {e21} would say the downtrend is over and "
+                         f"the exit was the low")
+        if rsi and rsi <= 30:
+            parts.append(f"RSI {rsi:.0f} is oversold — the easy part of the fall "
+                         f"is already behind")
+        if weak_score:
+            parts.append(f"the score is {score}, not a deep structural downtrend")
+    else:
+        parts.append("No counter-case defined for this verdict — treat the call "
+                     "as unfalsifiable until one is")
+
+    out = parts[0]
+    if len(parts) > 1:
+        out += '; ' + '; '.join(parts[1:])
+    return out + '.'
+
+
 def classify_trigger(score: int, price: float, ema200: float,
                      rel_strength: float = None) -> str:
     """MACRO vs MICRO: is this call backed by long-horizon evidence, or only
@@ -377,7 +467,11 @@ def advise(holding: dict, daily_candles: list, history: dict = None,
                 [f'Only {len(daily_candles or [])} completed daily bars — '
                  f'need {MIN_DAILY_BARS}+ for an honest read'],
                 'stop_level': None, 'exit_target': None, 'indicators': {},
-                'market_regime': regime, 'trigger_type': None}
+                'market_regime': regime, 'trigger_type': None,
+                # [P-33]: no verdict to argue against. Kept as a key so every
+                # advice row has the same shape — these dicts are spread
+                # straight into the insert.
+                'counter_case': ''}
 
     ind = run_all_indicators(daily_candles)
     closes = [float(c['close']) for c in daily_candles
@@ -532,6 +626,12 @@ def advise(holding: dict, daily_candles: list, history: dict = None,
         'market_regime': regime,
         'trigger_type': classify_trigger(score, price, ema200, rel_strength),
         'reasons': reasons,
+        # [P-33] the case AGAINST this call, in its own numbers
+        'counter_case': build_counter_case(
+            verdict, score, price, support=support, resistance=resistance,
+            ema_21=ind.get('ema_21'), ema_200=ema200, rsi=rsi,
+            alignment=alignment,
+            overextended=overextended),
         'stop_level': round(stop, 2) if stop else None,
         'exit_target': round(target, 2) if target else None,
         'indicators': {
