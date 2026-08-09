@@ -399,10 +399,86 @@ def _maybe_capture_timeline() -> None:
         print(f"[SCHEDULER] timeline capture errored (non-fatal): {e}")
 
 
-def _report_stale_token() -> None:
-    """One durable token_incident + feed line per stale episode (deduped)."""
+_candle_backfill_days = set()      # run_dates SUCCESSFULLY backfilled
+_candle_backfill_inflight = set()  # run_dates a thread is running now
+
+
+def _maybe_backfill_candles() -> None:
+    """[C5] post-close candle backfill, 15:40–16:30 IST, once per day.
+
+    The in-cycle archive writes only the trailing 3 bars for symbols analyzed
+    that cycle, so a position closing between cycles never gets its final bars
+    written — [P-30] found 10 of 118 clean-exit trades exit past the last
+    archived bar. This re-reads the whole day for everything traded.
+
+    Deliberately here and not in the close path: an archive call on the exit
+    path is the documented ~7s/cycle latency regression, and a slow exit path
+    fills stops at −2.78R instead of ≈−1R. Post-close, latency is free.
+
+    Same shape as _maybe_capture_timeline: day-gated, needs a live token,
+    daemon thread, marked done only on success so a failure retries within the
+    window. Starts after that job's 15:35 window opens so the two don't
+    contend for the token check on the same tick.
+    """
+    if config.QA_MODE:
+        return
+    try:
+        now = datetime.now(IST)
+        today = now.date().isoformat()
+        if now.weekday() > 4 or today in config.NSE_HOLIDAYS:
+            return
+        m = now.hour * 60 + now.minute
+        if not ((15 * 60 + 40) <= m <= (16 * 60 + 30)):
+            return
+        if today in _candle_backfill_days or today in _candle_backfill_inflight:
+            return
+        token = db.get_enc_token()
+        if not token or not _token_is_live(token):
+            print('[SCHEDULER] candle backfill skipped — no live token')
+            return
+        _candle_backfill_inflight.add(today)
+
+        def _run():
+            try:
+                import data_jobs
+                from market_data import MarketData
+                n = data_jobs.archive_traded_day_candles(
+                    MarketData(KiteClient(token)),
+                    db.get_config('active_session_id'),
+                    today,
+                )
+                _candle_backfill_days.add(today)
+                print(f"[SCHEDULER] candle backfill done: {n} bars")
+            except Exception as e:
+                print(f"[SCHEDULER] candle backfill failed (will retry): {e}")
+            finally:
+                _candle_backfill_inflight.discard(today)
+
+        threading.Thread(target=_run, daemon=True, name='candle-backfill').start()
+    except Exception as e:
+        print(f"[SCHEDULER] candle backfill errored (non-fatal): {e}")
+
+
+def _report_stale_token(missing: bool = False) -> None:
+    """One durable token_incident + feed line per token episode (deduped).
+
+    `missing=True` is the NO-token-at-all case, which used to write only a
+    heartbeat and therefore left no trace at all ([C1]). That asymmetry is what
+    made 2026-08-07 invisible: autopilot fired on time at 09:30, found no token,
+    and retried every 30s until 12:40 — ~380 attempts costing ~55% of the day's
+    tape — while `brain_activity` stayed empty 03:30–07:11 UTC and nothing
+    durable was written. A stale token got a dashboard banner; a missing one got
+    silence, even though it is the more common failure and costs just as much.
+
+    Both cases now land in the same `token_incident` key, so the clear path
+    below (and the watchdog's P1 check) covers them without knowing which
+    happened.
+    """
     global _stale_token_reported
-    _set_heartbeat('ERROR', 0, 'Token expired — paste a fresh enctoken to start')
+    _set_heartbeat(
+        'ERROR', 0,
+        'No token — paste an enctoken to start' if missing
+        else 'Token expired — paste a fresh enctoken to start')
     db.write_config('brain_status', 'IDLE')
     if _stale_token_reported:
         return
@@ -413,7 +489,8 @@ def _report_stale_token() -> None:
         # session here (refusing to create one is the whole point).
         db.write_config(
             'token_incident',
-            f"{datetime.now(IST).isoformat()} token stale at start — "
+            f"{datetime.now(IST).isoformat()} "
+            f"{'no token at start' if missing else 'token stale at start'} — "
             f"awaiting fresh enctoken (no session created)",
         )
     except Exception:
@@ -612,6 +689,9 @@ def run():
             _maybe_kick_weekly_profiles()
             # Per-stock agent: pre-open + post-close timeline capture (P2).
             _maybe_capture_timeline()
+            # Post-close candle backfill — fills the tail gaps the in-cycle
+            # trailing-3 archive leaves behind ([C5]).
+            _maybe_backfill_candles()
             # Portfolio advisor: once per day when a live token exists.
             # Advisory-only, independent of trading sessions; never blocks
             # the loop (runs on a daemon thread).
@@ -655,8 +735,12 @@ def run():
                         token = token_refresher.refresh_enc_token()
 
                     if not token:
+                        # [C1]: leave a durable trace, not just a heartbeat.
+                        # The heartbeat is a CURRENT-STATE field — it is
+                        # overwritten on the next tick, so after the fact there
+                        # was no evidence the morning had been lost at all.
                         print("[SCHEDULER] No token found")
-                        _set_heartbeat('ERROR', 0, 'No token — reconnect from app')
+                        _report_stale_token(missing=True)
                         time.sleep(30)
                         continue
 

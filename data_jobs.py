@@ -217,3 +217,76 @@ def maybe_lock_inplay(market_data, universe: dict) -> int:
     except Exception as e:
         print(f"[data_jobs] inplay job failed (non-fatal): {e}")
         return 0
+
+
+# --- [C5] post-close candle backfill ----------------------------------------
+
+def _token_for(symbol: str):
+    """Pinned instrument token for an NSE symbol, or None. Post-close there is
+    no live universe, so MarketData's instrument cache is empty — the pinned
+    maps are the only source."""
+    key = f'NSE:{symbol}'
+    return (config.NIFTY500_INSTRUMENT_TOKENS.get(key)
+            or config.NIFTY50_INSTRUMENT_TOKENS.get(key))
+
+
+def archive_traded_day_candles(market_data, session_id: str, run_date: str,
+                               symbols: list = None) -> int:
+    """Re-archive the FULL day's 5-minute bars for every symbol traded today.
+
+    Fixes [C5]. The in-cycle archive writes only the trailing 3 bars, and only
+    for symbols analyzed that cycle — so a position that closes between cycles
+    never gets its final bars written. [P-30] measured the cost: 10 of 118
+    clean-exit trades exit past the last archived bar, which makes their exit
+    unorderable by the candle replay.
+
+    ⚠️ Runs POST-CLOSE, never in the close path. Adding an archive call to the
+    exit path is the documented `archive_candles` latency regression (~7s/cycle)
+    and a slow exit path is measured to fill stops at −2.78R instead of ≈−1R.
+    Here latency is irrelevant.
+
+    Idempotent: candles upsert on (symbol, interval, ts), so re-running only
+    fills gaps. Never raises — a data job must not take anything down.
+
+    Returns the number of bars written.
+    """
+    if symbols is None:
+        symbols = db.traded_symbols_on(run_date)
+    if not symbols:
+        print('[data_jobs.candle_backfill] no symbols traded — nothing to do')
+        return 0
+
+    total, done, skipped = 0, 0, []
+    for sym in symbols:
+        token = _token_for(sym)
+        if not token:
+            skipped.append(sym)
+            continue
+        try:
+            # Seed the instrument cache and use the public path, so caching,
+            # error handling and TokenExpiredError propagation stay identical
+            # to every other candle read.
+            market_data._instrument_cache[sym] = token
+            candles = market_data.get_candles(sym, '5minute', 3) or []
+            todays = [c for c in candles
+                      if str(c.get('timestamp', ''))[:10] == run_date]
+            if not todays:
+                continue
+            # tail=len(todays): the whole day, not the usual trailing 3 — the
+            # point is to fill gaps the trailing writes left behind.
+            rows = db.candle_rows(session_id, sym, 'NSE', todays,
+                                  tail=len(todays))
+            total += db.upsert_candles(rows)
+            done += 1
+        except TokenExpiredError:
+            print('[data_jobs.candle_backfill] token expired — stopping')
+            break
+        except Exception as e:
+            print(f"[data_jobs.candle_backfill] {sym} failed: {e}")
+
+    if skipped:
+        print(f"[data_jobs.candle_backfill] no pinned token for "
+              f"{len(skipped)}: {', '.join(skipped[:8])}")
+    print(f"[data_jobs.candle_backfill] {run_date}: {total} bars over "
+          f"{done}/{len(symbols)} symbols")
+    return total

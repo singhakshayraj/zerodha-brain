@@ -223,6 +223,53 @@ def test_report_stale_token_dedupes():
     assert writes.count('token_incident') == 1   # durable incident written once
 
 
+def test_report_stale_token_missing_writes_durable_incident():
+    """[C1]: a MISSING token must leave the same durable trace a STALE one does.
+
+    Before the fix the no-token path wrote only a heartbeat — a current-state
+    field, overwritten on the next tick — so 2026-08-07's lost morning (~380
+    retries, ~55% of the day's tape) left no evidence behind at all. The
+    regression this guards is silent and only visible in hindsight, which is
+    exactly why it needs a test rather than a code comment.
+    """
+    import scheduler
+    scheduler._stale_token_reported = False
+    writes = {}
+    beats = []
+    with patch('scheduler.db.write_config',
+               side_effect=lambda k, v: writes.setdefault(k, []).append(v)), \
+         patch('scheduler._set_heartbeat',
+               side_effect=lambda *a, **k: beats.append(a)):
+        scheduler._report_stale_token(missing=True)
+
+    assert len(writes.get('token_incident', [])) == 1
+    # the incident must say WHICH failure it was — "stale" and "missing" have
+    # different fixes (refresh vs paste), and the dashboard shows this string
+    assert 'no token at start' in writes['token_incident'][0]
+    assert writes.get('brain_status') == ['IDLE']
+    assert any('No token' in str(b) for b in beats)
+
+
+def test_report_stale_token_distinguishes_missing_from_stale():
+    """The two cases must not collapse into one message."""
+    import scheduler
+    msgs = []
+
+    def _capture(k, v):
+        if k == 'token_incident':
+            msgs.append(v)
+
+    for missing in (True, False):
+        scheduler._stale_token_reported = False
+        with patch('scheduler.db.write_config', side_effect=_capture), \
+             patch('scheduler._set_heartbeat'):
+            scheduler._report_stale_token(missing=missing)
+
+    assert len(msgs) == 2
+    assert 'no token at start' in msgs[0]
+    assert 'token stale at start' in msgs[1]
+
+
 # --- START: init failure must release the session (2026-07-09 zombie fix) ---
 
 def test_start_initialize_false_aborts_session_and_clears_pointer():

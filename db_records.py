@@ -469,3 +469,23 @@ def get_user_executions(limit: int = 200) -> list:
     except Exception as e:
         print(f"[get_user_executions] error: {e}")
         return []
+
+
+def traded_symbols_on(run_date: str) -> list:
+    """Distinct symbols traded on one IST trading day — the post-close candle
+    backfill's target set ([C5]).
+
+    `created_at` is UTC while `run_date` is the IST trading day, but NSE hours
+    (09:15-15:30 IST = 03:45-10:00 UTC) sit wholly inside the same UTC date, so
+    a plain date-prefix filter is exact for real sessions. It would only skew
+    for a synthetic trade written after 18:30 UTC, which does not happen.
+    """
+    try:
+        res = (database.supabase.table('trades').select('symbol')
+               .gte('created_at', f'{run_date}T00:00:00')
+               .lte('created_at', f'{run_date}T23:59:59')
+               .execute())
+        return sorted({r['symbol'] for r in (res.data or []) if r.get('symbol')})
+    except Exception as e:
+        print(f"[traded_symbols_on] error: {e}")
+        return []

@@ -543,7 +543,7 @@ def get_session_trades(session_id: str) -> list:
 from db_records import (  # noqa: E402,F401  facade re-export
     _fetch_all, log_decision, link_decision_trade, log_quote_snapshot,
     candle_rows, upsert_candles, archive_candles, upsert_news_events,
-    traded_symbols, upsert_tradebook, get_tradebook, append_decision_skip,
+    traded_symbols, traded_symbols_on, upsert_tradebook, get_tradebook, append_decision_skip,
     get_unevaluated_advice, update_advice_outcome, record_advice_decision, get_evaluated_advice,
     get_evaluated_advice_with_features,
 )
