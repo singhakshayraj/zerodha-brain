@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# STANDING PRE-MARKET PACING RUNBOOK. Run before 09:15 IST on a session day.
+#
+# (Renamed 2026-08-10 from session_2026-08-07_data_boost.sh — it was named for
+# one specific session but has been the recurring pre-market step ever since,
+# and a dated name on a standing runbook invites someone to assume it is spent.)
+#
 # Volume + diversity boost for the next session. Run PRE-MARKET (before 09:15
 # IST) — `railway variables --set` restarts the brain, which would truncate a
 # running session's data collection.
