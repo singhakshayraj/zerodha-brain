@@ -459,6 +459,70 @@ def _maybe_backfill_candles() -> None:
         print(f"[SCHEDULER] candle backfill errored (non-fatal): {e}")
 
 
+# --- TEMPORARY EXPERIMENT (2026-08-10) — remove after reading the result -----
+# Measures exactly when a Zerodha enctoken dies. Four places in this repo say
+# "~06:00 IST" and TOKEN_REFRESH_HOUR_IST=6:30 is built on it, but that is an
+# empirical guess: Zerodha documents only the Kite Connect access_token, and
+# community reports put the daily flush anywhere in 05:00-07:30 IST — which
+# would put our 06:30 refresh INSIDE the window.
+#
+# Runs here rather than on a laptop because a sleeping Mac leaves gaps exactly
+# where the transition happens. Railway does not sleep.
+#
+# It also settles the keep-alive question for free: this probe IS activity. If
+# expiry were an idle timeout, this traffic would hold the session open.
+#
+# SAFE BY CONSTRUCTION: hard-gated to a single date, so it is a no-op on every
+# other day even if nobody removes it; stops at 09:00 IST, before the open;
+# stops permanently once it records a death; read-only (one GET per poll);
+# never raises.
+_TOKEN_PROBE_DATE = '2026-08-10'
+_TOKEN_PROBE_EVERY_S = 300
+_token_probe_last = 0.0
+_token_probe_done = False
+
+
+def _maybe_probe_token_expiry() -> None:
+    global _token_probe_last, _token_probe_done
+    if config.QA_MODE or _token_probe_done:
+        return
+    try:
+        now = datetime.now(IST)
+        if now.date().isoformat() != _TOKEN_PROBE_DATE or now.hour >= 9:
+            return
+        if (time.time() - _token_probe_last) < _TOKEN_PROBE_EVERY_S:
+            return
+        _token_probe_last = time.time()
+
+        token = db.get_enc_token()
+        if not token:
+            state = 'NO_TOKEN'
+        else:
+            try:
+                KiteClient(token).get_profile()
+                state = 'OK'
+            except TokenExpiredError:
+                state = 'DEAD'
+            except Exception as e:
+                # A network blip recorded as an expiry is the one way this
+                # experiment produces a confidently wrong answer.
+                state = f'INCONCLUSIVE({type(e).__name__})'
+
+        line = f"{now.strftime('%H:%M')} {state}"
+        prev = db.get_config('token_probe_log') or ''
+        lines = [l for l in prev.split('\n') if l][-160:]
+        lines.append(line)
+        if state == 'DEAD':
+            lines.append(f"{now.strftime('%H:%M')} >>> DIED — probe was active "
+                         f"throughout, so this is a scheduled flush, not an "
+                         f"idle timeout. Compare TOKEN_REFRESH_HOUR_IST=06:30.")
+            _token_probe_done = True
+        db.write_config('token_probe_log', '\n'.join(lines))
+        print(f"[token-probe] {line}")
+    except Exception as e:
+        print(f"[token-probe] errored (non-fatal): {e}")
+
+
 def _report_stale_token(missing: bool = False) -> None:
     """One durable token_incident + feed line per token episode (deduped).
 
@@ -692,6 +756,8 @@ def run():
             # Post-close candle backfill — fills the tail gaps the in-cycle
             # trailing-3 archive leaves behind ([C5]).
             _maybe_backfill_candles()
+            # TEMPORARY (2026-08-10 only) — enctoken expiry experiment.
+            _maybe_probe_token_expiry()
             # Portfolio advisor: once per day when a live token exists.
             # Advisory-only, independent of trading sessions; never blocks
             # the loop (runs on a daemon thread).
