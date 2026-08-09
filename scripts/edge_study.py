@@ -37,7 +37,6 @@ Run:  python3 scripts/edge_study.py
 """
 import os
 import sys
-from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
