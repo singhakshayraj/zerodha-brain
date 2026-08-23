@@ -5,7 +5,7 @@ bear case and the levels. advise() is pure and the scan already holds the
 candles, so it produces them there rather than via an on-demand path that would
 need a live token and re-fetch the same data.
 """
-from unittest.mock import patch
+
 
 import advisor_scoring
 
@@ -17,7 +17,7 @@ def _candles(n=260, start=100.0, step=0.4):
         o = p; p = round(p + step, 2)
         out.append({'open': o, 'high': max(o, p) + 0.5, 'low': min(o, p) - 0.5,
                     'close': p, 'volume': 100000,
-                    'timestamp': f'2026-01-01T00:00:00+0530'})
+                    'timestamp': '2026-01-01T00:00:00+0530'})
     return out
 
 
