@@ -219,12 +219,18 @@ def _maybe_run_advisor() -> None:
         _advisor_running = False
     now = _now_ist()
     today = now.date().isoformat()
+
+    # Trading days only, INCLUDING for a manual trigger. Tempting to let a
+    # forced run through on a weekend (scores go stale over one), but a forced
+    # run writes an official advice batch stamped with that date, so a
+    # Saturday-dated batch would have its grading horizon measured from a
+    # Saturday. tests/test_advisor_trigger.py pins this deliberately:
+    # the trigger bypasses the TIME window, never the trading-day gate.
     if now.weekday() > 4 or today in config.NSE_HOLIDAYS:
         return
 
     forced = (db.get_config('advisor_run_now') or '').strip().lower() == 'true'
     if forced:
-        db.write_config('advisor_run_now', '')  # consume — fires once
         is_official_run = True
     else:
         have_official = db.has_official_advisor_run(today)
@@ -248,8 +254,13 @@ def _maybe_run_advisor() -> None:
         # The silent killer — log it so a stalled advisor is diagnosable from
         # logs alone (P-17); the time-based skips above are normal + frequent
         # and deliberately stay quiet.
+        # NOTE: a forced request is deliberately NOT consumed here. Consuming
+        # on read meant a user pressing "re-run" with a stale token had the
+        # request silently eaten — the exact case the button exists for. Left
+        # set, it simply fires the moment a live token appears.
         print(f"[SCHEDULER] advisor gate ({'official' if is_official_run else 'lite'})"
-              f" → skip: no live token")
+              f" → skip: no live token"
+              f"{' (forced request kept pending)' if forced else ''}")
         return
     _advisor_running = True
     _advisor_started_at = datetime.now(IST)
@@ -308,6 +319,9 @@ def _maybe_run_advisor() -> None:
         finally:
             _advisor_running = False
 
+    # Consume the manual trigger only now that the run is actually starting.
+    if forced:
+        db.write_config('advisor_run_now', '')
     threading.Thread(target=_run, daemon=True, name='advisor').start()
 
 
