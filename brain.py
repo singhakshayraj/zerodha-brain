@@ -2238,6 +2238,12 @@ class TradingBrain:
                 'nifty_level': nifty['level'],
                 'nifty_change_percent': nifty['change_percent'],
                 'nifty_direction': nifty['direction'],
+                # Breadth is computed every cycle by _market_context() and feeds
+                # the trend-tells breadth_sector tell, but was never persisted --
+                # advancing_stocks/declining_stocks sat NULL on every row while
+                # the values were right there in the dict.
+                'advancing_stocks': nifty.get('advancers'),
+                'declining_stocks': nifty.get('decliners'),
                 'india_vix': None,  # deprecated: retail token can't read VIX
                 'realized_vol': rvol,
                 'volatility_bucket': vol_bucket,
