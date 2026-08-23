@@ -2,8 +2,8 @@
 09:30 (ENGINEERING_SPEC M3, amended).
 
 Spec §1 put these on a Mac cron at 07:00 IST, but retail enctoken auth makes
-that impossible: the old token dies ~06:00 and the fresh one is pasted just
-before 09:15. So the jobs run inside the brain, where a valid token is
+that impossible: the old token is flushed at ~04:34 IST (measured 2026-08-10)
+and the fresh one is pasted before 09:15. So the jobs run inside the brain, where a valid token is
 guaranteed — level pack right after initialize (data is prior-day, so
 building at 09:1x loses nothing), in-play locked at the first cycle past
 09:30 (spec's exact lock time).

@@ -9,6 +9,20 @@ from datetime import datetime, timezone  # noqa: F401  (used by moved fns)
 
 import database
 
+# Keys that must never reach brain_decisions.indicators. [P-38]
+#
+# Filtered HERE rather than at the call sites because log_decision merges both
+# its `indicators` argument and every non-None **kwarg into the jsonb -- so this
+# one place covers all three call sites in brain.py and any future one.
+#
+# Each was verified redundant on 2026-08-10 against the 1,653 rows from 08-07:
+#   git_sha, config_hash -- 1 distinct value each; both are already COLUMNS on
+#     trading_sessions, and every decision carries session_id. Storing them here
+#     repeats one value ~1,650 times a day for 42 bytes/row.
+# Removing them is lossless: readers join trading_sessions instead.
+INDICATOR_DENYLIST = frozenset({'git_sha', 'config_hash'})
+
+
 def log_decision(
     session_id: str,
     symbol: str,
@@ -50,6 +64,19 @@ def log_decision(
         for k, v in kwargs.items():
             if v is not None:
                 enhanced[k] = v
+
+        # [P-38] storage: drop what is stored elsewhere or is a default.
+        for k in INDICATOR_DENYLIST:
+            enhanced.pop(k, None)
+
+        # Sparse: record the exception, not the default. event_policy was 1
+        # distinct value across 1,653 rows -- it is NORMAL on nearly every day,
+        # so storing it embeds 89 bytes to say "nothing special happened".
+        # Expiry and results days are the whole reason the field exists and
+        # those still record.
+        # READERS MUST TREAT AN ABSENT KEY AS 'NORMAL'.
+        if enhanced.get('event_policy') in (None, '', 'NORMAL'):
+            enhanced.pop('event_policy', None)
 
         payload = {
             'session_id': session_id,
@@ -489,3 +516,22 @@ def traded_symbols_on(run_date: str) -> list:
     except Exception as e:
         print(f"[traded_symbols_on] error: {e}")
         return []
+
+
+def prune_activity(keep_days: int = 90) -> int:
+    """Delete brain_activity rows older than keep_days. [P-38]
+
+    Write-only in practice: every reader does `order by created_at desc limit
+    N` and nothing reads history. At ~4,500 rows/day that is ~1.1M rows and
+    ~434MB a year of data no query touches.
+
+    The Postgres function refuses to keep fewer than 14 days, so a
+    fat-fingered 0 cannot wipe the feed the dashboard renders.
+    """
+    try:
+        res = database.supabase.rpc(
+            'prune_brain_activity', {'p_keep_days': keep_days}).execute()
+        return int(res.data or 0)
+    except Exception as e:
+        print(f"[prune_activity] error: {e}")
+        return 0

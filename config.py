@@ -15,8 +15,18 @@ KITE_BASE_URL = 'https://kite.zerodha.com/oms'
 KITE_USER_ID = os.getenv('KITE_USER_ID')
 KITE_PASSWORD = os.getenv('KITE_PASSWORD')
 KITE_TOTP_SECRET = os.getenv('KITE_TOTP_SECRET')
-# Old tokens expire ~6:00 AM IST; refresh daily at 6:30 so a live token is
-# always in place well before the 9:15 open.
+# MEASURED 2026-08-10 ([C6]): a token pasted 01:38 IST probed OK every 5 minutes
+# and died at 04:34 IST. Not ~06:00 as this comment used to claim, and not the
+# 05:00-07:30 window community reports give for the Kite Connect access_token.
+#
+# It is a scheduled daily flush, not an idle timeout: the probe was hitting the
+# API throughout and did not keep it alive. Nor is it a ~3h TTL -- sessions have
+# run 5.75h and 5.85h on a single token, which a 3h TTL would have killed
+# mid-session.
+#
+# So refreshing at 06:30 is SAFE: it sits comfortably AFTER the ~04:34 flush,
+# not inside it. (An earlier note worried the opposite; the measurement settled
+# it.) Anything pasted after ~04:35 IST lasts the whole trading day.
 TOKEN_REFRESH_HOUR_IST = 6
 TOKEN_REFRESH_MINUTE_IST = 30
 

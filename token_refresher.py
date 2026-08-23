@@ -1,6 +1,7 @@
 """Daily Kite enc_token auto-refresh via TOTP login.
 
-Zerodha web-session enctokens expire around 6 AM IST every day. This module
+Zerodha web-session enctokens are flushed daily at ~04:34 IST (MEASURED
+2026-08-10, [C6] -- not "around 6 AM" as previously assumed). This module
 replays the same login flow the kite.zerodha.com web app uses (password +
 TOTP) and stores the fresh enctoken in the Supabase config table, where the
 scheduler and brain already read it from.
@@ -99,8 +100,9 @@ def refresh_enc_token():
 
 def maybe_daily_refresh():
     """Refresh once per day after the expiry window (called from the
-    scheduler idle loop). Old tokens die ~6 AM IST; refreshing at
-    TOKEN_REFRESH_HOUR_IST guarantees a live token before 9:15 open."""
+    scheduler idle loop). Tokens are flushed at ~04:34 IST (measured
+    2026-08-10); refreshing at TOKEN_REFRESH_HOUR_IST (06:30) sits safely
+    after that and guarantees a live token before the 09:15 open."""
     if not is_enabled():
         return None
 
