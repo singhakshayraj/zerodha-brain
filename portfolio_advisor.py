@@ -105,17 +105,35 @@ def score_universe(market_data, universe: list = None, nifty_closes: list = None
             # Weekly structure of the candidate — the entry-quality gate reads
             # it to refuse rotating INTO a weekly downtrend (FA4/P-09, dark).
             wk = weekly_trend(candles, closes[-1] if closes else None)
+
+            # Full verdict for the /advisor lookup, not just the bare score.
+            # advise() is pure and the candles are already in hand, so this is
+            # near-free here — versus an on-demand path that would need a live
+            # token and ~30s of latency to recompute what this loop already has.
+            # quantity/average_price are 0/None because you do not own it, so
+            # the position-economics fields come back absent rather than wrong.
+            try:
+                detail = advise(
+                    {'symbol': sym, 'quantity': 0, 'average_price': None,
+                     'last_price': closes[-1] if closes else None},
+                    candles, nifty_closes=nifty_closes, regime=regime)
+            except Exception as e:
+                print(f"[advisor.scan] {sym} detail skipped: {e}")
+                detail = None
+
             out[sym] = {'symbol': sym, 'score': score,
                         'sector': entry.get('sector'),
                         'last_close': closes[-1] if closes else None,
-                        'weekly': wk['weekly_trend']}
+                        'weekly': wk['weekly_trend'],
+                        'detail': detail}
         except Exception as e:
             print(f"[advisor.scan] {sym} skipped: {e}")
     if out:
         scored_at = datetime.now(IST).isoformat()
         db.upsert_stock_universe_bulk([
             {'symbol': s['symbol'], 'advisor_score': s['score'],
-             'advisor_score_updated_at': scored_at} for s in out.values()])
+             'advisor_score_updated_at': scored_at,
+             'advisor_detail': s.get('detail')} for s in out.values()])
     return out
 
 
