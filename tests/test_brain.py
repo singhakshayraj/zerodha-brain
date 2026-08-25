@@ -37,9 +37,6 @@ def _make_brain():
     brain.market_data = MagicMock()
     brain.market_data._holdings_cache = {}
     brain.market_data._instrument_cache = {}
-    brain.market_data.get_nifty_level.return_value = {
-        'level': 22000.0, 'change_percent': 0.1, 'direction': 'NEUTRAL'
-    }
     brain.market_data.get_candles.return_value = []
     brain.market_data.verify_instrument_tokens.return_value = []
     brain.market_data.get_live_quotes_batch.return_value = {}

@@ -28,7 +28,6 @@ not: no rotation target ever entered the holdings feed. Do not "fix" the
 detector for that — it is a property of the source, and the honest response is
 to label BUY detections as late rather than to pretend they are prompt.
 """
-from datetime import datetime
 
 import pytz
 

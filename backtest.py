@@ -32,7 +32,7 @@ Usage sketch:
         exit_style='FIXED_TARGET',      # or 'TRAIL_TO_CLOSE'
     )
 """
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pytz
 
@@ -42,7 +42,6 @@ import orb
 import trend_tells
 from brain import _invert_for_short
 from paper_broker import _zerodha_intraday_charges
-from regime_detector import RegimeDetector
 from risk_manager import RiskManager
 from signal_engine import SignalEngine
 

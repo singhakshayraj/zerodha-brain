@@ -291,11 +291,6 @@ def calculate_adx(candles: list, period: int = 14):
         return None
 
 
-def calculate_ema_5min(candles_5min: list, period: int):
-    closes = get_closes(candles_5min)
-    return calculate_ema(closes, period)
-
-
 def get_candle_direction(candles: list, lookback: int = 3) -> str:
     try:
         if not candles or len(candles) < lookback:

@@ -17,7 +17,6 @@ who finds the bot gets ignored (and logged).
 """
 import threading
 import time
-from datetime import datetime
 
 import pytz
 

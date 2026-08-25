@@ -1802,9 +1802,9 @@ class TradingBrain:
         """Real market direction + breadth from the universe itself: each
         stock's day change = (live − prior-day close) computed from the
         level pack's PDC and the live price. Retail enctoken can't read the
-        Nifty index (/quote disabled), so get_nifty_level was stubbed to a
+        Nifty index (/quote disabled), so the old get_nifty_level returned a
         constant SIDEWAYS — the dead input behind 2026-07-08's shorts into a
-        rising tape. This reconstructs the same signal from data we already
+        rising tape. That stub is deleted, so it cannot be wired back in. This reconstructs the same signal from data we already
         have, and yields breadth for the trend-tells breadth_sector tell.
 
         Returns {level, change_percent, direction, advancers, decliners,

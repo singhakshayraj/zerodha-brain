@@ -300,29 +300,6 @@ class MarketData:
                 print(f"[token_verify] {symbol} error: {e}")
         return mismatches
 
-    def get_nifty_level(self) -> dict:
-        # /quote disabled — no Nifty 50 access via OMS for retail
-        # Return neutral context so regime detector treats market as SIDEWAYS
-        try:
-            last_price = 0
-            prev_close = 0
-            change_percent = 0.0
-
-            if change_percent > 0.3:
-                direction = 'BULLISH'
-            elif change_percent < -0.3:
-                direction = 'BEARISH'
-            else:
-                direction = 'SIDEWAYS'
-
-            return {
-                'level': last_price,
-                'change_percent': change_percent,
-                'direction': direction,
-            }
-        except Exception as e:
-            print(f"[market_data.get_nifty_level] error: {e}")
-            return {'level': 0, 'change_percent': 0, 'direction': 'SIDEWAYS'}
 
     def get_time_bucket(self) -> str:
         now = self._now()
