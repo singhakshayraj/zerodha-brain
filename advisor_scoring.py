@@ -33,6 +33,12 @@ WEEKLY_EMA_LONG = 30
 WEEKLY_EMA_MID = 10
 WEEKLY_MOMENTUM_WEEKS = 8
 
+# 12-1 momentum: the 12-month return skipping the most recent month
+# (Jegadeesh & Titman 1993). 400 calendar days of daily bars is ~271 trading
+# bars and this needs 253, so the advisor's existing fetch already covers it.
+MOMENTUM_LOOKBACK_BARS = 252
+MOMENTUM_SKIP_BARS = 21
+
 
 def trend_consistency(closes: list, lookback: int = 20):
     """% of the last `lookback` closes sitting above the 50-day EMA — a
@@ -48,6 +54,35 @@ def trend_consistency(closes: list, lookback: int = 20):
     tail_ema = series[-lookback:]
     above = sum(1 for c, e in zip(tail_closes, tail_ema) if c > e)
     return round(above / lookback * 100, 1)
+
+
+def momentum_12_1(closes: list):
+    """12-month return skipping the most recent month, in percent.
+
+    DARK FLAG — computed and logged on every advice row, deliberately NOT
+    folded into trend_score. Same discipline weekly_trend follows: a factor
+    earns a score weight by grading out on our own live calls, never on
+    plausibility or on a backtest.
+
+    Why this one and not the other eleven: scripts/factor_lab.py tested the
+    standard cross-sectional set over 5.2 years and NOTHING survived Holm
+    correction out of sample. mom_12_1 was the only factor that kept a
+    positive sign in explore AND holdout across all four cuts, with the best
+    quintile spreads — promising and unproven. Logging it is how it earns a
+    live track record that advisor_backtest.factor_attribution can grade.
+
+    The skip month is the point: the most recent 21 days are short-term
+    REVERSAL territory, which is the window the advisor's existing momentum
+    term actually measures.
+    """
+    need = MOMENTUM_LOOKBACK_BARS + 1
+    if len(closes) < need:
+        return None
+    start = closes[-need]
+    end = closes[-(MOMENTUM_SKIP_BARS + 1)]
+    if not start:
+        return None
+    return round((end / start - 1) * 100, 2)
 
 
 def relative_strength(closes: list, benchmark_closes: list,
@@ -479,6 +514,7 @@ def advise(holding: dict, daily_candles: list, history: dict = None,
     consistency = trend_consistency(closes)
     rel_strength = relative_strength(closes, nifty_closes or [])
     vol_trend = volume_trend(daily_candles)
+    mom_12_1 = momentum_12_1(closes)
     score = trend_score(ind, closes, consistency=consistency,
                         rel_strength=rel_strength, news_sent=news_sent,
                         regime=regime)
@@ -649,6 +685,8 @@ def advise(holding: dict, daily_candles: list, history: dict = None,
             'weekly_ema_long': wk['weekly_ema_long'],
             'price_vs_weekly_pct': wk['price_vs_weekly_pct'],
             'daily_weekly_alignment': alignment,
+            # Dark flag: logged, never scored. See momentum_12_1.
+            'mom_12_1': mom_12_1,
             'history': history or None,
         },
     }
