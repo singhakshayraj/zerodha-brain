@@ -2,3 +2,4 @@
 __pycache__/
 test_connection.py
 .coverage
+data/daily_history.pkl

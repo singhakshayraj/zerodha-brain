@@ -131,7 +131,12 @@ class MarketData:
         elif interval == 'day':
             # Daily bars for the portfolio advisor: EMA200 + swing structure
             # need deep history (~400 calendar days ≈ 250+ trading bars).
-            from_dt = now - timedelta(days=400)
+            # A floor like every other interval -- this used to hardcode 400
+            # and silently ignore `days`, capping every caller at ~271 bars
+            # no matter what it asked for (same defect class as [C7]).
+            # Production asks for exactly 400, so this is a no-op there; the
+            # advisor replay lab asks for more and now actually gets it.
+            from_dt = now - timedelta(days=max(days, 400))
         else:
             from_dt = now - timedelta(days=20)
 

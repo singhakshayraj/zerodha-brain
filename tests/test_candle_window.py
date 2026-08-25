@@ -61,3 +61,18 @@ def test_window_starts_at_midnight_so_the_oldest_day_is_whole():
 def test_daily_interval_is_untouched():
     frm = _captured_from('day', 5, NOW)
     assert (NOW - frm) >= timedelta(days=399)
+
+
+def test_day_honours_a_larger_request():
+    """The 'day' branch hardcoded 400 and ignored `days`, capping every caller
+    at ~271 bars however much it asked for -- the same defect as the intraday
+    one above, just quieter. The advisor replay lab needs multi-year history."""
+    frm = _captured_from('day', 1900, NOW)
+    assert (NOW - frm) >= timedelta(days=1900)
+
+
+def test_day_keeps_its_400_floor():
+    """Production asks for exactly 400 and EMA200 needs that depth; a smaller
+    request must not shrink the window below it."""
+    frm = _captured_from('day', 30, NOW)
+    assert (NOW - frm) >= timedelta(days=400)
