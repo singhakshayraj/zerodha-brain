@@ -111,16 +111,32 @@ class MarketData:
     def _get_historical(self, token: int, interval: str, days: int) -> list:
         now = self._now()
 
+        # The per-interval windows below are FLOORS, not fixed values: a caller
+        # asking for more gets more. They used to ignore `days` outright, which
+        # is what broke the in-play lock ([C7]) -- data_jobs asked for days=5,
+        # silently got 3 calendar days, and after a weekend that holds at most
+        # ONE prior trading day. opening_range_stats needs >= 2 to compute an
+        # RVOL baseline, so every candidate came back with or_rvol=None, the
+        # ranking was empty, and the list never locked. It worked mid-week and
+        # failed every Monday, which is exactly the observed pattern
+        # (08-05/06/07 locked; 08-10, 08-24, 08-25 did not).
+        #
+        # Floored to midnight as well: measuring back from `now` clipped the
+        # oldest day's opening range, so a "3 day" window really held 2 usable
+        # opening ranges.
         if interval == '5minute':
-            from_dt = now - timedelta(days=3)
+            from_dt = now - timedelta(days=max(days, 3))
         elif interval == '15minute':
-            from_dt = now - timedelta(days=5)
+            from_dt = now - timedelta(days=max(days, 5))
         elif interval == 'day':
             # Daily bars for the portfolio advisor: EMA200 + swing structure
             # need deep history (~400 calendar days ≈ 250+ trading bars).
             from_dt = now - timedelta(days=400)
         else:
             from_dt = now - timedelta(days=20)
+
+        if interval in ('5minute', '15minute'):
+            from_dt = from_dt.replace(hour=0, minute=0, second=0, microsecond=0)
 
         from_date = from_dt.strftime('%Y-%m-%d %H:%M:%S')
         to_date = now.strftime('%Y-%m-%d %H:%M:%S')
