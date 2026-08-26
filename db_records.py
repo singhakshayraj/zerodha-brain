@@ -20,6 +20,35 @@ import database
 #     trading_sessions, and every decision carries session_id. Storing them here
 #     repeats one value ~1,650 times a day for 42 bytes/row.
 # Removing them is lossless: readers join trading_sessions instead.
+_DEFAULT_EVENT_POLICY_KEYS = frozenset(
+    {'policy', 'reasons', 'weekly_expiry', 'monthly_expiry'})
+
+
+def _is_default_event_policy(ep) -> bool:
+    """True when event_policy carries no information and can be dropped.
+
+    The original check compared against the STRING 'NORMAL', but the field is
+    written as a dict -- {'policy': 'NORMAL', 'reasons': [], 'weekly_expiry':
+    False, 'monthly_expiry': False} -- and a dict never equals a string, so the
+    sparse-drop never once fired. 16,229 of 22,463 rows carrying the key were
+    fully default, ~94 bytes each, about 1.5 MB spent saying nothing happened.
+
+    Unknown keys BLOCK the drop on purpose: if this dict ever grows a field,
+    the row is kept rather than silently discarding the new information.
+    Readers must continue to treat an absent key as NORMAL.
+    """
+    if ep in (None, '', 'NORMAL'):
+        return True
+    if not isinstance(ep, dict):
+        return False
+    if not _DEFAULT_EVENT_POLICY_KEYS.issuperset(ep):
+        return False
+    return (ep.get('policy') == 'NORMAL'
+            and not ep.get('reasons')
+            and not ep.get('weekly_expiry')
+            and not ep.get('monthly_expiry'))
+
+
 INDICATOR_DENYLIST = frozenset({'git_sha', 'config_hash'})
 
 
@@ -75,7 +104,7 @@ def log_decision(
         # Expiry and results days are the whole reason the field exists and
         # those still record.
         # READERS MUST TREAT AN ABSENT KEY AS 'NORMAL'.
-        if enhanced.get('event_policy') in (None, '', 'NORMAL'):
+        if _is_default_event_policy(enhanced.get('event_policy')):
             enhanced.pop('event_policy', None)
 
         payload = {

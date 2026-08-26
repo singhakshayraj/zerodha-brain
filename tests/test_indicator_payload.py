@@ -75,6 +75,43 @@ def test_event_policy_kept_when_it_is_not_normal():
         assert _logged_indicators(event_policy=policy)['event_policy'] == policy
 
 
+def test_event_policy_dropped_when_normal_DICT():
+    """The shape production actually writes.
+
+    These tests previously only passed the STRING 'NORMAL', while brain.py
+    writes a DICT. A dict never equals a string, so the sparse-drop never once
+    fired and the test still passed -- 16,229 of 22,463 rows carrying the key
+    were fully default, ~1.5 MB spent recording that nothing happened.
+    """
+    ind = _logged_indicators(event_policy={
+        'policy': 'NORMAL', 'reasons': [],
+        'weekly_expiry': False, 'monthly_expiry': False})
+    assert 'event_policy' not in ind
+
+
+def test_event_policy_dict_kept_when_anything_is_set():
+    """Expiry and results days are the whole reason the field exists."""
+    for ep in (
+        {'policy': 'NORMAL', 'reasons': ['weekly expiry'],
+         'weekly_expiry': False, 'monthly_expiry': False},
+        {'policy': 'NORMAL', 'reasons': [],
+         'weekly_expiry': True, 'monthly_expiry': False},
+        {'policy': 'NORMAL', 'reasons': [],
+         'weekly_expiry': False, 'monthly_expiry': True},
+        {'policy': 'STAND_ASIDE', 'reasons': [],
+         'weekly_expiry': False, 'monthly_expiry': False},
+    ):
+        assert _logged_indicators(event_policy=ep)['event_policy'] == ep
+
+
+def test_unknown_event_policy_key_blocks_the_drop():
+    """If the dict grows a field, keep the row rather than silently discard
+    information we have not taught the predicate about yet."""
+    ep = {'policy': 'NORMAL', 'reasons': [], 'weekly_expiry': False,
+          'monthly_expiry': False, 'circuit_halt': True}
+    assert _logged_indicators(event_policy=ep)['event_policy'] == ep
+
+
 def test_indicators_argument_is_filtered_too():
     """The denylist must apply to the `indicators` argument, not just **kwargs
     -- a caller could pass a redundant key either way."""
