@@ -503,20 +503,42 @@ def get_open_longs(session_id: str) -> list:
 
 def get_win_rate() -> tuple:
     """Lifetime win rate across all CLOSED trades with non-null pnl.
-    Returns (win_rate, total_trades). Fallback 0.45 when <10 trades."""
+    Returns (win_rate, total_trades). Fallback 0.45 when <10 trades.
+
+    Counted SERVER-SIDE. This used to select every closed trade's pnl and
+    count them in Python, which had two faults that both grow with the book:
+
+      * PostgREST caps a rowset at 1000. At 914 closed trades and ~69 a
+        session, the next session or two would have silently returned the
+        OLDEST 1000 and frozen the win rate there forever -- no error, just a
+        number that stops moving while the book keeps changing. Same defect
+        class as [P-36]/[P-37]; this was a missed instance.
+      * It ran on EVERY buy, so a session shipped ~69 x 914 rows over the
+        wire to compute one ratio.
+
+    Two exact counts return the same number (verified 214/914 = 0.2341
+    against the equivalent SQL) with one row of payload and no ceiling.
+    """
     try:
-        res = (
+        base = (
             supabase.table('trades')
-            .select('pnl')
+            .select('id', count='exact')
             .eq('status', 'CLOSED')
             .not_.is_('pnl', 'null')
-            .execute()
         )
-        trades = res.data or []
-        total = len(trades)
+        total = (base.limit(1).execute().count) or 0
         if total < 10:
             return 0.45, total
-        wins = sum(1 for t in trades if (t.get('pnl') or 0) > 0)
+        wins = (
+            supabase.table('trades')
+            .select('id', count='exact')
+            .eq('status', 'CLOSED')
+            .not_.is_('pnl', 'null')
+            .gt('pnl', 0)
+            .limit(1)
+            .execute()
+            .count
+        ) or 0
         win_rate = wins / total
         print(f"[kelly] Historical win rate: {wins}/{total} = {win_rate:.1%}")
         return win_rate, total

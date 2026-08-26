@@ -211,11 +211,11 @@ def test_close_trade_pnl_zero_is_winner_false():
 # --- get_win_rate ---
 
 def test_get_win_rate_fewer_than_10_returns_fallback():
-    """< 10 trades → returns (0.45, total)."""
+    """< 10 trades → returns (0.45, total). Counted server-side now, so the
+    stub supplies a count rather than a page of rows."""
     mock = _chain([])
-    mock.table.return_value.select.return_value.eq.return_value.not_.is_.return_value.execute.return_value.data = [
-        {'pnl': 10.0}, {'pnl': -5.0}, {'pnl': 8.0}, {'pnl': -2.0}, {'pnl': 3.0}
-    ]
+    (mock.table.return_value.select.return_value.eq.return_value
+     .not_.is_.return_value.limit.return_value.execute.return_value.count) = 5
     with patch.object(database, 'supabase', mock):
         win_rate, total = database.get_win_rate()
     assert win_rate == 0.45
@@ -223,10 +223,12 @@ def test_get_win_rate_fewer_than_10_returns_fallback():
 
 
 def test_get_win_rate_10_or_more_trades():
-    """≥ 10 trades → computes actual win rate."""
-    trades = [{'pnl': 10.0 if i % 2 == 0 else -5.0} for i in range(10)]
+    """≥ 10 trades → computes actual win rate from two exact counts."""
     mock = _chain([])
-    mock.table.return_value.select.return_value.eq.return_value.not_.is_.return_value.execute.return_value.data = trades
+    base = (mock.table.return_value.select.return_value.eq.return_value
+            .not_.is_.return_value)
+    base.limit.return_value.execute.return_value.count = 10          # total
+    base.gt.return_value.limit.return_value.execute.return_value.count = 5  # wins
     with patch.object(database, 'supabase', mock):
         win_rate, total = database.get_win_rate()
     assert total == 10
