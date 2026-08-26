@@ -215,10 +215,27 @@ def assert_safe_boot() -> None:
             'real money. Unset DATA_COLLECTION_MODE or run in paper mode.'
         )
 
-# Risk settings
-MAX_RISK_PER_TRADE_PERCENT = 1.0  # 1% of capital per trade
-MAX_POSITION_SIZE_PERCENT = 20.0  # max 20% capital in one stock
-MIN_TRADE_VALUE = 1000  # minimum ₹1000 per trade
+# Risk settings — THE LIVE ONES ARE BELOW, NOT HERE.
+#
+# Three constants used to sit here and were read by nothing, in either repo:
+#   MAX_RISK_PER_TRADE_PERCENT = 1.0   # 1% of capital per trade
+#   MAX_POSITION_SIZE_PERCENT  = 20.0  # max 20% capital in one stock
+#   MIN_TRADE_VALUE            = 1000  # minimum Rs1000 per trade
+#
+# Each contradicted the constant that actually governs, and the middle one was
+# materially misleading: it advertised a 20% concentration cap while
+# MAX_POSITION_PERCENT (0.40) is what risk_manager enforces. Measured against
+# Rs100,000 deployed, the LARGEST position was Rs40,033 -- 40.0%, exactly the
+# real cap -- and the AVERAGE position was Rs26,878, i.e. 26.9%, already above
+# the 20% the dead line claimed. Anyone auditing risk from this block would
+# have been wrong about typical concentration, not just the extreme.
+#
+# The enforced limits, and where they live:
+#   RISK_PER_TRADE_PCT     -- risk per trade, env-tunable       (see below)
+#   MAX_POSITION_PERCENT   -- 0.40, hard cap in risk_manager    (see below)
+#   MIN_POSITION_VALUE     -- Rs2000 floor in risk_manager      (see below)
+#   DAILY_STOP_R           -- 3R daily stop, hard even in data-collection mode
+# Signal thresholds (MIN_BUY_CONFIDENCE etc.) are live via get_tunable().
 
 # Rate limiting
 QUOTE_REQUEST_DELAY_MS = 350  # 350ms between quote calls
