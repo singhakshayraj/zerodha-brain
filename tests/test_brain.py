@@ -569,8 +569,11 @@ def test_check_and_close_short_target_hit():
                                       side_effect=lambda t, p, is_stop=False, exit_reason='COVER_SHORT': cover_called.append(('TARGET', is_stop, exit_reason))):
                         brain._check_and_close_positions()
 
-    # A target cover is not a stop → no is_stop flag (normal slippage applies).
-    assert ('TARGET', False, 'TARGET_HIT') in cover_called
+    # TARGET_HIT is now a CAPPED exit too (2026-08-27): its fill is modelled
+    # by _target_fill_price, so the broker must NOT apply PAPER_SLIPPAGE_PCT on
+    # top -- that is the same double-count [P-27] caught on the stop side. The
+    # flag is named is_stop for historical reasons; it means "pre-capped fill".
+    assert ('TARGET', True, 'TARGET_HIT') in cover_called
 
 
 def test_check_and_close_circuit_breaker():

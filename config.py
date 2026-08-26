@@ -168,6 +168,21 @@ PAPER_SLIPPAGE_PCT = float(os.getenv('PAPER_SLIPPAGE_PCT', '0.05'))  # adverse f
 # trimmed. 0 disables (fills at the raw polled price, the pre-P-05 behaviour).
 PAPER_STOP_SLIPPAGE_CAP_R = float(os.getenv('PAPER_STOP_SLIPPAGE_CAP_R', '0.25'))
 
+# TARGET_HIT fill realism — the same poll-latency artifact as the stop cap
+# above, on the other side of the trade, and it was left uncorrected until
+# 2026-08-27. The ~30s poll catches price AFTER it has pulled back from the
+# target, so a target exit books less than the target it actually touched:
+# measured TARGET_HIT avg +1.389R against a planned 2.08R, while avg mfe_r
+# reads 1.610R — below the target the trade must have reached to be classified
+# TARGET_HIT at all, which is itself proof the polled series understates the
+# intrabar peak. A real trader rests a target-LIMIT order broker-side that
+# fills at the limit or better, so the pullback tail is an artifact of polling,
+# not a real cost. Mirrors the stop cap exactly: fill no worse than
+# target -/+ CAP_R x risk-per-share, and never BETTER than the target itself.
+# Leaving only the loss side capped biased every gate metric downward.
+# 0 disables (fills at the raw polled price, the pre-2026-08-27 behaviour).
+PAPER_TARGET_SLIPPAGE_CAP_R = float(os.getenv('PAPER_TARGET_SLIPPAGE_CAP_R', '0.25'))
+
 # ── Startup interlocks ──────────────────────────────────────────────────────
 # Both failure modes here are one env-var typo away and catastrophic:
 #   1. QA_MODE against the production DB writes synthetic-market garbage into

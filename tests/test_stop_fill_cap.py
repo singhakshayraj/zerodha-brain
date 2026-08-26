@@ -91,9 +91,13 @@ def test_degenerate_stop_returns_raw_price():
         assert b._stop_fill_price(_long(entry=100, stop=100), 95.0, False) == 95.0
 
 
-# --- integration through _evaluate_exit: only STOP_LOSS_HIT is capped ---
+# --- integration through _evaluate_exit: BOTH capped exits ---
+# Until 2026-08-27 only STOP_LOSS_HIT was capped and TARGET_HIT filled at the
+# raw poll. That was the scope of [P-05], not a decision that targets should
+# stay raw -- and capping the loss tail while leaving the gain tail biased
+# every gate metric downward. See config.PAPER_TARGET_SLIPPAGE_CAP_R.
 
-def test_evaluate_exit_caps_stop_not_target():
+def test_evaluate_exit_caps_both_stop_and_target():
     b = _brain()
     with patch.object(config, 'PAPER_STOP_SLIPPAGE_CAP_R', 0.25), \
          patch.object(b, '_update_excursion'), \
@@ -107,9 +111,13 @@ def test_evaluate_exit_caps_stop_not_target():
     with patch.object(config, 'PAPER_STOP_SLIPPAGE_CAP_R', 0.25), \
          patch.object(b2, '_update_excursion'), \
          patch.object(b2, '_execute_sell_by_trade') as sell2:
-        # long, price 111 above target 110 → TARGET_HIT, NOT capped
+        # long, price 111 above target 110 → TARGET_HIT. Now capped AT the
+        # target: a resting target-limit fills at its limit, so the 1.00 the
+        # poll happened to overshoot by is not ours to book. The cap trims the
+        # favourable tail as well as the adverse one -- it is a fill model,
+        # not a thumb on the scale.
         b2._evaluate_exit(_long(), 111.0)
-        assert sell2.call_args[0][1] == 111.0
+        assert sell2.call_args[0][1] == 110.0
         assert sell2.call_args[0][2] == 'TARGET_HIT'
 
 

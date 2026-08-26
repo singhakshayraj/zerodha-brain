@@ -1995,6 +1995,54 @@ class TradingBrain:
                   f"→ {round(capped, 2)} (cap {cap}R past stop {stop})")
         return capped
 
+    # Exits whose fill price is modelled rather than taken raw from the poll.
+    # Both are pre-capped here, so paper_broker must not apply
+    # PAPER_SLIPPAGE_PCT on top (that double-count is what P-27 caught).
+    CAPPED_EXITS = ('STOP_LOSS_HIT', 'TARGET_HIT')
+
+    def _exit_fill_price(self, trade: dict, current_price: float,
+                         is_short: bool, exit_reason: str) -> float:
+        if exit_reason == 'STOP_LOSS_HIT':
+            return self._stop_fill_price(trade, current_price, is_short)
+        if exit_reason == 'TARGET_HIT':
+            return self._target_fill_price(trade, current_price, is_short)
+        return current_price
+
+    def _target_fill_price(self, trade: dict, current_price: float,
+                           is_short: bool) -> float:
+        """Model a resting broker-side target-LIMIT fill for a TARGET_HIT.
+
+        The mirror of _stop_fill_price, and the reason it exists: [P-05] capped
+        the poll-latency tail on the STOP side in August and left the TARGET
+        side untouched, so the same ~30s poll kept booking pullback as lost
+        gain. Measured TARGET_HIT +1.389R against a planned 2.08R, with avg
+        mfe_r 1.610R — below the target the trade must have touched to be
+        classified TARGET_HIT, which is the artifact showing through.
+
+        Capping only losses and not gains biases every gate metric downward,
+        so this is a correction for symmetry, not a flattering assumption: a
+        target-limit fills at the limit or better, never 30s later at a
+        pulled-back price.
+
+        Never returns a fill BETTER than the target, so no gain is fabricated.
+        cap <= 0 (or a degenerate stop) -> raw `current_price`.
+        """
+        cap = config.PAPER_TARGET_SLIPPAGE_CAP_R
+        entry = trade.get('entry_price')
+        stop = trade.get('stop_loss_price')
+        target = trade.get('target_price')
+        if cap <= 0 or not entry or not stop or not target:
+            return current_price
+        risk_ps = abs(entry - stop)
+        if risk_ps <= 0:
+            return current_price
+        band = cap * risk_ps
+        if is_short:
+            # short target sits BELOW entry; a worse fill is a HIGHER price.
+            return max(target, min(current_price, target + band))
+        # long target sits ABOVE entry; a worse fill is a LOWER price.
+        return min(target, max(current_price, target - band))
+
     def _evaluate_exit(self, trade: dict, current_price: float) -> bool:
         """Stop → target → time-stop for ONE open trade, priority order
         (REQ-051). Returns True if the position was exited. May end the
@@ -2018,10 +2066,10 @@ class TradingBrain:
             elif current_price <= trade['target_price']:
                 should_exit, exit_reason = True, 'TARGET_HIT'
             if should_exit:
-                fill_px = (self._stop_fill_price(trade, current_price, True)
-                           if exit_reason == 'STOP_LOSS_HIT' else current_price)
+                fill_px = self._exit_fill_price(trade, current_price,
+                                                True, exit_reason)
                 self._cover_short(trade, fill_px,
-                                  is_stop=exit_reason == 'STOP_LOSS_HIT',
+                                  is_stop=exit_reason in self.CAPPED_EXITS,
                                   exit_reason=exit_reason)
         else:
             if current_price <= trade['stop_loss_price']:
@@ -2029,8 +2077,8 @@ class TradingBrain:
             elif current_price >= trade['target_price']:
                 should_exit, exit_reason = True, 'TARGET_HIT'
             if should_exit:
-                fill_px = (self._stop_fill_price(trade, current_price, False)
-                           if exit_reason == 'STOP_LOSS_HIT' else current_price)
+                fill_px = self._exit_fill_price(trade, current_price,
+                                                False, exit_reason)
                 self._execute_sell_by_trade(trade, fill_px, exit_reason)
 
         # Time-stop (REQ-051): only if stop/target did NOT fire, preserving
@@ -2146,7 +2194,7 @@ class TradingBrain:
             trade['exchange'],
             qty,
             **({'hint_price': current_price,
-                'model_stop': exit_reason == 'STOP_LOSS_HIT'}
+                'model_stop': exit_reason in self.CAPPED_EXITS}
                if config.PAPER_TRADING else {})
         )
 
