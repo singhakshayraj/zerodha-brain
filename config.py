@@ -47,7 +47,12 @@ MARKET_CLOSE_HOUR = 15
 MARKET_CLOSE_MINUTE = 20
 
 # Brain settings
-HEARTBEAT_INTERVAL_SECONDS = 60
+# HEARTBEAT_INTERVAL_SECONDS lived here saying 60. It was read by nothing and
+# was also WRONG: the heartbeat thread sleeps 30s (scheduler._heartbeat_thread),
+# and watchdog.HEARTBEAT_STALE_SECONDS = 150 is calibrated to that 30s cadence.
+# Removed rather than corrected -- a second copy of a number owned elsewhere is
+# how the two drift apart. Change the cadence at the sleep, and re-check the
+# watchdog threshold with it.
 MARKET_CONTEXT_INTERVAL_SECONDS = 900  # 15 minutes
 BRAIN_VERSION = '1.0.0'
 

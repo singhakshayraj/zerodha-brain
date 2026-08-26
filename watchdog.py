@@ -33,6 +33,9 @@ IST = pytz.timezone('Asia/Kolkata')
 
 CHECK_INTERVAL_SECONDS = 60
 HEARTBEAT_STALE_SECONDS = 150       # brain writes every 30s; 5 misses = dead
+# ^ that 30s is scheduler._heartbeat_thread's time.sleep(30), in the other
+# service. There is no import binding these two, so if the cadence changes
+# this threshold must change with it or the alarm silently re-scales.
 ALERT_REPEAT_SECONDS = 1800         # same alert at most every 30 min
 
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')

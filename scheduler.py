@@ -652,6 +652,10 @@ def _heartbeat_thread() -> None:
             db.update_heartbeat(s, c, m)
         except Exception as e:
             print(f"[HEARTBEAT] error: {e}")
+        # 30s is the heartbeat cadence the EXTERNAL WATCHDOG is calibrated to:
+        # watchdog.HEARTBEAT_STALE_SECONDS = 150 means '5 missed writes = dead'.
+        # Changing this number silently re-scales that alarm -- at 60s it would
+        # fire after 2.5 misses, at 15s after 10. Change both together.
         time.sleep(30)
 
 
