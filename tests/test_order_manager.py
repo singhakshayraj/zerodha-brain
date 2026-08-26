@@ -1,12 +1,55 @@
-"""T2.1 — OrderManager unit tests. All Kite calls mocked."""
+"""T2.1 — OrderManager unit tests. All Kite calls mocked.
+
+Every test here runs with the live-order interlock ARMED, because that is the
+only way to exercise the placement logic at all. The interlock itself is
+tested separately below, and it is the reason these fixtures are explicit:
+if `arm_live_orders` is ever removed, these tests fail loudly rather than
+quietly placing something.
+"""
 import pytest
 from unittest.mock import MagicMock, patch
-from order_manager import OrderManager
+
+import config
+from order_manager import LiveOrderPathDisabled, OrderManager
+
+
+@pytest.fixture(autouse=True)
+def arm_live_orders():
+    """The real-money path refuses by default (2026-08-27). Arm it for these
+    unit tests only."""
+    with patch.object(config, 'LIVE_ORDERS_ARMED', True), \
+         patch.object(config, 'LIVE_ORDERS_ACK_DATE', '2026-08-27'):
+        yield
 
 
 @pytest.fixture
 def om():
     return OrderManager()
+
+
+# --- the interlock itself -------------------------------------------------
+
+def test_live_orders_refused_by_default():
+    """The default posture. PAPER_TRADING alone used to be the only thing
+    between a simulation and a real order on a real account."""
+    with patch.object(config, 'LIVE_ORDERS_ARMED', False), \
+         patch.object(config, 'LIVE_ORDERS_ACK_DATE', ''):
+        o = OrderManager()
+        for call in (lambda: o.place_buy_order(MagicMock(), 'INFY', 'NSE', 1),
+                     lambda: o.place_sell_order(MagicMock(), 'INFY', 'NSE', 1),
+                     lambda: o.cover_short_order(MagicMock(), 'INFY', 'NSE', 1)):
+            with pytest.raises(LiveOrderPathDisabled):
+                call()
+
+
+def test_arming_needs_both_flags():
+    """One stale env var must not be enough."""
+    o = OrderManager()
+    for armed, ack in ((True, ''), (False, '2026-08-27')):
+        with patch.object(config, 'LIVE_ORDERS_ARMED', armed), \
+             patch.object(config, 'LIVE_ORDERS_ACK_DATE', ack):
+            with pytest.raises(LiveOrderPathDisabled):
+                o.place_buy_order(MagicMock(), 'INFY', 'NSE', 1)
 
 
 def _kite(order_id='ORD001', status='COMPLETE', avg_price=1350.0, qty=10):

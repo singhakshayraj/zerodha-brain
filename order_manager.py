@@ -5,6 +5,46 @@ import database as db
 from kite_client import KiteClient
 
 
+class LiveOrderPathDisabled(RuntimeError):
+    """Raised when something tries to place a REAL order."""
+
+
+def _refuse_live_orders(action: str, symbol: str, quantity: int) -> None:
+    """Hard interlock on the real-money path. Raises unless explicitly armed.
+
+    WHY THIS EXISTS: PAPER_TRADING was a single boolean read at boot, while
+    this module stayed imported in the same process and app_config held a
+    live enc_token with real order-placement rights on a real account. One
+    bad merge to config.py, or one mis-set Railway variable, was the entire
+    distance between a simulation and a real order. The boot interlocks
+    checked flag COMBINATIONS, not intent.
+
+    Two further reasons, as of 2026-08-27:
+      * The strategy is measured at PF 0.365 / -0.425R over 914 trades and
+        -53.88pp against simply holding the Nifty. There is no version of
+        "go live" that is currently justified by evidence.
+      * SEBI's circular of 2025-02-04 (SEBI/HO/MIRSD/MIRSD-PoD/P/CIR/2025/
+        0000013) plus its September 2025 extension require, from 2026-04-01,
+        that algo orders carry an exchange-assigned Algo-ID and reach the
+        broker through a vendor-client-specific API key on a whitelisted
+        static IP. This codebase authenticates with a scraped retail
+        enc_token against kite.zerodha.com/oms. That is outside the
+        framework, not a lenient corner of it.
+
+    Arming this deliberately requires BOTH an env flag and a dated
+    acknowledgement, so it cannot happen by inheriting one stale variable.
+    """
+    if config.LIVE_ORDERS_ARMED and config.LIVE_ORDERS_ACK_DATE:
+        return
+    raise LiveOrderPathDisabled(
+        f"REFUSED real {action} {symbol} x{quantity}. The live order path is "
+        f"disabled in code. Paper trading is unaffected -- it does not route "
+        f"through OrderManager. To arm, set LIVE_ORDERS_ARMED=true AND "
+        f"LIVE_ORDERS_ACK_DATE=YYYY-MM-DD, and read the SEBI note in "
+        f"order_manager._refuse_live_orders first."
+    )
+
+
 class OrderManager:
 
     def __init__(self):
@@ -17,6 +57,7 @@ class OrderManager:
         exchange: str,
         quantity: int,
     ):
+        _refuse_live_orders('BUY', symbol, quantity)
         print(f"Placing BUY order: {symbol} x{quantity}")
 
         order_id = kite.place_order(
@@ -97,6 +138,7 @@ class OrderManager:
         exchange: str,
         quantity: int,
     ):
+        _refuse_live_orders('SELL', symbol, quantity)
         print(f"Placing SELL order: {symbol} x{quantity}")
 
         # SAFETY: block SELL on CNC holdings — only MIS positions can close
@@ -182,6 +224,7 @@ class OrderManager:
         exchange: str,
         quantity: int,
     ):
+        _refuse_live_orders('COVER', symbol, quantity)
         """Close (cover) an existing intraday short via MIS BUY."""
         print(f"Covering SHORT: {symbol} x{quantity}")
         order_id = kite.place_order(

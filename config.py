@@ -160,6 +160,12 @@ MARKET_BREADTH_MIN_SAMPLES = int(os.getenv('MARKET_BREADTH_MIN_SAMPLES', '5'))
 # Paper trading: real market data + real decisions, simulated fills.
 # No Kite orders are ever placed when true. See paper_broker.py.
 PAPER_TRADING = os.getenv('PAPER_TRADING', 'false').strip().lower() == 'true'
+
+# Hard interlock on the REAL-money order path (order_manager). PAPER_TRADING
+# alone was one boolean between simulation and a live order on a real account.
+# Arming requires BOTH, so a single stale env var cannot do it by itself.
+LIVE_ORDERS_ARMED = os.getenv('LIVE_ORDERS_ARMED', 'false').strip().lower() == 'true'
+LIVE_ORDERS_ACK_DATE = os.getenv('LIVE_ORDERS_ACK_DATE', '').strip()
 PAPER_SLIPPAGE_PCT = float(os.getenv('PAPER_SLIPPAGE_PCT', '0.05'))  # adverse fill %
 
 # STOP_LOSS_HIT fill realism (P-05). The exit checker polls ~every 30s, so a
