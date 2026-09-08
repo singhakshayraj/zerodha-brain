@@ -389,7 +389,7 @@ def get_evaluated_advice() -> list:
             database.supabase.table('portfolio_advice')
             .select('run_date, symbol, verdict, trend_score, quantity, '
                     'last_price, outcome_return_pct, outcome_vs_nifty_pct, '
-                    'outcome_correct, evaluated_at, user_decision')
+                    'outcome_correct, outcome_correct_alpha, evaluated_at, user_decision')
             .eq('is_official', True)
             .not_.is_('evaluated_at', 'null')
             .order('run_date'))
@@ -408,7 +408,7 @@ def get_evaluated_advice_with_features() -> list:
         return _fetch_all(
             database.supabase.table('portfolio_advice')
             .select('run_date, symbol, verdict, trend_score, trigger_type, '
-                    'confidence, last_price, indicators, outcome_correct, '
+                    'confidence, last_price, indicators, outcome_correct, outcome_correct_alpha, '
                     'outcome_return_pct, outcome_vs_nifty_pct')
             .eq('is_official', True)
             .not_.is_('evaluated_at', 'null')
@@ -563,4 +563,22 @@ def prune_activity(keep_days: int = 90) -> int:
         return int(res.data or 0)
     except Exception as e:
         print(f"[prune_activity] error: {e}")
+        return 0
+
+
+def upsert_amfi_nav(rows: list) -> int:
+    """Idempotent upsert of AMFI NAV rows on (scheme_code, nav_date). Non-fatal
+    if the table does not exist yet (operator-applied DDL). Returns count."""
+    if not rows:
+        return 0
+    try:
+        n = 0
+        for i in range(0, len(rows), 500):
+            chunk = rows[i:i + 500]
+            (database.supabase.table('amfi_nav')
+             .upsert(chunk, on_conflict='scheme_code,nav_date').execute())
+            n += len(chunk)
+        return n
+    except Exception as e:
+        print(f"[amfi_nav] upsert failed (non-fatal — table may be absent): {e}")
         return 0

@@ -39,6 +39,22 @@ def test_insufficient_is_never_judged():
     assert bt.evaluate_verdict({'verdict': 'INSUFFICIENT'}, 5.0)['outcome_correct'] is None
 
 
+def test_evaluate_verdict_alpha_label_is_market_neutral():
+    """outcome_correct_alpha grades on alpha vs Nifty, not absolute return
+    (item 2). HOLD in a rising tape that lagged the index is WRONG on alpha
+    even though it rose."""
+    # HOLD, stock +2% but Nifty +5% -> alpha -3% -> alpha-WRONG, absolute-RIGHT
+    o = bt.evaluate_verdict({'verdict': 'HOLD'}, 2.0, nifty_return_pct=5.0)
+    assert o['outcome_correct'] is True          # absolute (rose)
+    assert o['outcome_correct_alpha'] is False    # alpha (lagged index)
+    # SELL, stock -1% but Nifty -5% -> alpha +4% -> exit was WRONG on alpha
+    o = bt.evaluate_verdict({'verdict': 'SELL'}, -1.0, nifty_return_pct=-5.0)
+    assert o['outcome_correct'] is True          # absolute (fell)
+    assert o['outcome_correct_alpha'] is False    # alpha (beat index; hold was better)
+    # No benchmark -> alpha label is None
+    assert bt.evaluate_verdict({'verdict': 'HOLD'}, 3.0)['outcome_correct_alpha'] is None
+
+
 def test_no_nifty_means_null_alpha():
     assert bt.evaluate_verdict({'verdict': 'HOLD'}, 5.0)['outcome_vs_nifty_pct'] is None
 
@@ -128,6 +144,39 @@ def test_backtest_empty_queue_noop():
     md.get_candles.assert_not_called()
 
 
+def test_backtest_token_expired_is_an_incident_not_an_empty_queue():
+    """A dead token must not read as a graded/empty pass. It writes a
+    grading_incident and grades 0 (item 1)."""
+    from kite_client import TokenExpiredError
+    rows = [{'run_date': '2026-07-01', 'symbol': 'AAA', 'verdict': 'SELL',
+             'last_price': 100.0}]
+    md = MagicMock()
+    md._instrument_cache = {}
+    md.get_candles.side_effect = TokenExpiredError('Token expired')
+    md.refresh_holdings_cache.side_effect = TokenExpiredError('Token expired')
+    cfg = {}
+    with patch.object(bt.db, 'get_unevaluated_advice', return_value=rows), \
+         patch.object(bt.db, 'update_advice_outcome', return_value=True), \
+         patch.object(bt.db, 'write_config',
+                      side_effect=lambda k, v: cfg.__setitem__(k, v)):
+        n = bt.run_backtest_pass(md, horizon_days=10)
+    assert n == 0                                   # nothing graded
+    assert 'TOKEN_EXPIRED' in cfg.get('grading_incident', '')
+
+
+def test_backtest_clean_run_clears_grading_incident():
+    """A pass with no token failure clears any stale incident."""
+    rows = [{'run_date': '2026-07-01', 'symbol': 'AAA', 'verdict': 'SELL',
+             'last_price': 100.0}]
+    cfg = {'grading_incident': 'stale'}
+    with patch.object(bt.db, 'get_unevaluated_advice', return_value=rows), \
+         patch.object(bt.db, 'update_advice_outcome', return_value=True), \
+         patch.object(bt.db, 'write_config',
+                      side_effect=lambda k, v: cfg.__setitem__(k, v)):
+        bt.run_backtest_pass(_md(_TEN), horizon_days=10)
+    assert cfg.get('grading_incident') == ''
+
+
 def test_backtest_pass_logs_tally(capsys):
     # Phase-1 diagnostics: every pass must report queued/graded/not_due/errors so
     # a matured-but-ungraded backlog (the 2026-08 starvation) is visible in logs.
@@ -164,11 +213,14 @@ def test_backtest_pass_logs_tally(capsys):
 
 def test_track_record_summary_aggregates():
     rows = [
-        {'verdict': 'SELL', 'outcome_correct': True, 'outcome_return_pct': -10.0,
+        {'verdict': 'SELL', 'outcome_correct': True, 'outcome_correct_alpha': True,
+         'outcome_return_pct': -10.0,
          'outcome_vs_nifty_pct': -11.0, 'quantity': 10, 'last_price': 100.0},
-        {'verdict': 'HOLD', 'outcome_correct': True, 'outcome_return_pct': 6.0,
+        {'verdict': 'HOLD', 'outcome_correct': True, 'outcome_correct_alpha': True,
+         'outcome_return_pct': 6.0,
          'outcome_vs_nifty_pct': 4.0, 'quantity': 5, 'last_price': 50.0},
-        {'verdict': 'TRIM', 'outcome_correct': False, 'outcome_return_pct': 4.0,
+        {'verdict': 'TRIM', 'outcome_correct': False, 'outcome_correct_alpha': False,
+         'outcome_return_pct': 4.0,
          'outcome_vs_nifty_pct': 2.0, 'quantity': 20, 'last_price': 10.0},
         {'verdict': 'INSUFFICIENT', 'outcome_correct': None},   # never judged
     ]
@@ -195,7 +247,8 @@ def test_track_record_summary_empty():
 def _row(correct, alpha, *, price=100.0, ema200=None, ema50=None, rsi=None,
          adx=None, consistency=None, rel=None, vol=None, trigger=None):
     return {
-        'outcome_correct': correct, 'outcome_vs_nifty_pct': alpha,
+        'outcome_correct': correct, 'outcome_correct_alpha': correct,
+        'outcome_vs_nifty_pct': alpha,
         'last_price': price, 'trigger_type': trigger,
         'indicators': {'ema_200': ema200, 'ema_50': ema50, 'rsi_14': rsi,
                        'adx': adx, 'trend_consistency_pct': consistency,
@@ -249,7 +302,8 @@ def test_factor_attribution_skips_ungraded_rows():
 # --- confidence calibration (pure) --------------------------------------------
 
 def _crow(confidence, correct):
-    return {'confidence': confidence, 'outcome_correct': correct}
+    return {'confidence': confidence, 'outcome_correct': correct,
+            'outcome_correct_alpha': correct}
 
 
 def test_calibration_curve_bins_shrinkage_and_ece():

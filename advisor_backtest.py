@@ -22,6 +22,7 @@ import pytz
 
 import config
 import database as db
+from kite_client import TokenExpiredError
 
 IST = pytz.timezone('Asia/Kolkata')
 
@@ -45,10 +46,22 @@ def evaluate_verdict(row: dict, forward_return_pct: float,
         correct = forward_return_pct < 0
     else:                                   # INSUFFICIENT / unknown
         correct = None
+    # Market-neutral label (authoritative from 2026-09-09). Same rule against
+    # alpha vs Nifty, not absolute return, so a rising tape no longer scores
+    # every HOLD correct. outcome_correct is retained but SUPERSEDED.
+    if vs_nifty is None:
+        correct_alpha = None
+    elif verdict == 'HOLD':
+        correct_alpha = vs_nifty > 0
+    elif verdict in _EXIT_VERDICTS:
+        correct_alpha = vs_nifty < 0
+    else:
+        correct_alpha = None
     return {
         'outcome_return_pct': round(forward_return_pct, 2),
         'outcome_vs_nifty_pct': vs_nifty,
         'outcome_correct': correct,
+        'outcome_correct_alpha': correct_alpha,
     }
 
 
@@ -124,6 +137,7 @@ def run_backtest_pass(market_data, horizon_days: int = None) -> int:
     evaluated = 0
     not_due = {}          # horizon -> count, so a backlog is readable by class
     errors = 0
+    token_expired = 0
     for row in queue:
         try:
             run_date, symbol = row['run_date'], row['symbol']
@@ -135,6 +149,7 @@ def run_backtest_pass(market_data, horizon_days: int = None) -> int:
                 outcome = {'outcome_return_pct': None,
                            'outcome_vs_nifty_pct': None,
                            'outcome_correct': None,
+                           'outcome_correct_alpha': None,
                            'evaluation_horizon_days': None}
             else:
                 horizon = horizon_for(row, horizon_days)
@@ -170,6 +185,11 @@ def run_backtest_pass(market_data, horizon_days: int = None) -> int:
             outcome['evaluated_at'] = datetime.now(IST).isoformat()
             if db.update_advice_outcome(run_date, symbol, outcome):
                 evaluated += 1
+        except TokenExpiredError:
+            # Auth failure, not a data gap. Counted apart so a dead token is
+            # never mistaken for an empty/graded queue (2026-08: 231 silent
+            # token-expired rows read as "nothing due", count stuck at 98).
+            token_expired += 1
         except Exception as e:
             errors += 1
             print(f"[backtest] {row.get('symbol')} skipped: {e}")
@@ -179,9 +199,25 @@ def run_backtest_pass(market_data, horizon_days: int = None) -> int:
     by_horizon = ' '.join(f"{h}d={n}" for h, n in sorted(not_due.items()))
     print(f"[backtest] pass: queued={len(queue)} graded={evaluated} "
           f"not_due={sum(not_due.values())} [{by_horizon or 'none'}] "
-          f"errors={errors} "
+          f"errors={errors} token_expired={token_expired} "
           f"(MICRO {config.ADVISOR_BACKTEST_HORIZON_DAYS}d / "
           f"MACRO {config.ADVISOR_BACKTEST_MACRO_HORIZON_DAYS}d horizons)")
+    # Rule-class surface: a dead token is an incident, an empty queue is not.
+    # Recorded in the existing config/incident surface so the operator and the
+    # dashboard see "could not authenticate" rather than a silent no-op.
+    try:
+        if token_expired:
+            db.write_config('grading_incident',
+                            f"TOKEN_EXPIRED {today}: {token_expired}/{len(queue)} "
+                            f"due rows could not authenticate; {evaluated} graded. "
+                            f"Paste a fresh enc_token and re-run grading.")
+            print(f"[backtest] 🚨 GRADING AUTH FAILURE: {token_expired}/{len(queue)} "
+                  f"rows token-expired — this is NOT an empty queue.")
+        else:
+            # Clean run (auth OK): clear any stale incident.
+            db.write_config('grading_incident', '')
+    except Exception as e:
+        print(f"[backtest] grading_incident write failed (non-fatal): {e}")
     return evaluated
 
 
@@ -191,13 +227,13 @@ def get_track_record_summary() -> dict:
     exit calls vs doing nothing, sized by each row's real quantity — HOLDs
     are the do-nothing baseline and contribute 0 by construction."""
     rows = db.get_evaluated_advice()
-    judged = [r for r in rows if r.get('outcome_correct') is not None]
+    judged = [r for r in rows if r.get('outcome_correct_alpha') is not None]
     if not judged:
         return {'evaluated_calls': 0, 'hit_rate_pct': None,
                 'avg_return_pct': None, 'avg_alpha_pct': None,
                 'advice_value_inr': 0.0, 'by_verdict': {}}
 
-    hits = sum(1 for r in judged if r['outcome_correct'])
+    hits = sum(1 for r in judged if r['outcome_correct_alpha'])
     returns = [float(r['outcome_return_pct']) for r in judged
                if r.get('outcome_return_pct') is not None]
     alphas = [float(r['outcome_vs_nifty_pct']) for r in judged
@@ -209,7 +245,7 @@ def get_track_record_summary() -> dict:
         v = r.get('verdict')
         s = by_verdict.setdefault(v, {'calls': 0, 'hits': 0})
         s['calls'] += 1
-        s['hits'] += 1 if r['outcome_correct'] else 0
+        s['hits'] += 1 if r['outcome_correct_alpha'] else 0
         weight = _EXIT_VERDICTS.get(v)
         if weight and r.get('outcome_return_pct') is not None:
             qty = float(r.get('quantity') or 0)
@@ -224,7 +260,7 @@ def get_track_record_summary() -> dict:
         d = r.get('user_decision') or 'ignored'
         s = by_decision.setdefault(d, {'calls': 0, 'hits': 0, 'alphas': []})
         s['calls'] += 1
-        s['hits'] += 1 if r['outcome_correct'] else 0
+        s['hits'] += 1 if r['outcome_correct_alpha'] else 0
         if r.get('outcome_vs_nifty_pct') is not None:
             s['alphas'].append(float(r['outcome_vs_nifty_pct']))
     for s in by_decision.values():
@@ -347,7 +383,7 @@ def factor_attribution(rows: list, min_bucket_n: int = 5) -> dict:
     the reweighting conversation starts from evidence, not the current
     hand-picked priors. Buckets under `min_bucket_n` are computed but
     flagged low-n and excluded from the separation ranking."""
-    judged = [r for r in rows if r.get('outcome_correct') is not None]
+    judged = [r for r in rows if r.get('outcome_correct_alpha') is not None]
     factors = {}
     for name, fn in _FACTORS.items():
         buckets = {}
@@ -358,7 +394,7 @@ def factor_attribution(rows: list, min_bucket_n: int = 5) -> dict:
                 continue
             b = buckets.setdefault(label, {'n': 0, 'hits': 0, 'alphas': []})
             b['n'] += 1
-            b['hits'] += 1 if r['outcome_correct'] else 0
+            b['hits'] += 1 if r['outcome_correct_alpha'] else 0
             if r.get('outcome_vs_nifty_pct') is not None:
                 b['alphas'].append(float(r['outcome_vs_nifty_pct']))
         for b in buckets.values():
@@ -405,21 +441,21 @@ def calibration_curve(rows: list, prior_strength: int = 10) -> dict:
     mapping. `ece_pct` = sample-weighted mean gap between predicted and
     empirical (0 = perfectly calibrated); `monotonic` = does empirical
     hit-rate rise with confidence (the property a usable confidence needs)."""
-    judged = [r for r in rows if r.get('outcome_correct') is not None
+    judged = [r for r in rows if r.get('outcome_correct_alpha') is not None
               and r.get('confidence') is not None]
     n = len(judged)
     if not n:
         return {'graded_calls': 0, 'base_rate_pct': None, 'bins': [],
                 'ece_pct': None, 'monotonic': None, 'prior_strength': prior_strength}
 
-    base = sum(1 for r in judged if r['outcome_correct']) / n
+    base = sum(1 for r in judged if r['outcome_correct_alpha']) / n
     bins = []
     for lo, hi in _CALIB_BINS:
         b = [r for r in judged if lo <= r['confidence'] < hi]
         if not b:
             continue
         bn = len(b)
-        hits = sum(1 for r in b if r['outcome_correct'])
+        hits = sum(1 for r in b if r['outcome_correct_alpha'])
         pred = sum(r['confidence'] for r in b) / bn
         shrunk = (hits + prior_strength * base) / (bn + prior_strength)
         bins.append({

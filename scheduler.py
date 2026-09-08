@@ -187,6 +187,31 @@ def _label_decisions_catchup() -> None:
 _catchup_date = None
 
 
+_amfi_nav_date = None
+
+
+def _maybe_ingest_amfi_nav() -> None:
+    """Once/day: pull AMFI's public NAV file and upsert. No token (public
+    data). Non-fatal and daemon-threaded; the amfi_nav table is operator-applied
+    DDL, so until it exists this simply no-ops. The date guard is set before
+    the thread so a failed fetch waits until tomorrow rather than re-spawning."""
+    global _amfi_nav_date
+    today = datetime.now(IST).date().isoformat()
+    if _amfi_nav_date == today:
+        return
+    _amfi_nav_date = today
+
+    def _run():
+        try:
+            import amfi_nav
+            n = db.upsert_amfi_nav(amfi_nav.fetch_and_parse())
+            print(f"[amfi_nav] ingested {n} NAV rows for {today}")
+        except Exception as e:
+            print(f"[amfi_nav] ingest failed (non-fatal): {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _maybe_run_catchups() -> None:
     """Once/day: label recent decisions and grade matured advice. Hoisted from
     the removed session-start path (Phase C.2). Both spawn a daemon thread
@@ -741,6 +766,8 @@ def run():
             _set_heartbeat('ONLINE', 0, 'Idle — advisor only (intraday decommissioned 2026-09-09)')
             # Weekly profiles get their post-close window (15:40+).
             _maybe_kick_weekly_profiles()
+            # AMFI NAV ingestion (public, no token) — prices NAV-based holdings.
+            _maybe_ingest_amfi_nav()
             # Retention for the write-only live-feed table ([P-38]).
             _maybe_prune_activity()
             # Portfolio advisor: once per day when a live token exists.
