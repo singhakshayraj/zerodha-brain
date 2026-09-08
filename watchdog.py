@@ -2,7 +2,9 @@
 
 Runs as a SEPARATE Railway service (start command: python3 -u watchdog.py) so
 it survives the exact failures it exists to detect: brain crash, crash-loop,
-hang, stale heartbeat, token expiry, silent zero-trade mornings.
+process liveness for the advisor host (intraday trading decommissioned
+2026-09-09, so the trading alarms — daily token reminder, mid-day token
+expiry, zero-trade mornings — are removed).
 
 Checks (IST, trading days only):
   - 08:45  reminder to paste today's enc_token (manual daily step)
@@ -96,20 +98,10 @@ def evaluate(state: dict, now_ist: datetime) -> list:
     trades_today: int | None   (None = query failed, skip that check)
     """
     alerts = []
-    day = now_ist.strftime('%Y-%m-%d')
 
     if not is_trading_day(now_ist):
         return alerts
 
-    m = _minutes(now_ist)
-
-    # 08:45–09:10 token reminder (once per day via dedup key with date)
-    if (8 * 60 + 45) <= m < (9 * 60 + 10):
-        alerts.append((
-            P2, f"token-reminder-{day}",
-            "🔑 Reminder: paste today's enc_token into the dashboard "
-            "before 09:15 IST (market opens soon).",
-        ))
 
     # Token/deploy incidents are durable flags the brain leaves; they must
     # alert even outside market hours (a redeploy or expiry can land at the
@@ -160,27 +152,6 @@ def evaluate(state: dict, now_ist: datetime) -> list:
                 P2, f"heartbeat-{hb.get('status', '').lower()}",
                 f"⚠️ Brain reports {hb.get('status')}: {hb.get('message')}",
             ))
-
-    if state.get('brain_status') == 'TOKEN_EXPIRED':
-        alerts.append((
-            P1, 'token-expired',
-            '🚨 enc_token EXPIRED mid-day — session ended. Paste a fresh '
-            'token and restart from the dashboard.',
-        ))
-
-    # Zero trades by 11:00 with a session supposedly active
-    trades_today = state.get('trades_today')
-    if (
-        m >= 11 * 60
-        and state.get('active_session_id')
-        and trades_today == 0
-    ):
-        alerts.append((
-            P2, f"zero-trades-{day}",
-            '⚠️ Session active but ZERO trades logged by 11:00 IST — '
-            'check the dashboard (signals may all be HOLD, or something '
-            'is silently wrong).',
-        ))
 
     return alerts
 

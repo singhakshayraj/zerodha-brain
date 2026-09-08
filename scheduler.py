@@ -184,6 +184,25 @@ def _label_decisions_catchup() -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+_catchup_date = None
+
+
+def _maybe_run_catchups() -> None:
+    """Once/day: label recent decisions and grade matured advice. Hoisted from
+    the removed session-start path (Phase C.2). Both spawn a daemon thread
+    internally, so the date guard stops the idle loop re-spawning them."""
+    global _catchup_date
+    today = datetime.now(IST).date().isoformat()
+    if _catchup_date == today:
+        return
+    _catchup_date = today
+    _label_decisions_catchup()
+    if config.ADVISOR_BACKTEST_ENABLED:
+        token = db.get_enc_token()
+        if token:
+            _grade_advice_catchup(token)
+
+
 def _maybe_run_advisor() -> None:
     """Portfolio advisory (ADVISORY ONLY — no orders).
 
@@ -708,12 +727,6 @@ def run():
     t = threading.Thread(target=_heartbeat_thread, daemon=True, name='heartbeat')
     t.start()
 
-    # Intraday holdings watch (ADVISORY ONLY) — no-op unless enabled + keyed.
-    try:
-        import advisor_watch
-        advisor_watch.start_advisor_watch()
-    except Exception as e:
-        print(f"[SCHEDULER] advisor watch failed to start (non-fatal): {e}")
     # Decision bot (records Accept/Decline taps; NO order path) — same rules.
     try:
         import advisor_bot
@@ -725,31 +738,20 @@ def run():
 
     while True:
         try:
-            _set_heartbeat('ONLINE', 0, 'Waiting for START command')
-            # Daily 6:30 IST token refresh — no-op unless KITE_* creds set.
-            token_refresher.maybe_daily_refresh()
-            # Token preflight (09:16): a dead enc_token is still fixable
-            # before the 09:45 advisor run — alert, don't silently skip.
-            _maybe_token_preflight()
+            _set_heartbeat('ONLINE', 0, 'Idle — advisor only (intraday decommissioned 2026-09-09)')
             # Weekly profiles get their post-close window (15:40+).
             _maybe_kick_weekly_profiles()
-            # Per-stock agent: pre-open + post-close timeline capture (P2).
-            _maybe_capture_timeline()
-            # Post-close candle backfill — fills the tail gaps the in-cycle
-            # trailing-3 archive leaves behind ([C5]).
-            _maybe_backfill_candles()
             # Retention for the write-only live-feed table ([P-38]).
             _maybe_prune_activity()
             # Portfolio advisor: once per day when a live token exists.
             # Advisory-only, independent of trading sessions; never blocks
             # the loop (runs on a daemon thread).
             _maybe_run_advisor()
+            # Grading + labelling catch-ups, hoisted here from the removed
+            # session-start path so the two pre-registered advisor reads keep
+            # accruing. Once/day, so the idle loop never re-spawns their threads.
+            _maybe_run_catchups()
             command = db.get_brain_command()
-
-            if command not in ('START', 'RUNNING') and not _is_trading and _should_autostart():
-                print("[AUTOPILOT] Trading day, 09:30 window, no session yet — self-starting")
-                db.write_config('brain_status', 'START')
-                command = 'START'
 
             # brain_status flips START -> RUNNING right after session creation
             # and stays RUNNING for the rest of the session — it is never set
@@ -760,292 +762,14 @@ def run():
             # silent failure indistinguishable from normal operation on the
             # dashboard. Treat RUNNING the same as START, and resume the
             # existing session instead of creating a duplicate.
-            if command in ('START', 'RUNNING'):
-                if _is_trading:
-                    print("[SCHEDULER] Already trading, ignoring START")
-                    time.sleep(5)
-                    continue
+            # ── Intraday trading removed 2026-09-09 (decommission Phase C.2/C.3).
+            # The START/RUNNING session branch — session creation, brain
+            # initialization, brain.run_cycle(), the in-session advisor tick,
+            # intraday exit checks and EOD teardown — is deleted. A START
+            # command is now inert; the advisor runs from the idle loop above,
+            # independent of any session. git history is the reversibility.
+            if command == 'STOP':
 
-                _is_trading = True
-                try:
-                    print(f"{command} command received")
-
-                    token = db.get_enc_token()
-                    if config.QA_MODE and not token:
-                        token = 'QA-DUMMY'  # FakeKiteClient never uses it
-                    session_config = db.get_session_config()
-
-                    print(f"[SCHEDULER] Token exists: {bool(token)}")
-                    print(f"[SCHEDULER] Session config: {session_config}")
-
-                    if not token:
-                        print("[SCHEDULER] No token found — attempting auto-refresh")
-                        token = token_refresher.refresh_enc_token()
-
-                    if not token:
-                        # [C1]: leave a durable trace, not just a heartbeat.
-                        # The heartbeat is a CURRENT-STATE field — it is
-                        # overwritten on the next tick, so after the fact there
-                        # was no evidence the morning had been lost at all.
-                        print("[SCHEDULER] No token found")
-                        _report_stale_token(missing=True)
-                        time.sleep(30)
-                        continue
-
-                    if not session_config:
-                        print("[SCHEDULER] No session config found")
-                        _set_heartbeat('ERROR', 0, 'No session config found')
-                        time.sleep(30)
-                        continue
-
-                    existing_id = db.get_config('active_session_id')
-                    existing = db.get_session_by_id(existing_id) if existing_id else None
-
-                    is_resume = bool(existing and existing.get('status') == 'RUNNING')
-
-                    if is_resume:
-                        session_id = existing_id
-                        print(f"[SCHEDULER] Resuming existing RUNNING session {session_id} (brain restart)")
-                        # Immutable config: rebuild from the session row, not
-                        # the mutable session_config key (REQ-004/031).
-                        session_config = _config_from_session_row(existing)
-                        session_config['configHash'] = existing.get('config_hash')
-
-                        # REQ-072 deploy-freeze guard: a resume under a
-                        # different SHA means code changed mid-session
-                        # (push during market hours). Resume anyway — safety
-                        # first — but raise a watchdog-visible incident.
-                        old_sha = existing.get('git_sha')
-                        if old_sha and old_sha != config.GIT_SHA:
-                            msg = (
-                                f"code changed mid-session: {old_sha} -> "
-                                f"{config.GIT_SHA} (session {session_id})"
-                            )
-                            # Once per (session, sha) pair per process. On
-                            # 2026-07-08 a failing resume + autopilot retry
-                            # loop re-entered this path every ~40s, re-writing
-                            # the incident and spamming the feed for an hour.
-                            dedup_key = (session_id, config.GIT_SHA)
-                            if dedup_key not in _reported_deploy_incidents:
-                                _reported_deploy_incidents.add(dedup_key)
-                                print(f"[SCHEDULER] REQ-072 INCIDENT: {msg}")
-                                db.write_config(
-                                    'deploy_incident',
-                                    f"{datetime.now(IST).isoformat()} {msg}",
-                                )
-                                db.log_brain_activity(
-                                    session_id, 'ERROR',
-                                    message=f"[REQ-072] {msg}",
-                                )
-                    else:
-                        err = _validate_session_config(session_config)
-                        if err:
-                            print(f"[SCHEDULER] Config sanity check FAILED: {err}")
-                            _set_heartbeat('ERROR', 0, f"Config rejected: {err}")
-                            db.write_config('brain_status', 'IDLE')
-                            time.sleep(30)
-                            continue
-
-                        # Probe the token BEFORE creating a session. A stale
-                        # token here must not spawn a doomed session — that row
-                        # trips has_session_today(), which suppresses autopilot
-                        # for the rest of the day (the 2026-07-09 lost morning).
-                        # Refusing to create it keeps has_session_today() False,
-                        # so autopilot retries every tick and starts the instant
-                        # a fresh token is pasted.
-                        if not _token_is_live(token):
-                            print("[SCHEDULER] Token not live — awaiting fresh token, no session created")
-                            _report_stale_token()
-                            time.sleep(30)
-                            continue
-
-                        # Token proved live. Clear any stale-token incident NOW —
-                        # before the ~44s brain.initialize() — so the dashboard
-                        # banner doesn't flash on a healthy start (it used to
-                        # linger until the post-init clear below).
-                        if _stale_token_reported:
-                            _stale_token_reported = False
-                            db.write_config('token_incident', '')
-
-                        print("[SCHEDULER] Creating session in DB...")
-                        session = db.create_session(session_config)
-
-                        if not session:
-                            print("[SCHEDULER] CRITICAL: Session creation failed")
-                            _set_heartbeat('ERROR', 0, 'DB session creation failed')
-                            db.write_config('brain_status', 'IDLE')
-                            time.sleep(30)
-                            continue
-
-                        session_id = session['id']
-                        print(f"[SCHEDULER] Session ready: {session_id}")
-                        session_config['configHash'] = session.get('config_hash')
-                        db.write_config('active_session_id', session_id)
-
-                    session_config['sessionId'] = session_id
-
-                    db.write_config('brain_status', 'RUNNING')
-                    # Dashboard reads this to label paper vs real sessions.
-                    db.write_config(
-                        'paper_mode',
-                        'true' if config.PAPER_TRADING else 'false',
-                    )
-
-                    brain = TradingBrain()
-                    initialized = brain.initialize(token, session_config)
-                    if initialized and is_resume:
-                        brain.resume_stats(session_id)
-                    if initialized:
-                        # Token proved live — clear any stale-token incident so
-                        # the watchdog stops alerting and the next stale episode
-                        # reports fresh.
-                        if _stale_token_reported:
-                            _stale_token_reported = False
-                            db.write_config('token_incident', '')
-
-                    if not initialized:
-                        print("Brain initialization failed")
-                        # Release the session pointers. Before this, a failed
-                        # init (e.g. an expired token at 09:30 autopilot start)
-                        # set IDLE but left the DB row RUNNING and
-                        # active_session_id pointing at it — a zombie that
-                        # silently blocked every later Start (2026-07-09).
-                        try:
-                            db.update_session(session_id, {
-                                'status': 'ABORTED',
-                                'end_reason': 'INIT_FAILED',
-                                'ended_at': datetime.now(IST).isoformat(),
-                            })
-                        except Exception as e:
-                            print(f"[SCHEDULER] abort of {session_id} failed: {e}")
-                        db.write_config('active_session_id', '')
-                        db.write_config('brain_status', 'IDLE')
-                        _set_heartbeat('ERROR', 0, 'Initialization failed')
-                        time.sleep(30)
-                        continue
-
-                    interval = session_config.get('tradeIntervalSeconds', 300)
-                    print(f"Brain running. Interval: {interval}s")
-
-                    # Grade any matured-but-unevaluated advice NOW — a token is
-                    # proven live at session start (unlike the once/day official-
-                    # advisor branch, which starved the backlog to 38 rows by
-                    # 2026-08). One pass drains every currently-due row; daemon-
-                    # threaded so it never delays the trade loop.
-                    if config.ADVISOR_BACKTEST_ENABLED:
-                        _grade_advice_catchup(token)
-                    # Track C: label recent decisions for the edge study (P-21).
-                    # Candle-archive only, no token; daemon-threaded.
-                    _label_decisions_catchup()
-
-                    def _end(reason: str, call_end_session: bool = True) -> None:
-                        # The brain owns the whole session teardown: square-off
-                        # + stats via end_session, then release the pointers the
-                        # dashboard keys off. Leaving active_session_id set
-                        # after MARKET_CLOSED/loss-limit ends caused stale
-                        # "running" UIs and resurrection bugs.
-                        if call_end_session:
-                            brain.end_session(reason)
-                        db.write_config('active_session_id', '')
-                        db.write_config('brain_status', 'IDLE')
-
-                    while True:
-                        command = db.get_brain_command()
-
-                        if command == 'STOP':
-                            print("STOP command received")
-                            _end('MANUAL_STOP')
-                            break
-
-                        if not risk_manager.is_market_open():
-                            print("Market closed. Ending session.")
-                            _end('MARKET_CLOSED')
-                            break
-
-                        if brain._session_ended:
-                            print("[SCHEDULER] Brain ended session internally.")
-                            _end('INTERNAL', call_end_session=False)
-                            break
-
-                        # A STOP can be overwritten by a quick START while we
-                        # sleep between cycles (single mutable command key) —
-                        # observed live 2026-07-06: stop→start within seconds
-                        # left the brain trading a ghost session the dashboard
-                        # couldn't see. Re-verify we're still the active one.
-                        if not _session_still_active(session_id):
-                            print(
-                                f"[SCHEDULER] Session {session_id} no longer "
-                                f"active — ending"
-                            )
-                            _end('EXTERNAL_STOP')
-                            break
-
-                        # A newer instance (redeploy) owns the session now —
-                        # exit WITHOUT teardown so we don't double-trade or
-                        # square off under its feet.
-                        if _lock_lost():
-                            print("[SCHEDULER] Instance lock lost — exiting, newer instance owns the session")
-                            sys.exit(0)
-
-                        _set_heartbeat(
-                            'RUNNING',
-                            brain.cycle_count,
-                            f"Cycle {brain.cycle_count} | "
-                            f"Trades: {brain.session_stats['trades_executed']} | "
-                            f"P&L: ₹{brain.session_stats['total_pnl']:.2f}",
-                        )
-
-                        brain.run_cycle()
-
-                        # [P-20] Keep the advisor refresh + per-stock timeline
-                        # capture alive DURING a session, not only in the outer
-                        # idle loop. Full-day sessions (since ENFORCE_DAILY_STOP_3R
-                        # went soft) sit in this inner loop 09:30→15:25, so the
-                        # advisor otherwise stops refreshing for the whole session
-                        # (08-03: last refresh 11:50). Both are daemon-threaded +
-                        # idempotent/interval-gated, so calling them each cycle is
-                        # cheap and never blocks the trade loop.
-                        try:
-                            _maybe_run_advisor()
-                            _maybe_capture_timeline()
-                        except Exception as e:
-                            print(f"[SCHEDULER] in-session advisor tick failed (non-fatal): {e}")
-
-                        # Sleep in short slices so a STOP is obeyed in seconds,
-                        # not at the next 5-minute cycle boundary — the blind
-                        # 300s sleep was the race window behind the lost-STOP
-                        # ghost session.
-                        slept = 0
-                        tick = 0
-                        while slept < interval:
-                            time.sleep(min(10, interval - slept))
-                            slept += 10
-                            tick += 1
-
-                            # Intra-cycle stop/target enforcement (~every
-                            # 30s). Cycle-boundary-only checks let stops fill
-                            # at −2.78R instead of ≈−1R (2026-07-08 data).
-                            if tick % 3 == 0:
-                                try:
-                                    brain.check_open_exits()
-                                except Exception as e:
-                                    print(f"[SCHEDULER] exit check error: {e}")
-                                if brain._session_ended:
-                                    break  # circuit breaker fired mid-slice
-
-                            cmd = db.get_brain_command()
-                            if (
-                                cmd == 'STOP'
-                                or not _session_still_active(session_id)
-                                or _lock_lost()
-                            ):
-                                print(f"[SCHEDULER] Wake early: cmd={cmd}")
-                                break
-
-                finally:
-                    _is_trading = False
-
-            elif command == 'STOP':
                 # STOP while nothing is trading (brain restarted into an
                 # error state, or a crash raced teardown). Only the trade
                 # loop used to acknowledge STOP, so this left brain_status

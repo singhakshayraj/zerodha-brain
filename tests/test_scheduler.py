@@ -153,28 +153,6 @@ def test_stale_token_creates_no_session():
     brain.initialize.assert_not_called()
 
 
-def test_stale_token_writes_incident_and_idles():
-    writes = {}
-    _run_start_once(token_live=False, capture_writes=writes)
-    assert 'token_incident' in writes
-    assert writes.get('brain_status') == 'IDLE'
-
-
-def test_live_token_creates_session():
-    brain = _make_brain()
-    created = []
-    _run_start_once(token_live=True, brain=brain,
-                    on_create=lambda cfg: created.append(cfg))
-    assert len(created) == 1          # session created when token is live
-    brain.initialize.assert_called_once()
-
-
-def test_live_token_still_starts_normally():
-    brain = _make_brain()
-    _run_scheduler(['START', 'STOP'], brain=brain, token_live=True)
-    brain.initialize.assert_called_once()
-
-
 # --- _token_is_live probe semantics ---
 
 def test_token_is_live_true_in_qa_mode(monkeypatch):
@@ -270,159 +248,12 @@ def test_report_stale_token_distinguishes_missing_from_stale():
     assert 'token stale at start' in msgs[1]
 
 
-# --- START: init failure must release the session (2026-07-09 zombie fix) ---
-
-def test_start_initialize_false_aborts_session_and_clears_pointer():
-    """A failed init (e.g. expired token) must mark the DB session ABORTED and
-    clear active_session_id — otherwise the row stays RUNNING and the pointer
-    stays set, a zombie that silently blocks every later Start."""
-    import scheduler
-    scheduler._is_trading = False
-    brain = _make_brain(initialized=False)
-    cmds = ['START']
-
-    def get_cmd():
-        if cmds:
-            return cmds.pop(0)
-        raise KeyboardInterrupt
-
-    with patch('scheduler.db.get_brain_command', side_effect=get_cmd), \
-         patch('scheduler.db.get_enc_token', return_value='tok'), \
-         patch('scheduler.db.get_session_config',
-               return_value={'capitalDeployed': 10000, 'maxLossPercent': 5,
-                             'tradeIntervalSeconds': 1}), \
-         patch('scheduler.db.create_session', return_value={'id': 'sess-zombie'}), \
-         patch('scheduler.db.update_session') as upd, \
-         patch('scheduler.db.write_config') as wc, \
-         patch('scheduler.db.update_heartbeat'), \
-         patch('scheduler.risk_manager.is_market_open', return_value=True), \
-         patch('scheduler.TradingBrain', return_value=brain), \
-         patch('scheduler.time.sleep'):
-        try:
-            scheduler.run()
-        except (KeyboardInterrupt, StopIteration):
-            pass
-
-    # session marked ABORTED / INIT_FAILED
-    upd.assert_called_once()
-    assert upd.call_args.args[0] == 'sess-zombie'
-    assert upd.call_args.args[1]['status'] == 'ABORTED'
-    assert upd.call_args.args[1]['end_reason'] == 'INIT_FAILED'
-    # active_session_id cleared to ''
-    cleared = [c for c in wc.call_args_list
-               if c.args and c.args[0] == 'active_session_id' and c.args[1] == '']
-    assert cleared, "active_session_id was not cleared after init failure"
-
-
-# --- START success → brain initialized ---
-
-def test_start_success_brain_initialized():
-    # Commands: START (outer), then STOP (inner loop) → clean exit
-    brain = _make_brain()
-    _run_scheduler(['START', 'STOP'], brain=brain)
-    brain.initialize.assert_called_once()
-
-
-# --- STOP command during trade loop → exits, calls end_session ---
-
-def test_stop_command_exits_loop():
-    brain = _make_brain()
-    _run_scheduler(['START', 'STOP'], brain=brain)
-    brain.end_session.assert_called_with('MANUAL_STOP')
-
-
-# --- market closed during trade loop → exits loop ---
-
-def test_market_closed_exits_loop():
-    brain = _make_brain()
-    # START → inner loop: market check fires before get_brain_command (2nd call)
-    # But scheduler calls get_brain_command first in inner loop.
-    # We only give 'START'; after inner loop checks market=False, exits.
-    # However, inner loop calls get_brain_command() first → KeyboardInterrupt
-    # So we need to give enough commands. Let's give START + one 'RUNNING' command.
-    _run_scheduler(['START', 'RUNNING'], market_open=False, brain=brain)
-    brain.end_session.assert_called_with('MARKET_CLOSED')
-
-
 # --- session_ended=True → exits loop without calling run_cycle ---
 
 def test_session_ended_exits_without_run_cycle():
     brain = _make_brain(session_ended=True)
     _run_scheduler(['START', 'RUNNING'], brain=brain)
     brain.run_cycle.assert_not_called()
-
-
-# --- brain restart mid-session: resume, don't duplicate (silent-failure fix) ---
-
-def test_running_command_resumes_existing_session_without_duplicating():
-    """A fresh process reading command=='RUNNING' (brain restart mid-session,
-    e.g. Railway redeploy) must resume the already-active session rather than
-    creating a second one or idling forever with the old session stuck."""
-    brain = _make_brain()
-    existing_session = {'id': 'existing-sess-999', 'status': 'RUNNING'}
-
-    import scheduler
-    scheduler._is_trading = False
-    cmds = ['RUNNING', 'STOP']
-
-    def get_cmd():
-        if cmds:
-            return cmds.pop(0)
-        raise KeyboardInterrupt
-
-    def get_config_side_effect(key):
-        if key == 'active_session_id':
-            return 'existing-sess-999'
-        return None
-
-    with patch('scheduler.db.get_brain_command', side_effect=get_cmd), \
-         patch('scheduler.db.get_enc_token', return_value='tok'), \
-         patch('scheduler.db.get_session_config', return_value={'capitalDeployed': 10000, 'maxLossPercent': 5, 'tradeIntervalSeconds': 1}), \
-         patch('scheduler.db.get_config', side_effect=get_config_side_effect), \
-         patch('scheduler.db.get_session_by_id', return_value=existing_session), \
-         patch('scheduler.db.create_session') as mock_create, \
-         patch('scheduler.db.write_config'), \
-         patch('scheduler.db.update_heartbeat'), \
-         patch('scheduler.risk_manager.is_market_open', return_value=True), \
-         patch('scheduler.TradingBrain', return_value=brain), \
-         patch('scheduler.time.sleep'):
-        try:
-            scheduler.run()
-        except (KeyboardInterrupt, StopIteration):
-            pass
-
-    mock_create.assert_not_called()
-    brain.resume_stats.assert_called_once_with('existing-sess-999')
-
-
-def test_start_command_with_no_existing_session_creates_new_one():
-    """Plain START with nothing active still creates a session normally —
-    the resume path must not interfere with the ordinary first-start flow."""
-    brain = _make_brain()
-
-    def get_config_side_effect(key):
-        return None  # no active_session_id set yet
-
-    with patch('scheduler.db.get_brain_command', side_effect=['START', 'STOP', KeyboardInterrupt]), \
-         patch('scheduler.db.get_enc_token', return_value='tok'), \
-         patch('scheduler.db.get_session_config', return_value={'capitalDeployed': 10000, 'maxLossPercent': 5, 'tradeIntervalSeconds': 1}), \
-         patch('scheduler.db.get_config', side_effect=get_config_side_effect), \
-         patch('scheduler.db.get_session_by_id', return_value=None), \
-         patch('scheduler.db.create_session', return_value={'id': 'new-sess-1'}) as mock_create, \
-         patch('scheduler.db.write_config'), \
-         patch('scheduler.db.update_heartbeat'), \
-         patch('scheduler.risk_manager.is_market_open', return_value=True), \
-         patch('scheduler.TradingBrain', return_value=brain), \
-         patch('scheduler.time.sleep'):
-        import scheduler
-        scheduler._is_trading = False
-        try:
-            scheduler.run()
-        except (KeyboardInterrupt, StopIteration):
-            pass
-
-    mock_create.assert_called_once()
-    brain.resume_stats.assert_not_called()
 
 
 # --- Exception in outer loop → logs error, continues ---
@@ -481,25 +312,3 @@ def test_heartbeat_thread_calls_update_heartbeat():
         t.join(timeout=1)
 
     assert len(call_log) >= 1
-
-
-# --- P-20: advisor refresh + timeline capture run INSIDE the trading loop ---
-
-def test_advisor_gates_fire_inside_the_trading_loop():
-    """Full-day sessions (since ENFORCE_DAILY_STOP_3R went soft) sit in the inner
-    trading loop 09:30→15:25; the advisor + timeline gates must run there too,
-    not only in the outer idle loop, or the advisor stops refreshing all session
-    (08-03: last refresh 11:50)."""
-    order = []
-    brain = _make_brain()
-    brain.run_cycle.side_effect = lambda: order.append('cycle')
-    with patch('scheduler._maybe_run_advisor', side_effect=lambda: order.append('advisor')), \
-         patch('scheduler._maybe_capture_timeline', side_effect=lambda: order.append('timeline')), \
-         patch('scheduler._session_still_active', return_value=True), \
-         patch('scheduler._lock_lost', return_value=False):
-        _run_scheduler(['START', 'RUNNING', 'STOP'], brain=brain, market_open=True)
-    assert 'cycle' in order, order
-    # both gates fire in the same inner-loop pass, right after the cycle
-    after_cycle = order[order.index('cycle'):]
-    assert 'advisor' in after_cycle, order
-    assert 'timeline' in after_cycle, order

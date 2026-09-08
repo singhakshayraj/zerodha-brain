@@ -57,12 +57,6 @@ def test_no_market_alerts_before_open():
     assert watchdog.evaluate(_state(heartbeat=None), early) == []
 
 
-# --- token reminder ---
-
-def test_token_reminder_fires_in_morning_window():
-    morning = _ist(2026, 7, 7, 8, 50)
-    keys = _keys(watchdog.evaluate(_state(), morning))
-    assert keys == ['token-reminder-2026-07-07']
 
 
 def test_no_token_reminder_midday():
@@ -96,17 +90,6 @@ def test_error_heartbeat_alerts():
     assert 'heartbeat-error' in _keys(watchdog.evaluate(st, TRADING_MIDDAY))
 
 
-# --- token expiry + zero trades ---
-
-def test_token_expired_alerts():
-    st = _state(brain_status='TOKEN_EXPIRED')
-    assert 'token-expired' in _keys(watchdog.evaluate(st, TRADING_MIDDAY))
-
-
-def test_zero_trades_by_11_alerts():
-    st = _state(trades_today=0)
-    assert 'zero-trades-2026-07-07' in _keys(
-        watchdog.evaluate(st, TRADING_MIDDAY))
 
 
 def test_zero_trades_before_11_no_alert():
