@@ -6,6 +6,7 @@ The reads a per-symbol scorer is structurally blind to: one name dominating the
 book, a sector (or a measured correlation cluster) that is really one bet at Nx
 size, and underwater exit-flagged names whose sale realizes a capital loss.
 """
+import math
 import numpy as np
 
 CONCENTRATION_FLAG_PCT = 25.0
@@ -244,3 +245,131 @@ def build_portfolio_risk_lines(risk: dict) -> list:
             f"({names}) — offsets capital gains elsewhere (short/long-term "
             f"split depends on holding period).")
     return (["", "Portfolio-level:"] + body) if body else []
+
+
+# ── Part A: covariance-based risk STRUCTURE (measurement, not prediction) ──────
+# All consume only a covariance estimate. Expected returns require decades to
+# estimate; covariances require months (Merton 1980). Rule/measurement class.
+
+def ledoit_wolf_cov(returns: np.ndarray):
+    """Ledoit-Wolf shrinkage covariance. returns: (n_obs, n_assets).
+    -> (cov (n_assets,n_assets), shrinkage_intensity in [0,1]).
+    Sample cov on ~25 assets / ~250 obs is ill-conditioned; shrinkage is the
+    standard fix. Falls back to a closed-form estimator if sklearn is absent."""
+    X = np.asarray(returns, dtype=float)
+    try:
+        from sklearn.covariance import LedoitWolf
+        lw = LedoitWolf().fit(X)
+        return lw.covariance_, float(lw.shrinkage_)
+    except Exception:
+        # closed-form Ledoit-Wolf toward a scaled identity (single-target)
+        n, p = X.shape
+        Xc = X - X.mean(0)
+        S = (Xc.T @ Xc) / n
+        mu = np.trace(S) / p
+        d2 = np.sum((S - mu * np.eye(p)) ** 2) / p
+        b2 = 0.0
+        for i in range(n):
+            xi = Xc[i][:, None]
+            b2 += np.sum((xi @ xi.T - S) ** 2) / p
+        b2 = min(d2, b2 / (n * n))
+        shrink = 0.0 if d2 == 0 else b2 / d2
+        cov = shrink * mu * np.eye(p) + (1 - shrink) * S
+        return cov, float(shrink)
+
+
+def risk_contributions(cov: np.ndarray, weights: np.ndarray):
+    """Marginal + percentage contribution to portfolio volatility per asset.
+    -> dict(port_vol, mctr (array), pctr (array, sums to 1))."""
+    w = np.asarray(weights, dtype=float)
+    cov = np.asarray(cov, dtype=float)
+    pvar = float(w @ cov @ w)
+    pvol = math.sqrt(pvar) if pvar > 0 else 0.0
+    if pvol == 0:
+        z = np.zeros_like(w)
+        return {'port_vol': 0.0, 'mctr': z, 'pctr': z}
+    mctr = (cov @ w) / pvol                 # marginal contribution to risk
+    ctr = w * mctr                          # component contribution (sums to pvol)
+    return {'port_vol': pvol, 'mctr': mctr, 'pctr': ctr / pvol}
+
+
+def effective_number_of_bets(cov: np.ndarray, weights: np.ndarray):
+    """Meucci-style ENB via the principal-portfolio (PCA) diversification
+    distribution: exp(-sum p_i ln p_i), p_i = variance share on eigenvector i.
+    Three vehicles on one metal -> ENB near 1, far below the holding count."""
+    w = np.asarray(weights, dtype=float)
+    cov = np.asarray(cov, dtype=float)
+    vals, vecs = np.linalg.eigh(cov)
+    vals = np.clip(vals, 0, None)
+    y = vecs.T @ w                          # weights in principal basis
+    contrib = (y ** 2) * vals
+    tot = contrib.sum()
+    if tot <= 0:
+        return 1.0
+    p = contrib / tot
+    p = p[p > 0]
+    ent = -np.sum(p * np.log(p))
+    return float(np.exp(ent))
+
+
+def hierarchical_risk_parity(cov: np.ndarray):
+    """Lopez de Prado HRP weights (no expected returns, robust to
+    ill-conditioning). -> weight array. Reference allocation, NOT a target."""
+    from scipy.cluster.hierarchy import linkage, leaves_list
+    from scipy.spatial.distance import squareform
+    cov = np.asarray(cov, dtype=float)
+    p = cov.shape[0]
+    std = np.sqrt(np.diag(cov))
+    denom = np.outer(std, std)
+    corr = np.clip(np.divide(cov, denom, out=np.zeros_like(cov), where=denom > 0),
+                   -1.0, 1.0)
+    dist = np.sqrt(np.clip((1 - corr) / 2, 0, None))
+    np.fill_diagonal(dist, 0.0)
+    order = list(leaves_list(linkage(squareform(dist, checks=False), 'single')))
+
+    def _ivp(idx):
+        iv = 1.0 / np.diag(cov)[idx]
+        return iv / iv.sum()
+
+    w = np.ones(p)
+    clusters = [order]
+    while clusters:
+        clusters = [c[j:k] for c in clusters
+                    for j, k in ((0, len(c) // 2), (len(c) // 2, len(c)))
+                    if len(c) > 1]
+        for i in range(0, len(clusters), 2):
+            c0, c1 = clusters[i], clusters[i + 1]
+            v0 = _ivp(c0) @ cov[np.ix_(c0, c0)] @ _ivp(c0)
+            v1 = _ivp(c1) @ cov[np.ix_(c1, c1)] @ _ivp(c1)
+            a = 1 - v0 / (v0 + v1)
+            for x in c0:
+                w[x] *= a
+            for x in c1:
+                w[x] *= (1 - a)
+    return w / w.sum()
+
+
+def sleeve_correlation_regime(returns: np.ndarray, sleeve_mask: np.ndarray,
+                              weights: np.ndarray, window: int = 60):
+    """Rolling correlation of the largest sleeve's return against the rest of
+    the book. A diversifier that stopped diversifying is a rule-class fact.
+    -> dict(window, corr_full, corr_recent, drifted)."""
+    R = np.asarray(returns, dtype=float)
+    m = np.asarray(sleeve_mask, dtype=bool)
+    w = np.asarray(weights, dtype=float)
+    if m.sum() == 0 or (~m).sum() == 0:
+        return {'window': window, 'corr_full': None, 'corr_recent': None,
+                'drifted': None}
+
+    def _wret(cols):
+        ww = w[cols]
+        ww = ww / ww.sum() if ww.sum() else ww
+        return R[:, cols] @ ww
+
+    a, b = _wret(np.where(m)[0]), _wret(np.where(~m)[0])
+    full = float(np.corrcoef(a, b)[0, 1])
+    k = min(window, len(a))
+    recent = float(np.corrcoef(a[-k:], b[-k:])[0, 1])
+    return {'window': window, 'corr_full': round(full, 3),
+            'corr_recent': round(recent, 3),
+            'drifted': bool(recent > full + 0.15)}
