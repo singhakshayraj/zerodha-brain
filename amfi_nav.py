@@ -38,11 +38,14 @@ def parse_navall(text: str) -> list:
         if len(parts) < 6 or parts[0].strip().lower() == 'scheme code':
             continue                      # column header or malformed
         code = parts[0].strip()
-        name = parts[3].strip()
-        nav_raw = parts[4].strip()
-        date_raw = parts[5].strip()
         if not code.isdigit():
             continue
+        # NAV is the second-to-last field, Date the last -> robust to the 6-
+        # and 8-column (Plan/Option) layouts. Name = the fields between the
+        # scheme-name column and NAV (name [+ plan + option]).
+        nav_raw = parts[-2].strip()
+        date_raw = parts[-1].strip()
+        name = ' - '.join(x.strip() for x in parts[3:-2] if x.strip())
         try:
             nav = float(nav_raw)
         except ValueError:
