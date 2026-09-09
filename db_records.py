@@ -582,3 +582,70 @@ def upsert_amfi_nav(rows: list) -> int:
     except Exception as e:
         print(f"[amfi_nav] upsert failed (non-fatal — table may be absent): {e}")
         return 0
+
+
+def insert_holdings_snapshot(rows: list) -> int:
+    """Append one complete snapshot (all rows share snapshot_id). Single insert
+    so a failure writes NOTHING rather than a partial book. Returns count."""
+    if not rows:
+        return 0
+    database.supabase.table('holdings_snapshot').insert(rows).execute()
+    return len(rows)
+
+
+def get_confirmed_holding_map() -> list:
+    """Confirmed hand-curated fund mappings (holding_scheme_map)."""
+    try:
+        return (database.supabase.table('holding_scheme_map').select('*')
+                .eq('confirmed', True).execute().data) or []
+    except Exception as e:
+        print(f"[holding_scheme_map] read failed (non-fatal): {e}")
+        return []
+
+
+def latest_amfi_nav(scheme_codes: list) -> dict:
+    """{scheme_code: nav} at each code's most recent nav_date. Empty on error
+    or missing table."""
+    out = {}
+    try:
+        for code in set(scheme_codes):
+            r = (database.supabase.table('amfi_nav').select('nav,nav_date')
+                 .eq('scheme_code', code).order('nav_date', desc=True)
+                 .limit(1).execute().data)
+            if r:
+                out[code] = float(r[0]['nav'])
+    except Exception as e:
+        print(f"[amfi_nav] latest read failed (non-fatal): {e}")
+    return out
+
+
+def get_latest_holdings_snapshot() -> list:
+    """Rows of the most recent snapshot (by captured_at). [] if none."""
+    try:
+        latest = (database.supabase.table('holdings_snapshot')
+                  .select('snapshot_id,captured_at')
+                  .order('captured_at', desc=True).limit(1).execute().data)
+        if not latest:
+            return []
+        return get_holdings_snapshot(latest[0]['snapshot_id'])
+    except Exception as e:
+        print(f"[holdings_snapshot] latest read failed (non-fatal): {e}")
+        return []
+
+
+def get_holdings_snapshot(snapshot_id: str) -> list:
+    """All rows of one snapshot_id, paginated (never truncated at 1000)."""
+    out = []
+    off = 0
+    try:
+        while True:
+            page = (database.supabase.table('holdings_snapshot').select('*')
+                    .eq('snapshot_id', snapshot_id)
+                    .range(off, off + 999).execute().data) or []
+            out += page
+            if len(page) < 1000:
+                break
+            off += 1000
+    except Exception as e:
+        print(f"[holdings_snapshot] read {snapshot_id} failed (non-fatal): {e}")
+    return out

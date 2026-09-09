@@ -373,3 +373,43 @@ def sleeve_correlation_regime(returns: np.ndarray, sleeve_mask: np.ndarray,
     return {'window': window, 'corr_full': round(full, 3),
             'corr_recent': round(recent, 3),
             'drifted': bool(recent > full + 0.15)}
+
+
+def load_book_from_snapshot(snapshot_rows: list = None,
+                            nav_by_scheme: dict = None) -> dict:
+    """Turn a stored holdings snapshot into valued positions the risk
+    estimators consume — no live token needed. Reads the LATEST snapshot by
+    default; pass snapshot_rows to read any past one.
+
+    Listed value = quantity x last_price. Fund value = units x latest AMFI NAV
+    (from nav_by_scheme, else looked up). A fund with no NAV stays value=None
+    (unpriced) — surfaced, never fabricated, so I-8 catches the gap.
+
+    -> {'positions': [{identifier, type, value|None, weight|None}],
+        'priced_value', 'unpriced': [identifiers], 'n'}."""
+    import database as _db
+    rows = snapshot_rows if snapshot_rows is not None else _db.get_latest_holdings_snapshot()
+    if not rows:
+        return {'positions': [], 'priced_value': 0.0, 'unpriced': [], 'n': 0}
+
+    fund_codes = [r['identifier'] for r in rows if r['instrument_type'] == 'fund']
+    if nav_by_scheme is None:
+        nav_by_scheme = _db.latest_amfi_nav(fund_codes) if fund_codes else {}
+
+    positions, unpriced = [], []
+    for r in rows:
+        if r['instrument_type'] == 'listed':
+            lp = r.get('last_price')
+            value = (float(r['quantity']) * float(lp)) if lp else None
+        else:
+            nav = nav_by_scheme.get(r['identifier'])
+            value = (float(r['quantity']) * float(nav)) if nav else None
+        if value is None:
+            unpriced.append(r['identifier'])
+        positions.append({'identifier': r['identifier'],
+                          'type': r['instrument_type'], 'value': value})
+    priced = sum(p['value'] for p in positions if p['value'] is not None)
+    for p in positions:
+        p['weight'] = (p['value'] / priced) if (p['value'] and priced) else None
+    return {'positions': positions, 'priced_value': round(priced, 2),
+            'unpriced': unpriced, 'n': len(positions)}
