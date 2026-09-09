@@ -17,8 +17,13 @@ import datetime as _dt
 
 import requests
 
-# www.amfiindia.com 302-redirects here; use the portal host directly.
-NAVALL_URL = 'https://portal.amfiindia.com/spages/NAVAll.txt'
+# The canonical URL 302-redirects to portal.amfiindia.com; requests follows it.
+# A browser User-Agent is REQUIRED: the portal's WAF serves an HTML challenge
+# (not the NAV text) to a default python-requests UA, which parsed to 0 rows
+# silently in prod (2026-09-10). Mirror a browser.
+NAVALL_URL = 'https://www.amfiindia.com/spages/NAVAll.txt'
+_UA = ('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
+       '(KHTML, like Gecko) Chrome/124.0 Safari/537.36')
 
 
 def parse_navall(text: str) -> list:
@@ -52,10 +57,19 @@ def parse_navall(text: str) -> list:
 
 
 def fetch_navall(timeout: int = 60) -> str:
-    """Raw NAVAll.txt text. Raises on HTTP error (caller decides fatality)."""
-    r = requests.get(NAVALL_URL, timeout=timeout)
+    """Raw NAVAll.txt text. Raises on HTTP error, or when the body is not the
+    semicolon-delimited NAV file (a WAF/HTML page) — so a blocked fetch fails
+    loudly rather than parsing to 0 rows in silence."""
+    r = requests.get(NAVALL_URL, timeout=timeout,
+                     headers={'User-Agent': _UA, 'Accept': 'text/plain,*/*'})
     r.raise_for_status()
-    return r.text
+    text = r.text
+    if 'Scheme Code' not in text and text.count(';') < 100:
+        raise RuntimeError(
+            f"AMFI NAV fetch did not return the NAV file "
+            f"(len={len(text)}, ';'-count={text.count(';')}) — likely a WAF/HTML "
+            f"response. First 120 chars: {text[:120]!r}")
+    return text
 
 
 def fetch_and_parse() -> list:
