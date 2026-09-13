@@ -65,6 +65,38 @@ def _sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
+def score_one_symbol(market_data, symbol: str, token: int,
+                     nifty_closes: list = None, regime: str = None) -> dict:
+    """On-demand single-name score + full verdict, persisted to stock_universe
+    exactly like the daily scan. Same path score_universe uses per symbol
+    (advise/trend_score reused, never reimplemented) — the difference is one
+    name and a fresh candle fetch, so /advisor lookups need not wait for the
+    once-daily scan. Returns the row written, or {} on failure."""
+    key = f"NSE:{symbol}"
+    market_data._instrument_cache[key] = token
+    candles = completed_bars(market_data.get_candles(key, 'day', 400))
+    if not candles or len(candles) < MIN_DAILY_BARS:
+        return {}
+    ind = run_all_indicators(candles)
+    closes = [float(c['close']) for c in candles if c.get('close') is not None]
+    score = trend_score(ind, closes,
+                        consistency=trend_consistency(closes),
+                        rel_strength=relative_strength(closes, nifty_closes or []),
+                        news_sent=None, regime=regime)
+    try:
+        detail = advise({'symbol': symbol, 'quantity': 0, 'average_price': None,
+                         'last_price': closes[-1] if closes else None},
+                        candles, nifty_closes=nifty_closes, regime=regime)
+    except Exception as e:
+        print(f"[advisor.lookup] {symbol} detail skipped: {e}")
+        detail = None
+    row = {'symbol': symbol, 'advisor_score': score,
+           'advisor_score_updated_at': datetime.now(IST).isoformat(),
+           'advisor_detail': detail}
+    db.upsert_stock_universe_bulk([row])
+    return row
+
+
 def score_universe(market_data, universe: list = None, nifty_closes: list = None,
                    exclude_symbols: list = None, regime: str = None) -> dict:
     """Daily trend_score for every Nifty 500 name we don't hold — the rotation

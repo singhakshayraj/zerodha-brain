@@ -184,6 +184,59 @@ def _label_decisions_catchup() -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _maybe_serve_lookup() -> None:
+    """On-demand single-stock lookup. The dashboard queues a symbol in
+    app_config 'advisor_lookup_request'; this scores it NOW with the live token
+    (pull-mode) and writes the result to stock_universe, so /advisor lookups
+    need not wait for the once-daily scan. The request is CLAIMED (cleared)
+    before the worker starts, so a second idle pass never double-processes."""
+    try:
+        raw = db.get_config('advisor_lookup_request')
+    except Exception:
+        return
+    if not raw:
+        return
+    db.write_config('advisor_lookup_request', '')      # claim it
+
+    def _run():
+        import json
+        try:
+            sym = ((json.loads(raw) or {}).get('symbol') or '').strip().upper()
+            if not sym:
+                return
+            token = db.get_enc_token()
+            if not token:
+                db.write_config('advisor_lookup_error', f'{sym}: no token')
+                return
+            import config
+            import portfolio_advisor
+            from advisor_scoring import NIFTY50_INDEX_TOKEN
+            from kite_client import KiteClient
+            from market_data import MarketData
+            itok = config.NIFTY500_INSTRUMENT_TOKENS.get(f'NSE:{sym}')
+            if not itok:
+                db.write_config('advisor_lookup_error', f'{sym}: not in universe')
+                return
+            md = MarketData(KiteClient(token))
+            nifty_closes = []
+            try:
+                md._instrument_cache['NSE:NIFTY 50'] = NIFTY50_INDEX_TOKEN
+                nb = md.get_candles('NSE:NIFTY 50', 'day', 400) or []
+                nifty_closes = [float(c['close']) for c in nb
+                                if c.get('close') is not None]
+            except Exception:
+                pass
+            row = portfolio_advisor.score_one_symbol(md, sym, itok,
+                                                     nifty_closes=nifty_closes)
+            db.write_config('advisor_lookup_error',
+                            '' if row else f'{sym}: insufficient data')
+            print(f"[advisor.lookup] served {sym}: {'ok' if row else 'no data'}")
+        except Exception as e:
+            print(f"[advisor.lookup] failed (non-fatal): {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 _catchup_date = None
 
 
@@ -778,6 +831,8 @@ def run():
             # session-start path so the two pre-registered advisor reads keep
             # accruing. Once/day, so the idle loop never re-spawns their threads.
             _maybe_run_catchups()
+            # On-demand single-stock lookup (pull-mode, needs a token).
+            _maybe_serve_lookup()
             command = db.get_brain_command()
 
             # brain_status flips START -> RUNNING right after session creation
