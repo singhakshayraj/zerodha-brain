@@ -108,3 +108,14 @@ def sample_signal_sell():
             "ema_21": 1360.0, "macd_histogram": -0.5
         }
     }
+
+
+@pytest.fixture(autouse=True)
+def _no_public_instrument_fetch():
+    """advisor_backtest's [D3] fallback downloads Kite's public instrument
+    master on first miss. Tests must never touch the network: pin it empty."""
+    import advisor_backtest
+    saved = advisor_backtest._PUBLIC_TOKENS
+    advisor_backtest._PUBLIC_TOKENS = {}
+    yield
+    advisor_backtest._PUBLIC_TOKENS = saved

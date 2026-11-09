@@ -16,7 +16,10 @@ quantities stored on each row.
 
 ADVISORY ONLY: reads candles, writes outcome columns. No order path.
 """
-from datetime import datetime
+import csv
+import io
+import urllib.request
+from datetime import date, datetime, timedelta
 
 import pytz
 
@@ -74,6 +77,50 @@ def _bars_from(candles: list, run_date: str) -> list:
         if ts >= run_date and c.get('close') is not None:
             out.append(c)
     return out
+
+
+def _trading_days_through(run_date: str, today: str) -> int:
+    """Trading days from run_date to today, inclusive. `_bars_from` keeps bars
+    dated ON or after run_date, so this is a hard upper bound on the bars any
+    symbol can have — fewer than the horizon means not due, no fetch needed.
+
+    [D4] Without this, a dead token failed every QUEUED row's fetch before
+    maturity was known, and the incident called all of them "due" (11-09:
+    "29/38 due rows" when 0 were due). A year missing from NSE_HOLIDAYS only
+    overcounts, which falls through to the chart check — safe direction."""
+    d, end = date.fromisoformat(run_date[:10]), date.fromisoformat(today[:10])
+    n = 0
+    while d <= end:
+        if d.weekday() < 5 and d.isoformat() not in config.NSE_HOLIDAYS:
+            n += 1
+        d += timedelta(days=1)
+    return n
+
+
+_PUBLIC_INSTRUMENTS_URL = 'https://api.kite.trade/instruments/NSE'
+_PUBLIC_TOKENS = None   # lazy: tradingsymbol -> instrument_token, fetched once
+
+
+def _public_token(symbol: str):
+    """[D3] Last-resort instrument token from Kite's public, no-auth master.
+
+    A holding that was SOLD and isn't in the Nifty-500 pin has no token from
+    either usual source, so its pending calls read not-due forever — and the
+    rows lost are mostly followed SELL calls. One fetch per process; a failed
+    fetch caches empty so a pass never retries per row."""
+    global _PUBLIC_TOKENS
+    if _PUBLIC_TOKENS is None:
+        _PUBLIC_TOKENS = {}
+        try:
+            with urllib.request.urlopen(_PUBLIC_INSTRUMENTS_URL, timeout=60) as r:
+                text = r.read().decode('utf-8', 'replace')
+            for row in csv.DictReader(io.StringIO(text)):
+                if row.get('segment') == 'NSE' and row.get('tradingsymbol'):
+                    _PUBLIC_TOKENS[row['tradingsymbol']] = int(row['instrument_token'])
+            print(f"[backtest] public instrument master: {len(_PUBLIC_TOKENS)} symbols")
+        except Exception as e:
+            print(f"[backtest] public instrument master unavailable (non-fatal): {e}")
+    return _PUBLIC_TOKENS.get(symbol)
 
 
 def horizon_for(row: dict, default_days: int = None) -> int:
@@ -153,10 +200,14 @@ def run_backtest_pass(market_data, horizon_days: int = None) -> int:
                            'evaluation_horizon_days': None}
             else:
                 horizon = horizon_for(row, horizon_days)
+                if _trading_days_through(run_date, today) < horizon:
+                    not_due[horizon] = not_due.get(horizon, 0) + 1
+                    continue
                 if symbol not in candle_cache:
                     key = f'NSE:{symbol}'
                     token = (config.NIFTY500_INSTRUMENT_TOKENS.get(key)
-                             or market_data._instrument_cache.get(key))
+                             or market_data._instrument_cache.get(key)
+                             or _public_token(symbol))
                     if token:
                         market_data._instrument_cache[key] = token
                     candle_cache[symbol] = market_data.get_candles(
@@ -208,8 +259,9 @@ def run_backtest_pass(market_data, horizon_days: int = None) -> int:
     try:
         if token_expired:
             db.write_config('grading_incident',
-                            f"TOKEN_EXPIRED {today}: {token_expired}/{len(queue)} "
-                            f"due rows could not authenticate; {evaluated} graded. "
+                            f"TOKEN_EXPIRED {today}: {token_expired} due rows "
+                            f"could not authenticate ({len(queue)} queued); "
+                            f"{evaluated} graded. "
                             f"Paste a fresh enc_token and re-run grading.")
             print(f"[backtest] 🚨 GRADING AUTH FAILURE: {token_expired}/{len(queue)} "
                   f"rows token-expired — this is NOT an empty queue.")

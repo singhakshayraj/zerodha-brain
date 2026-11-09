@@ -358,3 +358,47 @@ def test_calibrated_confidence_lookup_and_fallback():
     assert bt.calibrated_confidence(65, table) == (65, True)
     assert bt.calibrated_confidence(80, None) == (80, True)   # no table
     assert bt.calibrated_confidence(None, table) == (None, True)
+
+
+# --- [D4] maturity before fetch / [D3] public-token fallback ---------------------
+
+def test_trading_days_through_skips_weekends_and_holidays():
+    # Fri 11-06 .. Mon 11-09 = 2 trading days (Sat/Sun skipped)
+    assert bt._trading_days_through('2026-11-06', '2026-11-09') == 2
+    assert bt._trading_days_through('2026-11-09', '2026-11-09') == 1
+    some_holiday = sorted(bt.config.NSE_HOLIDAYS_2026)[0]
+    assert bt._trading_days_through(some_holiday, some_holiday) == 0
+
+
+def test_immature_row_is_not_due_without_fetching_even_on_dead_token():
+    """[D4] A dead token must not turn a not-yet-mature row into a 'due row
+    that could not authenticate'. Maturity is known from the calendar alone."""
+    from kite_client import TokenExpiredError
+    today = bt.datetime.now(bt.IST).date().isoformat()
+    rows = [{'run_date': today, 'symbol': 'AAA', 'verdict': 'SELL',
+             'last_price': 100.0, 'trigger_type': 'MACRO'}]
+    md = MagicMock()
+    md._instrument_cache = {}
+    md.get_candles.side_effect = TokenExpiredError('Token expired')
+    md.refresh_holdings_cache.side_effect = TokenExpiredError('Token expired')
+    cfg = {}
+    with patch.object(bt.db, 'get_unevaluated_advice', return_value=rows), \
+         patch.object(bt.db, 'update_advice_outcome', return_value=True), \
+         patch.object(bt.db, 'write_config',
+                      side_effect=lambda k, v: cfg.__setitem__(k, v)):
+        assert bt.run_backtest_pass(md) == 0
+    called = [c.args[0] for c in md.get_candles.call_args_list]
+    assert 'NSE:AAA' not in called              # never fetched
+    assert cfg.get('grading_incident') == ''     # no false incident
+
+
+def test_sold_unpinned_symbol_gets_token_from_public_master():
+    """[D3] Not in the pin, not in holdings (sold) -> public master token."""
+    bt._PUBLIC_TOKENS = {'MAHLIFE': 2952193}
+    rows = [{'run_date': '2026-07-01', 'symbol': 'MAHLIFE', 'verdict': 'SELL',
+             'last_price': 100.0}]
+    md = _md(_TEN)
+    with patch.object(bt.db, 'get_unevaluated_advice', return_value=rows), \
+         patch.object(bt.db, 'update_advice_outcome', return_value=True):
+        assert bt.run_backtest_pass(md, horizon_days=10) == 1
+    assert md._instrument_cache['NSE:MAHLIFE'] == 2952193
