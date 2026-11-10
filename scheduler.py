@@ -265,6 +265,37 @@ def _maybe_ingest_amfi_nav() -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+_bars_thread = None
+_bars_attempt = None
+
+
+def _maybe_sync_daily_bars() -> bool:
+    """Daily-bar store FIRST whenever a live token is present (user rule
+    2026-11-11). One attempt per (target day, token) -- a fresh paste
+    retries. Returns True while the sync runs so the advisor waits: both
+    hit Kite's historical endpoint and must not race its rate limit."""
+    global _bars_thread, _bars_attempt
+    if _bars_thread is not None and _bars_thread.is_alive():
+        return True
+    import data_jobs
+    target = data_jobs.last_completed_trading_day(datetime.now(IST))
+    token = db.get_enc_token()
+    if not token or _bars_attempt == (target, token):
+        return False
+    _bars_attempt = (target, token)
+
+    def _run():
+        try:
+            from market_data import MarketData
+            data_jobs.sync_daily_bars(MarketData(KiteClient(token)))
+        except Exception as e:
+            print(f"[daily_bars] sync failed (non-fatal): {e}")
+
+    _bars_thread = threading.Thread(target=_run, daemon=True, name='daily_bars')
+    _bars_thread.start()
+    return True
+
+
 def _maybe_run_catchups() -> None:
     """Once/day: label recent decisions and grade matured advice. Hoisted from
     the removed session-start path (Phase C.2). Both spawn a daemon thread
@@ -826,11 +857,14 @@ def run():
             # Portfolio advisor: once per day when a live token exists.
             # Advisory-only, independent of trading sessions; never blocks
             # the loop (runs on a daemon thread).
-            _maybe_run_advisor()
-            # Grading + labelling catch-ups, hoisted here from the removed
-            # session-start path so the two pre-registered advisor reads keep
-            # accruing. Once/day, so the idle loop never re-spawns their threads.
-            _maybe_run_catchups()
+            # Daily-bar store runs FIRST on a live token; the advisor and
+            # grading wait until it finishes (minutes, once per day).
+            if not _maybe_sync_daily_bars():
+                _maybe_run_advisor()
+                # Grading + labelling catch-ups, hoisted here from the removed
+                # session-start path so the two pre-registered advisor reads
+                # keep accruing. Once/day, so the idle loop never re-spawns.
+                _maybe_run_catchups()
             # On-demand single-stock lookup (pull-mode, needs a token).
             _maybe_serve_lookup()
             command = db.get_brain_command()

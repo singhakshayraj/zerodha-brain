@@ -14,7 +14,7 @@ a data-job failure must never take down a trading cycle.
 """
 
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytz
 
@@ -289,4 +289,74 @@ def archive_traded_day_candles(market_data, session_id: str, run_date: str,
               f"{len(skipped)}: {', '.join(skipped[:8])}")
     print(f"[data_jobs.candle_backfill] {run_date}: {total} bars over "
           f"{done}/{len(symbols)} symbols")
+    return total
+
+
+# ── Daily-bar store (2026-11-11) ────────────────────────────────────────────
+# Keeps Nifty-500 + Nifty 50 DAILY bars in `candles` (interval='day') so
+# price history accrues in the DB instead of being re-pulled. The local
+# data/daily_history.pkl (5y) ends 2026-08-25; the DB continues from there.
+DAILY_BARS_KEY = 'daily_bars_through'
+DAILY_BARS_START = '2026-08-25'
+NIFTY50_INDEX_TOKEN = 256265
+_MAX_SYNC_FAILURES = 5   # renamed/delisted pins; more = something is wrong
+
+
+def _is_trading_day(d) -> bool:
+    return d.weekday() < 5 and d.isoformat() not in config.NSE_HOLIDAYS
+
+
+def last_completed_trading_day(now_ist) -> str:
+    """Latest trading day whose daily bar is final (today only after 15:30)."""
+    d = now_ist.date()
+    if not (_is_trading_day(d) and (now_ist.hour, now_ist.minute) >= (15, 30)):
+        d -= timedelta(days=1)
+        while not _is_trading_day(d):
+            d -= timedelta(days=1)
+    return d.isoformat()
+
+
+def sync_daily_bars(market_data, now_ist=None) -> int:
+    """Upsert every completed daily bar newer than the watermark, then advance
+    it. Idempotent; a missed day is backfilled by the next live token (Kite
+    serves ~400 days). A dead token or >5 failures leaves the watermark alone
+    so the next attempt redoes the window. Returns bars written."""
+    now_ist = now_ist or datetime.now(IST)
+    through = db.get_config(DAILY_BARS_KEY) or DAILY_BARS_START
+    target = last_completed_trading_day(now_ist)
+    if through >= target:
+        return 0
+
+    jobs = [('NIFTY 50', NIFTY50_INDEX_TOKEN)] + [
+        (k.split(':', 1)[1], t)
+        for k, t in config.NIFTY500_INSTRUMENT_TOKENS.items()]
+    total, failed = 0, []
+    for sym, tok in jobs:
+        try:
+            market_data._instrument_cache[f'NSE:{sym}'] = tok
+            bars = market_data.get_candles(f'NSE:{sym}', 'day', 400) or []
+            new = [b for b in bars
+                   if through < str(b.get('timestamp', ''))[:10] <= target]
+            if not new:
+                failed.append(sym)
+                continue
+            n = db.upsert_candles(
+                db.candle_rows(None, sym, 'NSE', new, 'day', tail=len(new)))
+            if n:
+                total += n
+            else:
+                failed.append(sym)
+        except TokenExpiredError:
+            print(f"[daily_bars] token expired after {total} bars — "
+                  f"watermark stays {through}")
+            return total
+        except Exception as e:
+            print(f"[daily_bars] {sym} failed: {e}")
+            failed.append(sym)
+
+    if len(failed) <= _MAX_SYNC_FAILURES:
+        db.write_config(DAILY_BARS_KEY, target)
+    print(f"[daily_bars] {through} -> {target}: {total} bars, "
+          f"{len(failed)} failed {failed[:8]}"
+          + ("" if len(failed) <= _MAX_SYNC_FAILURES else " — watermark NOT advanced"))
     return total
