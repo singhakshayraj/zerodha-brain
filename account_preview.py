@@ -143,10 +143,50 @@ def attach_rotations(rows: list, today: str, regime: str) -> int:
     return n
 
 
+CALLS_TABLE = 'account_calls'
+
+
+def call_rows(payload: dict) -> list:
+    """Pure: one graded-track row per advised holding (INSUFFICIENT kept so
+    the grader can clear it, like the holdings queue)."""
+    out = []
+    for r in payload.get('rows') or []:
+        th = (r.get('indicators') or {}).get('thesis') or {}
+        out.append({
+            'account': payload['account'], 'run_date': payload['run_date'],
+            'symbol': r['symbol'], 'verdict': r.get('verdict'),
+            'trigger_type': r.get('trigger_type'), 'trend_score': r.get('trend_score'),
+            'confidence': r.get('confidence'), 'regime': payload.get('regime'),
+            'last_price': r.get('last_price'), 'quantity': r.get('quantity'),
+            'thesis_action': th.get('action'), 'quality': th.get('quality'),
+            'rotation_target_symbol': r.get('rotation_target_symbol'),
+        })
+    return [x for x in out if x['verdict']]
+
+
+def log_calls(payload: dict) -> int:
+    """First preview of the day is the call: later same-day runs (a re-pasted
+    token) never overwrite it."""
+    rows = call_rows(payload)
+    if rows:
+        db.supabase.table(CALLS_TABLE).upsert(
+            rows, on_conflict='account,run_date,symbol',
+            ignore_duplicates=True).execute()
+    return len(rows)
+
+
 def run_preview(acct: str, market_data) -> int:
     """Build and store the preview. Returns rows stored."""
     payload = build_preview(market_data, acct)
     db.write_config(result_key(acct), json.dumps(payload, default=str))
+    try:
+        import universe_calls
+        n_log = log_calls(payload)
+        n_grd = universe_calls.grade_due(payload['run_date'], CALLS_TABLE,
+                                         'account,run_date,symbol')
+        print(f"[preview:{acct}] calls logged {n_log}, graded {n_grd}")
+    except Exception as e:
+        print(f"[preview:{acct}] call log/grade failed (non-fatal): {e}")
     print(f"[preview:{acct}] stored {payload['holdings_count']} holdings "
           f"(regime {payload['regime']})")
     return payload['holdings_count']

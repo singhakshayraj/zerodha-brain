@@ -124,11 +124,12 @@ def grade_rows(queue: list, bars: dict) -> list:
     return done
 
 
-def grade_due(today: str = None) -> int:
-    """Grade every matured, ungraded universe call. Token-free. Returns rows
-    graded."""
+def grade_due(today: str = None, table: str = TABLE,
+              conflict: str = 'run_date,symbol') -> int:
+    """Grade every matured, ungraded call in `table` (universe_calls, or
+    account_calls for the second account). Token-free. Returns rows graded."""
     today = today or datetime.now(IST).date().isoformat()
-    queue = _paged(lambda: db.supabase.table(TABLE).select('*')
+    queue = _paged(lambda: db.supabase.table(table).select('*')
                    .is_('evaluated_at', 'null').lt('run_date', today)
                    .order('run_date'))
     if not queue:
@@ -136,8 +137,8 @@ def grade_due(today: str = None) -> int:
     bars = _bars_since(str(min(r['run_date'] for r in queue)))
     done = grade_rows(queue, bars)
     for i in range(0, len(done), 500):
-        db.supabase.table(TABLE).upsert(done[i:i + 500],
-                                        on_conflict='run_date,symbol').execute()
-    print(f"[universe_calls] graded {len(done)}/{len(queue)} due "
+        db.supabase.table(table).upsert(done[i:i + 500],
+                                        on_conflict=conflict).execute()
+    print(f"[{table}] graded {len(done)}/{len(queue)} due "
           f"(bars for {len(bars)} symbols)")
     return len(done)

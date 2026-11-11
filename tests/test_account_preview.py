@@ -35,8 +35,11 @@ def test_preview_advises_holdings_and_writes_only_its_blob():
     with patch.object(ap.db, 'write_config', side_effect=lambda k, v: written.__setitem__(k, v)), \
          patch.object(ap.db, 'write_official_portfolio_advice', create=True) as official, \
          patch.object(ap.fundamentals, 'load_store', return_value={'by_symbol': {}}), \
-         patch.object(ap, 'news_sentiment', return_value=None):
+         patch.object(ap, 'news_sentiment', return_value=None), \
+         patch.object(ap, 'log_calls', return_value=1) as logged, \
+         patch('universe_calls.grade_due', return_value=0):
         n = ap.run_preview('natwar', FakeMD())
+    assert logged.call_count == 1
     assert n == 1                                   # zero-qty holding skipped
     assert list(written) == ['advisor_natwar_latest']
     official.assert_not_called()
@@ -75,3 +78,17 @@ def test_rotation_noop_when_scan_not_run_today():
     with patch.object(ap.db, 'get_universe_by_sector', return_value=[], create=True):
         assert ap.attach_rotations(rows, '2026-11-11', 'trend') == 0
     assert 'rotation_target_symbol' not in rows[0]
+
+
+def test_call_rows_one_per_holding_with_thesis_and_rotation():
+    payload = {'account': 'natwar', 'run_date': '2026-11-11', 'regime': 'AGGRESSIVE_BULL',
+               'rows': [{'symbol': 'DABUR', 'verdict': 'SELL', 'trigger_type': 'MACRO', 'trend_score': -40,
+                         'confidence': 70, 'last_price': 380.0, 'quantity': 10,
+                         'rotation_target_symbol': 'MARICO',
+                         'indicators': {'thesis': {'action': 'HOLD', 'quality': 72}}},
+                        {'symbol': 'X', 'verdict': None}]}
+    rows = ap.call_rows(payload)
+    assert len(rows) == 1
+    r = rows[0]
+    assert (r['account'], r['symbol'], r['verdict'], r['thesis_action'], r['quality'], r['rotation_target_symbol']) == \
+           ('natwar', 'DABUR', 'SELL', 'HOLD', 72, 'MARICO')
