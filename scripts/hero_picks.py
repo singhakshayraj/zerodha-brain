@@ -3,13 +3,15 @@
 Merges a pasted Screener.in screen (company financials) with our own daily
 price history (data/daily_history.pkl + `candles` interval='day' in Supabase)
 and ranks stocks the market is against but whose balance sheet says it is
-too pessimistic. Nothing here writes to the DB or places orders.
+too pessimistic. Writes the list to app_config 'hero_picks_latest' (shown
+on /advisor) and first-seen picks to 'hero_picks_log' for 12-month grading.
+Never places orders.
 
 WEEKLY WORKFLOW
-  1. screener.in -> your saved screen (query below) -> select the results
-     table in the browser, copy, paste into a text file (e.g. screen.txt).
-  2. python3 scripts/hero_picks.py screen.txt
-  3. Output: ranked table on stdout + data/hero_picks_<date>.csv
+  1. python3 scripts/ingest_fundamentals.py <screener pastes>   (monthly)
+  2. python3 scripts/hero_picks.py            # reads the ingested store
+     (or: python3 scripts/hero_picks.py screen.txt to use a raw paste)
+  3. Output: ranked table on stdout, data/hero_picks_<date>.csv, app_config
 
 SCREENER QUERY (Screener auto-suggests field names; fix any it flags):
     Market Capitalization > 5000 AND
@@ -112,6 +114,7 @@ def price_metrics(closes: list, index_closes: list) -> dict:
         'rel_3m': ret(c, 63) - ret(ix, 63),
         'low_age_days': low_age,
         'last_date': closes[-1][0],
+        'last_close': c[-1],
     }
 
 
@@ -159,10 +162,24 @@ def rank(passers: list) -> list:
     return picks
 
 
-def run(text: str):
+def rows_from_store(universe: dict) -> list:
+    """Nifty-500 records from app_config fundamentals_latest (the ingested
+    Screener pastes), in the same shape parse_paste+match_symbols produce."""
+    st = fundamentals.load_store().get('by_symbol') or {}
+    out = []
+    for sym, rec in st.items():
+        if sym in universe and all(rec.get(k) is not None for k in REQUIRED[1:]):
+            out.append({**rec, 'symbol': sym, 'sector': universe[sym]['sector']})
+    return out
+
+
+def run(text: str = None):
     universe = load_universe()
-    rows = parse_paste(text)
-    matched, unmatched = match_symbols(rows, universe)
+    if text:
+        matched, unmatched = match_symbols(parse_paste(text), universe)
+    else:
+        matched, unmatched = rows_from_store(universe), []
+    rows = matched
     matched = [r for r in matched if r['sector'] != 'Financial Services']
     closes = load_closes([r['symbol'] for r in matched] + [INDEX])
     idx = closes.pop(INDEX)
@@ -178,10 +195,45 @@ def run(text: str):
     return rank(scored), near, unmatched, len(rows)
 
 
+PICKS_KEY, LOG_KEY = 'hero_picks_latest', 'hero_picks_log'
+PUBLISH_FIELDS = ['symbol', 'name', 'sector', 'score', 'dd_3y', 'rel_3y', 'rel_3m',
+                  'low_age_days', 'pe', 'mcap', 'cash', 'debt', 'cfo', 'roce',
+                  'piotroski', 'pledge', 'ev_ebitda', 'net_cash_pct_mcap',
+                  'last_close', 'last_date', 'failed']
+
+
+def publish(picks: list, near: list, n: int, today: str = None) -> dict:
+    """Write the list for /advisor and append first-seen picks to the entry
+    log (symbol, entry_date, entry_price) for 12-month grading. Returns the
+    payload."""
+    import json
+    import database as db
+    today = today or date.today().isoformat()
+    slim = lambda r: {k: r.get(k) for k in PUBLISH_FIELDS if k in r}
+    one_off = sorted((r for r in near if len(r['failed']) == 1),
+                     key=lambda r: r['dd_3y'])
+    payload = {'asof': today, 'n_screened': n,
+               'gates': ['market_against', 'cash_cushion', 'good_business', 'not_falling_knife'],
+               'picks': [slim(r) for r in picks], 'near_misses': [slim(r) for r in one_off[:20]]}
+    db.write_config(PICKS_KEY, json.dumps(payload, default=str))
+    try:
+        log = json.loads(db.get_config(LOG_KEY) or '[]')
+    except Exception:
+        log = []
+    seen = {e['symbol'] for e in log}
+    for r in picks:
+        if r['symbol'] not in seen:
+            log.append({'symbol': r['symbol'], 'sector': r['sector'], 'entry_date': today,
+                        'entry_price': r.get('last_close'), 'score': r['score']})
+    db.write_config(LOG_KEY, json.dumps(log))
+    return payload
+
+
 def main():
-    if len(sys.argv) != 2:
+    if len(sys.argv) > 2:
         sys.exit(__doc__)
-    picks, near, unmatched, n = run(open(sys.argv[1]).read())
+    picks, near, unmatched, n = run(open(sys.argv[1]).read() if len(sys.argv) == 2 else None)
+    publish(picks, near, n)
     print(f"\nScreen rows: {n} | not in Nifty 500 / unmatched: {len(unmatched)} "
           f"| hero picks: {len(picks)}\n")
     fmt = "{:<12} {:<28} {:>6} {:>8} {:>8} {:>7} {:>8} {:>6}"
