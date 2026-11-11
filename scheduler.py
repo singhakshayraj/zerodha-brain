@@ -296,6 +296,41 @@ def _maybe_sync_daily_bars() -> bool:
     return True
 
 
+_preview_done = {}     # acct -> (date, token) already attempted
+
+
+def _maybe_run_account_previews() -> None:
+    """P-45 provisional: once per trading day per preview account, after the
+    primary advisor has stored today's official batch, advise that account's
+    holdings with ITS token into app_config 'advisor_<acct>_latest'. Never
+    touches portfolio_advice. A fresh token paste re-arms the attempt."""
+    import account_preview
+    now = _now_ist()
+    today = now.date().isoformat()
+    if config.QA_MODE or now.weekday() > 4 or today in config.NSE_HOLIDAYS:
+        return
+    rh, rm = _parse_hhmm(config.ADVISOR_RUN_AFTER_IST, (9, 45))
+    if (now.hour, now.minute) < (rh, rm):
+        return
+    for acct in account_preview.PREVIEW_ACCOUNTS:
+        token = db.get_config(account_preview.token_key(acct))
+        if not token or _preview_done.get(acct) == (today, token):
+            continue
+        _preview_done[acct] = (today, token)
+        if not _token_is_live(token):
+            print(f"[preview:{acct}] token not live — skipped today")
+            continue
+
+        def _run(acct=acct, token=token):
+            try:
+                from market_data import MarketData
+                account_preview.run_preview(acct, MarketData(KiteClient(token)))
+            except Exception as e:
+                print(f"[preview:{acct}] failed (non-fatal): {e}")
+
+        threading.Thread(target=_run, daemon=True, name=f'preview_{acct}').start()
+
+
 def _maybe_run_catchups() -> None:
     """Once/day: label recent decisions and grade matured advice. Hoisted from
     the removed session-start path (Phase C.2). Both spawn a daemon thread
@@ -865,6 +900,8 @@ def run():
                 # session-start path so the two pre-registered advisor reads
                 # keep accruing. Once/day, so the idle loop never re-spawns.
                 _maybe_run_catchups()
+                # Second-account preview (P-45 provisional, own token).
+                _maybe_run_account_previews()
             # On-demand single-stock lookup (pull-mode, needs a token).
             _maybe_serve_lookup()
             command = db.get_brain_command()
