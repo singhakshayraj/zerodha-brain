@@ -50,3 +50,28 @@ def test_preview_advises_holdings_and_writes_only_its_blob():
 def test_keys():
     assert ap.token_key('natwar') == 'enc_token_natwar'
     assert ap.result_key('natwar') == 'advisor_natwar_latest'
+
+
+def test_rotation_targets_come_from_todays_stored_scan():
+    rows = [{'symbol': 'AAA', 'verdict': 'SELL', 'trend_score': -30,
+             'quantity': 10, 'last_price': 100.0, 'reasons': []}]
+    universe = [{'symbol': 'ZZZ', 'advisor_score': 90, 'sector': 'X',
+                 'advisor_score_updated_at': '2026-11-11T10:00:00+05:30',
+                 'advisor_detail': {'last_price': 50.0}},
+                {'symbol': 'OLD', 'advisor_score': 99, 'sector': 'X',
+                 'advisor_score_updated_at': '2026-11-09T10:00:00+05:30',
+                 'advisor_detail': {'last_price': 10.0}}]
+    with patch.object(ap.db, 'get_universe_by_sector', return_value=universe, create=True), \
+         patch.object(ap.market_regime, 'rotation_min_gap_for', return_value=40):
+        n = ap.attach_rotations(rows, '2026-11-11', 'trend')
+    assert n == 1
+    assert rows[0]['rotation_target_symbol'] == 'ZZZ'       # stale OLD row ignored
+    assert rows[0]['rotation_sell_qty'] == 10
+    assert any(r.startswith('Rotation: ZZZ') for r in rows[0]['reasons'])
+
+
+def test_rotation_noop_when_scan_not_run_today():
+    rows = [{'symbol': 'AAA', 'verdict': 'SELL', 'trend_score': -30, 'quantity': 10, 'last_price': 100.0}]
+    with patch.object(ap.db, 'get_universe_by_sector', return_value=[], create=True):
+        assert ap.attach_rotations(rows, '2026-11-11', 'trend') == 0
+    assert 'rotation_target_symbol' not in rows[0]

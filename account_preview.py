@@ -19,6 +19,7 @@ import fundamentals
 import market_regime
 import thesis
 from advisor_risk import portfolio_risk
+from advisor_rotation import find_rotation_candidate, size_rotation
 from advisor_scoring import NIFTY50_INDEX_TOKEN, advise, completed_bars, news_sentiment
 
 IST = pytz.timezone('Asia/Kolkata')
@@ -78,6 +79,10 @@ def build_preview(market_data, acct: str, today: str = None) -> dict:
 
     sector_map = {u['symbol']: u.get('sector') for u in config.NIFTY500_UNIVERSE}
     try:
+        attach_rotations(rows, today, regime)
+    except Exception as e:
+        print(f"[preview:{acct}] rotation skipped (non-fatal): {e}")
+    try:
         thesis.attach_theses(rows, fundamentals.load_store(), sector_map, today)
     except Exception as e:
         print(f"[preview:{acct}] thesis skipped (non-fatal): {e}")
@@ -89,6 +94,53 @@ def build_preview(market_data, acct: str, today: str = None) -> dict:
     return {'account': acct, 'label': PREVIEW_ACCOUNTS.get(acct, acct),
             'run_date': today, 'run_at': now.isoformat(), 'regime': regime,
             'holdings_count': len(rows), 'rows': rows, 'portfolio_risk': risk}
+
+
+def todays_universe_scores(today: str, exclude: set) -> dict:
+    """Rotation pool from the primary account's Nifty-500 scan stored in
+    stock_universe — no second 500-name scan on this token. Empty when the
+    scan hasn't run today."""
+    out = {}
+    for r in db.get_universe_by_sector(None, list(exclude)):
+        if (r.get('advisor_score_updated_at') or '')[:10] != today:
+            continue
+        detail = r.get('advisor_detail') or {}
+        out[r['symbol']] = {'symbol': r['symbol'], 'score': r['advisor_score'],
+                            'sector': r.get('sector'),
+                            'last_close': detail.get('last_price')}
+    return out
+
+
+def attach_rotations(rows: list, today: str, regime: str) -> int:
+    """Same rotation call as the official run (gate + sizing), fed from today's
+    stored scan. Returns targets attached."""
+    scored = todays_universe_scores(today, {r['symbol'] for r in rows})
+    if not scored:
+        return 0
+    sector_of = {u['symbol']: u.get('sector') for u in config.NIFTY500_UNIVERSE}
+    min_gap = market_regime.rotation_min_gap_for(regime)
+    n = 0
+    for row in rows:
+        t = find_rotation_candidate(row.get('trend_score'), sector_of.get(row['symbol']),
+                                    scored, min_gap=min_gap)
+        if not t:
+            continue
+        row['rotation_target_symbol'] = t['symbol']
+        row['rotation_target_score'] = t['score']
+        row['rotation_reason'] = t['reason']
+        sizing = size_rotation(row.get('verdict'), row.get('quantity'),
+                               row.get('last_price'), t.get('last_close'))
+        row.update(sizing)
+        size_note = ''
+        if sizing.get('rotation_buy_qty'):
+            size_note = (f" Size: sell {sizing['rotation_sell_qty']} "
+                         f"(₹{sizing['rotation_freed_inr']:,.0f}) → buy ~{sizing['rotation_buy_qty']} "
+                         f"@ ₹{sizing['rotation_buy_price']:,.2f}")
+        row['reasons'] = (row.get('reasons') or []) + [
+            f"Rotation: {t['symbol']} scores {t['score']} vs this name's "
+            f"{row.get('trend_score')} — freed capital has a stronger home.{size_note}"]
+        n += 1
+    return n
 
 
 def run_preview(acct: str, market_data) -> int:
