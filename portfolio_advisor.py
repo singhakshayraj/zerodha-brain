@@ -175,7 +175,7 @@ from advisor_rotation import (  # noqa: F401  facade re-export
 )
 
 
-def sync_tradebook(kite) -> int:
+def sync_tradebook(kite, account: str = 'primary') -> int:
     """Append today's REAL account trades (GET /trades) into tradebook —
     keeps the imported history current going forward. Read-only; dedup makes
     re-runs safe."""
@@ -202,14 +202,31 @@ def sync_tradebook(kite) -> int:
                 'order_id': str(t.get('order_id') or ''),
                 'executed_at': t.get('fill_timestamp') or t.get('exchange_timestamp'),
                 'source': 'kite_daily',
+                'account': account,
             })
         except Exception:
             continue
     rows = [r for r in rows if r['symbol'] and r['trade_id']]
     n = db.upsert_tradebook(rows)
     if n:
-        print(f"[advisor] tradebook: appended {n} fills from today")
+        print(f"[advisor] tradebook ({account}): appended {n} fills from today")
     return n
+
+
+def sync_account_fills() -> int:
+    """Today's fills for every preview account on its own token (P-51).
+    Silent when an account has no token. Returns fills written."""
+    total = 0
+    try:
+        import account_preview
+        from kite_client import KiteClient
+        for acct in account_preview.PREVIEW_ACCOUNTS:
+            tok = db.get_config(account_preview.token_key(acct))
+            if tok:
+                total += sync_tradebook(KiteClient(tok), acct)
+    except Exception as e:
+        print(f"[advisor] account fill sync failed (non-fatal): {e}")
+    return total
 
 
 def _capture_stock_timeline(rows: list) -> None:
@@ -536,6 +553,7 @@ def run_advisor_lite(market_data) -> int:
         # Real fills land after 09:45 (the operator acts on the call), and
         # /trades only returns today — sync on every refresh; dedup is safe.
         sync_tradebook(market_data.kite)
+        sync_account_fills()
         holdings = market_data.kite.get_holdings() or []
     except Exception as e:
         print(f"[advisor.lite] holdings fetch failed: {e}")

@@ -269,6 +269,18 @@ _bars_thread = None
 _bars_attempt = None
 
 
+def _reconcile_all() -> None:
+    """[P-51] Recompute real-money P&L + decision ledger for every account.
+    Token-free (DB only); non-fatal."""
+    try:
+        import account_preview
+        import reconcile
+        for acct in ['primary', *account_preview.PREVIEW_ACCOUNTS]:
+            reconcile.run(acct)
+    except Exception as e:
+        print(f"[SCHEDULER] reconcile failed (non-fatal): {e}")
+
+
 def _maybe_sync_daily_bars() -> bool:
     """Daily-bar store FIRST whenever a live token is present (user rule
     2026-11-11). One attempt per (target day, token) -- a fresh paste
@@ -288,6 +300,7 @@ def _maybe_sync_daily_bars() -> bool:
         try:
             from market_data import MarketData
             data_jobs.sync_daily_bars(MarketData(KiteClient(token)))
+            _reconcile_all()      # yesterday's real closes replace provisional prices
         except Exception as e:
             print(f"[daily_bars] sync failed (non-fatal): {e}")
 
@@ -564,6 +577,8 @@ def _maybe_capture_timeline() -> None:
                     # Last chance for today's fills: /trades only returns the
                     # current day, and the operator trades after 09:45.
                     portfolio_advisor.sync_tradebook(kite)
+                    portfolio_advisor.sync_account_fills()
+                    _reconcile_all()
                 n = portfolio_advisor.run_timeline_capture(MarketData(kite))
                 _timeline_capture_slots.add(key)   # mark done only on success
                 print(f"[SCHEDULER] timeline capture ({phase}) done: "

@@ -330,6 +330,18 @@ def sync_daily_bars(market_data, now_ist=None) -> int:
     jobs = [('NIFTY 50', NIFTY50_INDEX_TOKEN)] + [
         (k.split(':', 1)[1], t)
         for k, t in config.NIFTY500_INSTRUMENT_TOKENS.items()]
+    # Held names outside the Nifty 500 (ETFs, small caps): the P&L
+    # reconciliation marks every holding to its close, so they need bars too.
+    try:
+        known = {s for s, _ in jobs}
+        jobs += [(h['tradingsymbol'], h['instrument_token'])
+                 for h in market_data.kite.get_holdings() or []
+                 if h.get('tradingsymbol') and h.get('instrument_token')
+                 and h['tradingsymbol'] not in known]
+    except TokenExpiredError:
+        raise
+    except Exception as e:
+        print(f"[daily_bars] holdings list unavailable (non-fatal): {e}")
     total, failed = 0, []
     for sym, tok in jobs:
         try:
