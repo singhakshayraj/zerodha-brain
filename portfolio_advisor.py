@@ -445,6 +445,26 @@ def run_advisor(market_data) -> int:
     except Exception as e:
         print(f"[advisor] calibration (dark) failed (non-fatal): {e}")
 
+    # Thesis engine (P-47, SHADOW): 12-month action per holding from
+    # fundamentals + sizing + loss rules, stored at indicators.thesis beside
+    # the unchanged v1 verdict. Graded separately (scripts/grade_thesis.py).
+    # Additive and non-fatal — can never alter a v1 column.
+    try:
+        import fundamentals
+        import thesis
+        n_thesis = thesis.attach_theses(
+            rows, fundamentals.load_store(),
+            {u['symbol']: u.get('sector') for u in config.NIFTY500_UNIVERSE},
+            run_date)
+        acts = {}
+        for r in rows:
+            a = ((r.get('indicators') or {}).get('thesis') or {}).get('action')
+            if a:
+                acts[a] = acts.get(a, 0) + 1
+        print(f"[advisor.thesis] shadow: {n_thesis} theses {acts}")
+    except Exception as e:
+        print(f"[advisor] thesis engine (shadow) failed (non-fatal): {e}")
+
     # Per-stock agent timeline (mechanical, DARK): capture + summarize.
     _capture_stock_timeline(rows)
 
