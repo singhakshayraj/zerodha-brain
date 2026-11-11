@@ -3,3 +3,8 @@ __pycache__/
 test_connection.py
 .coverage
 data/daily_history.pkl
+
+# operator account exports (statements, tradebook, screener pastes) — never commit
+data/console/
+data/*screener*.txt
+data/hero_picks_*.csv
