@@ -14,3 +14,10 @@ def test_extended_headers_do_not_collide():
     cols = f.map_headers(hdr)
     assert 'roce' not in cols and 'debt' not in cols and 'opm' not in cols
     assert cols['avg_roce_5y'] == 3 and cols['debtor_days'] == 4 and cols['fii'] == 6 and cols['fii_change'] == 7
+
+
+def test_snapshot_rows_cover_only_touched_symbols():
+    store = {'asof': '2026-11-11', 'by_symbol': {'A': {'roce': 1.0, 'asof': '2026-11-11', 'name': 'A'},
+                                                 'B': {'roce': 2.0, 'asof': '2026-10-01', 'name': 'B'}}}
+    rows = f.snapshot_rows(store, ['A', 'A', 'Z'], '2026-11-11')
+    assert rows == [{'asof': '2026-11-11', 'symbol': 'A', 'data': {'roce': 1.0, 'name': 'A'}}]

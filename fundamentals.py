@@ -73,6 +73,12 @@ ALIASES = {
     'sales': ['sales latest annual'],
     'net_profit_qtr': ['net profit latest qtr'],
     'ev': ['enterprise value'],
+    # banks / NBFCs (financials are scored on these, not cash vs debt)
+    'gnpa': ['gross npa', 'gnpa'],
+    'nnpa': ['net npa', 'nnpa'],
+    'nim': ['net interest margin', 'nim'],
+    'casa': ['casa'],
+    'car': ['capital adequacy', 'crar'],
     'inventory_turnover': ['inventory turnover'],
 }
 
@@ -101,6 +107,10 @@ def map_headers(headers: list) -> dict:
                 continue                     # 5y averages have their own field
             if field == 'debt' and 'debtor' in hl:
                 continue                     # 'Debtor days' is not debt
+            if field == 'nim' and hl.strip() not in ('nim', 'nim %') and 'net interest' not in hl:
+                continue                     # 'nim' only as a whole header
+            if field in ('gnpa', 'nnpa') and 'change' in hl:
+                continue
             if field == 'cash' and 'free cash' in hl:
                 continue                     # FCF is not cash on hand
             if field == 'debt' and ('/' in hl or 'equity' in hl):
@@ -289,6 +299,37 @@ def load_store() -> dict:
 def save_store(store: dict) -> None:
     import database as db
     db.write_config(STORE_KEY, json.dumps(store))
+
+
+SNAPSHOT_TABLE = 'fundamentals_snapshots'
+
+
+def snapshot_rows(store: dict, symbols, asof: str) -> list:
+    """Pure: point-in-time rows for the symbols touched by one ingest."""
+    by = (store or {}).get('by_symbol') or {}
+    return [{'asof': asof, 'symbol': s,
+             'data': {k: v for k, v in by[s].items() if k != 'asof'}}
+            for s in sorted(set(symbols)) if s in by]
+
+
+def save_snapshot(store: dict, symbols, asof: str) -> int:
+    """Append (asof, symbol) copies so later grading can use what was known
+    then. Same-day re-ingests overwrite that day's copy."""
+    import database as db
+    rows = snapshot_rows(store, symbols, asof)
+    for i in range(0, len(rows), 500):
+        db.supabase.table(SNAPSHOT_TABLE).upsert(
+            rows[i:i + 500], on_conflict='asof,symbol').execute()
+    return len(rows)
+
+
+def load_asof(symbol: str, on_date: str):
+    """Latest snapshot for symbol taken on or before on_date, or None."""
+    import database as db
+    res = (db.supabase.table(SNAPSHOT_TABLE).select('asof,data')
+           .eq('symbol', symbol).lte('asof', on_date)
+           .order('asof', desc=True).limit(1).execute().data) or []
+    return {**res[0]['data'], 'asof': res[0]['asof']} if res else None
 
 
 def is_stale(rec: dict, today: str = None, stale_days: int = STALE_DAYS) -> bool:

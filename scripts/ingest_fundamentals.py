@@ -32,6 +32,24 @@ def holdings_names() -> dict:
         return {}
 
 
+def coverage_gaps(store: dict, universe: dict) -> dict:
+    """Held names (primary + preview accounts) and Nifty-500 names with no
+    fundamentals record — what the next Screener paste should add."""
+    import json
+    have = set((store or {}).get('by_symbol') or {})
+    held = set(holdings_names())
+    try:
+        import account_preview
+        import database as db
+        for acct in account_preview.PREVIEW_ACCOUNTS:
+            raw = db.get_config(account_preview.result_key(acct))
+            held |= {r['symbol'] for r in (json.loads(raw).get('rows') or [])} if raw else set()
+    except Exception:
+        pass
+    etfs = {s for s in held if s.endswith('BEES') or 'ETF' in s or s in ('HDFCSENSEX',)}
+    return {'held': sorted(held - have - etfs), 'nifty500': sorted(set(universe) - have)}
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
@@ -45,12 +63,20 @@ def main():
     store = fundamentals.merge_store(fundamentals.load_store(), matched,
                                      date.today().isoformat())
     fundamentals.save_store(store)
+    n_snap = fundamentals.save_snapshot(store, [r['symbol'] for r in matched],
+                                        store['asof'])
+    print(f"snapshot: {n_snap} symbols kept for {store['asof']} (fundamentals_snapshots)")
     print(f"parsed {len(rows)} rows, matched {len(matched)}, store now holds "
           f"{len(store['by_symbol'])} symbols (asof {store['asof']})")
     if missing:
         print(f"⚠ no values for {missing} in this paste — add those columns on Screener")
     if unmatched:
         print(f"unmatched names: {', '.join(unmatched[:20])}")
+    gaps = coverage_gaps(store, universe)
+    if gaps['held']:
+        print(f"⚠ HELD, no fundamentals (add to next paste): {', '.join(gaps['held'])}")
+    if gaps['nifty500']:
+        print(f"Nifty-500 without fundamentals ({len(gaps['nifty500'])}): {', '.join(gaps['nifty500'])}")
 
 
 if __name__ == '__main__':

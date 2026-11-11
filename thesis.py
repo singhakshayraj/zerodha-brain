@@ -62,6 +62,18 @@ def quality_score(f: dict, sector: str = None):
     if pe is not None:
         got += 0 if pe <= 0 else 10 if pe <= 15 else 6 if pe <= 25 else 3 if pe <= 40 else 0
         maxpts += 10; n += 1
+    # Bank / NBFC asset quality (financials only; scored when pasted).
+    if financial:
+        g, nn, car = f.get('gnpa'), f.get('nnpa'), f.get('car')
+        if g is not None:
+            got += 10 if g <= 3 else 5 if g <= 6 else 0
+            maxpts += 10; n += 1
+        if nn is not None:
+            got += 10 if nn <= 1 else 5 if nn <= 2 else 0
+            maxpts += 10; n += 1
+        if car is not None:
+            got += 5 if car >= 15 else 3 if car >= 12 else 0
+            maxpts += 5; n += 1
     # Extended Screener export (2026-11-11+): growth, margin trend, coverage,
     # institutional flow. Each scores only when present; weights are small so
     # the balance-sheet core above still dominates.

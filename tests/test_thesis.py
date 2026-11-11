@@ -117,3 +117,12 @@ def test_quality_uses_extended_fields_when_present():
     shrinking = {**base, 'sales_growth_3y': -5, 'profit_growth_3y': -10, 'opm': 15, 'opm_last_year': 20,
                  'interest_coverage': 1.0, 'fii_change': -3.0, 'dii_change': -1.0}
     assert thesis.quality_score(shrinking) == int(round(100 / 130 * 100))   # 77: core intact, all extended parts zero
+
+
+def test_bank_asset_quality_counts_for_financials_only():
+    core = {'roe': 16, 'piotroski': 6, 'cfo': 10, 'pledge': 0, 'pe': 10}
+    clean = {**core, 'gnpa': 2.0, 'nnpa': 0.5, 'car': 16}
+    dirty = {**core, 'gnpa': 9.0, 'nnpa': 3.0, 'car': 11}
+    fin = 'Financial Services'
+    assert thesis.quality_score(clean, fin) > thesis.quality_score(core, fin) > thesis.quality_score(dirty, fin)
+    assert thesis.quality_score(dirty, 'Information Technology') == thesis.quality_score(core, 'Information Technology')
