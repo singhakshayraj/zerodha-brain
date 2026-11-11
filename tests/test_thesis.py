@@ -106,3 +106,14 @@ def test_fundamentals_parse_match_merge_stale():
     assert store['by_symbol']['INFY']['asof'] == TODAY and 'name' in store['by_symbol']['INFY']
     assert fundamentals.is_stale(store['by_symbol']['TCS'], TODAY)
     assert not fundamentals.is_stale(store['by_symbol']['INFY'], TODAY)
+
+
+def test_quality_uses_extended_fields_when_present():
+    base = {'roce': 25, 'piotroski': 8, 'cash': 100, 'debt': 10, 'cfo': 50, 'pledge': 0, 'pe': 15}
+    assert thesis.quality_score(base) == 100
+    growing = {**base, 'sales_growth_3y': 20, 'profit_growth_3y': 18, 'opm': 20, 'opm_last_year': 19,
+               'interest_coverage': 12, 'fii_change': 1.0, 'dii_change': 0.5}
+    assert thesis.quality_score(growing) == 100
+    shrinking = {**base, 'sales_growth_3y': -5, 'profit_growth_3y': -10, 'opm': 15, 'opm_last_year': 20,
+                 'interest_coverage': 1.0, 'fii_change': -3.0, 'dii_change': -1.0}
+    assert thesis.quality_score(shrinking) == int(round(100 / 130 * 100))   # 77: core intact, all extended parts zero

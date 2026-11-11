@@ -62,6 +62,26 @@ def quality_score(f: dict, sector: str = None):
     if pe is not None:
         got += 0 if pe <= 0 else 10 if pe <= 15 else 6 if pe <= 25 else 3 if pe <= 40 else 0
         maxpts += 10; n += 1
+    # Extended Screener export (2026-11-11+): growth, margin trend, coverage,
+    # institutional flow. Each scores only when present; weights are small so
+    # the balance-sheet core above still dominates.
+    sg, pg = f.get('sales_growth_3y'), f.get('profit_growth_3y')
+    if sg is not None and pg is not None:
+        g = min(sg, pg)
+        got += 15 if g >= 15 else 10 if g >= 8 else 5 if g > 0 else 0
+        maxpts += 15; n += 1
+    opm, opm0 = f.get('opm'), f.get('opm_last_year')
+    if opm is not None and opm0 is not None:
+        got += 5 if opm >= opm0 - 1 else 0
+        maxpts += 5; n += 1
+    ic = f.get('interest_coverage')
+    if ic is not None and not financial:
+        got += 5 if ic >= 5 else 2 if ic >= 2 else 0
+        maxpts += 5; n += 1
+    fl = [x for x in (f.get('fii_change'), f.get('dii_change')) if x is not None]
+    if fl:
+        got += 5 if sum(fl) >= 0 else 0
+        maxpts += 5; n += 1
     if n < 3 or not maxpts:
         return None
     return int(round(got / maxpts * 100))
