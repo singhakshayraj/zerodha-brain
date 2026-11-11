@@ -376,6 +376,23 @@ def test_run_advisor_lite_carries_forward_rotation_from_official_row():
     assert row['rotation_buy_qty'] == 4
 
 
+def test_run_advisor_lite_carries_forward_v2_thesis_from_official_row():
+    md = _md([{'tradingsymbol': 'NTPC', 'exchange': 'NSE', 'quantity': 5,
+               'average_price': 100.0, 'last_price': 90.0}],
+             _candles(250, start=100, step=-1.0))
+    th = {'action': 'EXIT', 'quality': 30, 'reason': 'r', 'falsifier': 'f'}
+    official_row = {'symbol': 'NTPC', 'indicators': {'rsi_14': 40, 'thesis': th}}
+    with patch.object(pa.db, 'insert_portfolio_advice_snapshot',
+                      side_effect=lambda rows: len(rows)) as ins, \
+         patch.object(pa.db, 'get_official_advice_for_date',
+                      return_value=[official_row]), \
+         patch.object(pa.db, 'get_tradebook', return_value=[]):
+        pa.run_advisor_lite(md)
+    row = ins.call_args.args[0][0]
+    assert row['indicators']['thesis'] == th
+    assert row['indicators'].get('rsi_14') != 40        # live indicators kept, only thesis carried
+
+
 def test_run_advisor_lite_no_holdings():
     md = MagicMock()
     md.kite.get_holdings.return_value = []

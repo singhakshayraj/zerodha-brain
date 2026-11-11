@@ -588,6 +588,11 @@ def run_advisor_lite(market_data) -> int:
                           'rotation_buy_price'):
                     if official.get(k) is not None:
                         advice[k] = official[k]
+                # v2 thesis is a once-a-day read too (fundamentals don't
+                # move intraday) — carry it so /advisor keeps showing it.
+                th = (official.get('indicators') or {}).get('thesis')
+                if th:
+                    advice['indicators'] = {**(advice.get('indicators') or {}), 'thesis': th}
             rows.append({'run_date': run_date, **advice})
         except Exception as e:
             print(f"[advisor.lite] {tsym} failed (skipped): {e}")
