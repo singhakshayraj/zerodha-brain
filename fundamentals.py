@@ -21,12 +21,12 @@ STALE_DAYS = 45
 
 # canonical field -> substrings identifying Screener's column header (lower)
 ALIASES = {
-    'name': ['name'],
+    'name': ['name', 'company'],
     'mcap': ['mar cap', 'market cap'],
     'pe': ['p/e', 'price to earning'],
-    'cash': ['cash eq', 'cash equivalents'],
+    'cash': ['cash eq', 'cash equivalents', 'cash rs'],
     'debt': ['debt'],
-    'cfo': ['cf opr', 'cash from op', 'cfo'],
+    'cfo': ['cf opr', 'cf operations', 'cash from op', 'cfo'],
     'roce': ['roce', 'return on capital'],
     'roe': ['roe', 'return on equity'],
     'piotroski': ['piotski', 'piotroski'],
@@ -54,6 +54,8 @@ def map_headers(headers: list) -> dict:
         for field, keys in ALIASES.items():
             if field in out:
                 continue
+            if field == 'cash' and 'free cash' in hl:
+                continue                     # FCF is not cash on hand
             if field == 'debt' and ('/' in hl or 'equity' in hl):
                 continue                     # 'Debt / Eq' is a ratio
             if field == 'roe' and 'roce' in hl:
@@ -71,9 +73,10 @@ def parse_paste(text: str, required: list = ('name',)) -> list:
     naming any `required` field whose column is missing."""
     lines = [l for l in text.splitlines() if l.strip()]
     try:
-        hdr_i = next(i for i, l in enumerate(lines) if 'name' in l.lower())
+        hdr_i = next(i for i, l in enumerate(lines)
+                     if 'name' in l.lower() or 'company' in l.lower())
     except StopIteration:
-        raise ValueError("no header line containing 'Name' found")
+        raise ValueError("no header line containing 'Name'/'Company' found")
     split = (lambda l: l.split('\t')) if '\t' in lines[hdr_i] \
         else (lambda l: re.split(r'\s{2,}', l.strip()))
     headers = split(lines[hdr_i])
@@ -84,7 +87,8 @@ def parse_paste(text: str, required: list = ('name',)) -> list:
                          f"headers seen: {headers}")
     rows = []
     for l in lines[hdr_i + 1:]:
-        if 'name' in l.lower()[:20] and len(split(l)) >= len(headers) - 1:
+        head = l.lower()[:20]
+        if ('name' in head or 'company' in head) and len(split(l)) >= len(headers) - 1:
             continue                         # repeated page header
         cells = split(l)
         if len(cells) < max(cols.values()) + 1:
@@ -96,6 +100,17 @@ def parse_paste(text: str, required: list = ('name',)) -> list:
         if r.get('name'):
             rows.append(r)
     return rows
+
+
+# Screener's display names that neither exact nor fuzzy matching resolves.
+SCREENER_NAMES = {
+    'bhel': 'BHEL',
+    'indianrenewable': 'IREDA',
+    'icicilifeinsurance': 'ICICILIFE',
+    'mazagondock': 'MAZDOCK',
+    'shyammetalics': 'SHYAMMETL',
+    'suprajitengg': 'SUPRAJIT',
+}
 
 
 def _norm(name: str) -> str:
@@ -119,10 +134,13 @@ def match_symbols(rows: list, universe: dict, extra_names: dict = None):
     matched, unmatched = [], []
     for r in rows:
         n = _norm(r['name'])
-        sym = by_norm.get(n)
+        sym = SCREENER_NAMES.get(n) or by_norm.get(n)
         if not sym:
             close = difflib.get_close_matches(n, by_norm, n=1, cutoff=0.85)
             sym = by_norm[close[0]] if close else None
+        if not sym and len(n) >= 6:          # Screener truncates: 'Suprajit Engg.'
+            pref = [s for k, s in by_norm.items() if k.startswith(n[:6])]
+            sym = pref[0] if len(pref) == 1 else None
         if sym:
             matched.append({**r, 'symbol': sym,
                             'sector': (universe.get(sym) or {}).get('sector')})

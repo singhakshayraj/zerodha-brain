@@ -27,7 +27,7 @@ def holdings_names() -> dict:
         import database as db
         return {r['identifier']: r.get('identifier')
                 for r in db.get_latest_holdings_snapshot() or []
-                if r.get('instrument_type') == 'EQ'}
+                if r.get('instrument_type') in ('EQ', 'listed')}
     except Exception:
         return {}
 
