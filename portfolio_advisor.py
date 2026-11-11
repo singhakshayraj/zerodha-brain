@@ -533,6 +533,9 @@ def run_advisor_lite(market_data) -> int:
     a 'rotate into X' chip between official runs. ADVISORY ONLY, same as
     run_advisor(). Per-symbol failures skip that symbol, never abort the run."""
     try:
+        # Real fills land after 09:45 (the operator acts on the call), and
+        # /trades only returns today — sync on every refresh; dedup is safe.
+        sync_tradebook(market_data.kite)
         holdings = market_data.kite.get_holdings() or []
     except Exception as e:
         print(f"[advisor.lite] holdings fetch failed: {e}")

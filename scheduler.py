@@ -559,8 +559,12 @@ def _maybe_capture_timeline() -> None:
             try:
                 import portfolio_advisor
                 from market_data import MarketData
-                n = portfolio_advisor.run_timeline_capture(
-                    MarketData(KiteClient(token)))
+                kite = KiteClient(token)
+                if phase == 'POST_CLOSE':
+                    # Last chance for today's fills: /trades only returns the
+                    # current day, and the operator trades after 09:45.
+                    portfolio_advisor.sync_tradebook(kite)
+                n = portfolio_advisor.run_timeline_capture(MarketData(kite))
                 _timeline_capture_slots.add(key)   # mark done only on success
                 print(f"[SCHEDULER] timeline capture ({phase}) done: "
                       f"{n} holdings")
