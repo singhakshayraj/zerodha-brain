@@ -299,8 +299,14 @@ def _maybe_sync_daily_bars() -> bool:
     def _run():
         try:
             from market_data import MarketData
-            data_jobs.sync_daily_bars(MarketData(KiteClient(token)))
+            md = MarketData(KiteClient(token))
+            data_jobs.sync_daily_bars(md)
             _reconcile_all()      # yesterday's real closes replace provisional prices
+            try:                  # tape context for every call logged today
+                import macro_snapshot
+                macro_snapshot.run(md)
+            except Exception as e:
+                print(f"[SCHEDULER] macro snapshot failed (non-fatal): {e}")
         except Exception as e:
             print(f"[daily_bars] sync failed (non-fatal): {e}")
 

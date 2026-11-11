@@ -403,6 +403,13 @@ def run_advisor(market_data) -> int:
                 print(f"[advisor.universe_calls] logged {n_log}, graded {n_grd}")
             except Exception as e:
                 print(f"[advisor.universe_calls] failed (non-fatal): {e}")
+            # Tape context: today's breadth needs the scan, so refresh the
+            # last few macro rows after it (non-fatal).
+            try:
+                import macro_snapshot
+                macro_snapshot.run(market_data, run_date, backfill_days=5)
+            except Exception as e:
+                print(f"[advisor.macro] failed (non-fatal): {e}")
             # Sector view (display only): your weight vs index, trend, mix.
             try:
                 import sector_view
