@@ -377,6 +377,15 @@ def run_advisor(market_data) -> int:
                                     exclude_symbols=held, regime=regime)
             print(f"[advisor.scan] scored {len(scored)} universe names in "
                   f"{time.monotonic() - t0:.0f}s")
+            # Keep every scanned verdict (shadow log, trial 259) and grade
+            # whatever has matured — token-free, never blocks rotation.
+            try:
+                import universe_calls
+                n_log = universe_calls.log_scan(scored, run_date, regime)
+                n_grd = universe_calls.grade_due(run_date)
+                print(f"[advisor.universe_calls] logged {n_log}, graded {n_grd}")
+            except Exception as e:
+                print(f"[advisor.universe_calls] failed (non-fatal): {e}")
             sector_of = {u['symbol']: u.get('sector')
                          for u in config.NIFTY500_UNIVERSE}
             # Regime-adaptive gate: chop demands a wider score gap before a
