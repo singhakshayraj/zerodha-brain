@@ -87,10 +87,9 @@ def parse_paste(text: str, required: list = ('name',)) -> list:
                          f"headers seen: {headers}")
     rows = []
     for l in lines[hdr_i + 1:]:
-        head = l.lower()[:20]
-        if ('name' in head or 'company' in head) and len(split(l)) >= len(headers) - 1:
-            continue                         # repeated page header
         cells = split(l)
+        if cells[0].strip().lower() == headers[0].strip().lower():
+            continue                         # repeated page header
         if len(cells) < max(cols.values()) + 1:
             continue
         r = {f: cells[i].strip() for f, i in cols.items()}
@@ -110,6 +109,68 @@ SCREENER_NAMES = {
     'mazagondock': 'MAZDOCK',
     'shyammetalics': 'SHYAMMETL',
     'suprajitengg': 'SUPRAJIT',
+    'abb': 'ABB',
+    'adanienergysol': 'ADANIENSOL',
+    'adanienterp': 'ADANIENT',
+    'adaniports': 'ADANIPORTS',
+    'adityaamc': 'ABSLAMC',
+    'adityabirlacap': 'ABCAPITAL',
+    'apollohospitals': 'APOLLOHOSP',
+    'bajajholdings': 'BAJAJHLDNG',
+    'bajajhousing': 'BAJAJHFL',
+    'bankofmaha': 'MAHABANK',
+    'bpcl': 'BPCL',
+    'camsservices': 'CAMS',
+    'canarahsbc': 'CANHLIFE',
+    'cdsl': 'CDSL',
+    'centralbank': 'CENTRALBK',
+    'cholafinancial': 'CHOLAHLDNG',
+    'cholamaninvandfn': 'CHOLAFIN',
+    'cpcl': 'CHENNPETRO',
+    'deepakfertilis': 'DEEPAKFERT',
+    'fact': 'FACT',
+    'geshippingco': 'GESHIP',
+    'gmdc': 'GMDCLTD',
+    'godrejconsumer': 'GODREJCP',
+    'gujaratfluoroch': 'FLUOROCHEM',
+    'hdfcamc': 'HDFCAMC',
+    'hegadvancedmaterials': 'HEGAM',
+    'hindunilever': 'HINDUNILVR',
+    'hpcl': 'HINDPETRO',
+    'hudco': 'HUDCO',
+    'iciciamc': 'ICICIAMC',
+    'icicilombard': 'ICICIGI',
+    'indianenergyex': 'IEX',
+    'iocl': 'IOC',
+    'irctc': 'IRCTC',
+    'jindalstain': 'JSL',
+    'jiofinancial': 'JIOFIN',
+    'jppowerven': 'JPPOWER',
+    'jubilantfood': 'JUBLFOOD',
+    'mandm': 'M&M',
+    'mandmfinserv': 'M&MFIN',
+    'maxfinancial': 'MFSL',
+    'motiloswalfin': 'MOTILALOFS',
+    'mrpl': 'MRPL',
+    'nbcc': 'NBCC',
+    'one97': 'PAYTM',
+    'ongc': 'ONGC',
+    'sail': 'SAIL',
+    'sbi': 'SBIN',
+    'sbicards': 'SBICARD',
+    'sbifundsmgt': 'SBIFM',
+    'sbilifeinsuran': 'SBILIFE',
+    'supremeinds': 'SUPREMEIND',
+    'tatacomm': 'TATACOMM',
+    'tataconsumer': 'TATACONSUM',
+    'tatamotors': 'TATAMOTORS',
+    'tatamotorspveh': 'TMPV',
+    'tatatelemah': 'TTML',
+    'tcs': 'TCS',
+    'titancompany': 'TITAN',
+    'torrentpharma': 'TORNTPHARM',
+    'urbancompany': 'URBANCO',
+    'utiamc': 'UTIAMC',
 }
 
 

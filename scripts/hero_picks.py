@@ -38,10 +38,8 @@ RANK: mean percentile of earnings yield (1/PE), net cash / market cap, and
 cheap EV/EBITDA (if present). Top 8, max 2 per sector.
 """
 import csv
-import difflib
 import os
 import pickle
-import re
 import sys
 from datetime import date
 
@@ -50,101 +48,24 @@ PKL = os.path.join(ROOT, 'data', 'daily_history.pkl')
 UNIVERSE = os.path.join(ROOT, 'data', 'nifty500.csv')
 INDEX = 'NIFTY 50'
 
-# canonical field -> substrings that identify Screener's column header
-ALIASES = {
-    'name': ['name'],
-    'mcap': ['mar cap', 'market cap'],
-    'pe': ['p/e', 'price to earning'],
-    'cash': ['cash eq', 'cash equivalents'],
-    'debt': ['debt'],
-    'cfo': ['cf opr', 'cash from op', 'cfo'],
-    'roce': ['roce', 'return on capital'],
-    'piotroski': ['piotski', 'piotroski'],
-    'pledge': ['pledge'],
-    'ev_ebitda': ['ev / ebitda', 'ev/ebitda', 'evebitda'],
-}
+sys.path.insert(0, ROOT)
+import fundamentals  # noqa: E402  shared Screener parser + name matching
+
 REQUIRED = ['name', 'mcap', 'pe', 'cash', 'debt', 'cfo', 'roce',
             'piotroski', 'pledge']
 TOP_N, PER_SECTOR = 8, 2
 
 
-def _num(s):
-    s = (s or '').replace(',', '').replace('%', '').strip()
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
-
-def map_headers(headers: list) -> dict:
-    """{canonical: column index}. Raises naming any required field not found."""
-    out = {}
-    for i, h in enumerate(headers):
-        hl = h.lower().strip()
-        for field, keys in ALIASES.items():
-            if field in out:
-                continue
-            if field == 'debt' and ('/' in hl or 'equity' in hl):
-                continue  # 'Debt / Eq' is a ratio, not the rupee amount
-            if any(k in hl for k in keys):
-                out[field] = i
-                break
-    missing = [f for f in REQUIRED if f not in out]
-    if missing:
-        raise ValueError(f"screen paste is missing columns: {missing} "
-                         f"(headers seen: {headers})")
-    return out
-
-
 def parse_paste(text: str) -> list:
-    """Screener table copied from the browser -> list of row dicts.
-    Tab-separated; header is the first line containing 'Name'. Repeated
-    header lines (one per results page) are skipped."""
-    lines = [l for l in text.splitlines() if l.strip()]
-    hdr_i = next(i for i, l in enumerate(lines) if 'name' in l.lower())
-    headers = lines[hdr_i].split('\t')
-    cols = map_headers(headers)
-    rows = []
-    for l in lines[hdr_i + 1:]:
-        cells = l.split('\t')
-        if len(cells) < len(headers) - 1 or 'name' in l.lower()[:20]:
-            continue
-        r = {f: (cells[i].strip() if i < len(cells) else '')
-             for f, i in cols.items()}
-        for f in r:
-            if f != 'name':
-                r[f] = _num(r[f])
-        rows.append(r)
-    return rows
-
-
-def _norm(name: str) -> str:
-    n = name.lower().replace('&', 'and')
-    n = re.sub(r'\b(ltd|limited|the)\b', '', n)
-    return re.sub(r'[^a-z0-9]', '', n)
+    return fundamentals.parse_paste(text, required=REQUIRED)
 
 
 def load_universe() -> dict:
-    with open(UNIVERSE) as f:
-        return {r['symbol']: r for r in csv.DictReader(f)}
+    return fundamentals.load_universe(UNIVERSE)
 
 
 def match_symbols(rows: list, universe: dict):
-    """Attach 'symbol'/'sector' by company name. Returns (matched, unmatched)."""
-    by_norm = {_norm(u['company_name']): s for s, u in universe.items()}
-    matched, unmatched = [], []
-    for r in rows:
-        n = _norm(r['name'])
-        sym = by_norm.get(n)
-        if not sym:
-            close = difflib.get_close_matches(n, by_norm, n=1, cutoff=0.85)
-            sym = by_norm[close[0]] if close else None
-        if sym:
-            matched.append({**r, 'symbol': sym,
-                            'sector': universe[sym]['sector']})
-        else:
-            unmatched.append(r['name'])
-    return matched, unmatched
+    return fundamentals.match_symbols(rows, universe)
 
 
 def load_closes(symbols: list) -> dict:
