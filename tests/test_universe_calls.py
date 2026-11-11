@@ -39,3 +39,15 @@ def test_grade_rows_uses_horizon_and_market_neutral_label():
     assert d['evaluation_horizon_days'] == 10
     assert d['outcome_return_pct'] == 5.0 and d['outcome_vs_nifty_pct'] == 3.0
     assert d['outcome_correct_alpha'] is True and d['evaluated_at']
+
+
+def test_grade_rows_grades_sector_variant_on_same_window():
+    queue = [{'run_date': '2026-11-02', 'symbol': 'AAA', 'verdict': 'SELL', 'sector_verdict': 'TRIM',
+              'trigger_type': 'MICRO', 'last_price': 100.0},
+             {'run_date': '2026-11-02', 'symbol': 'CCC', 'verdict': 'HOLD', 'trigger_type': 'MICRO', 'last_price': 100.0}]
+    bars = {'AAA': _bars(2, [100] * 9 + [105]), 'CCC': _bars(2, [100] * 9 + [105]),
+            'NIFTY 50': _bars(2, [100] * 9 + [102])}
+    d = {x['symbol']: x for x in uc.grade_rows(queue, bars)}
+    assert d['AAA']['outcome_correct_alpha'] is False            # sold, it beat Nifty
+    assert d['AAA']['sector_outcome_correct_alpha'] is False     # TRIM is an exit call too
+    assert d['CCC']['sector_outcome_correct_alpha'] is None      # no variant logged

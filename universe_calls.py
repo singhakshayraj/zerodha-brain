@@ -65,6 +65,12 @@ def log_scan(scored: dict, run_date: str, regime: str = None) -> int:
     rows = rows_from_scan(scored, run_date, regime, quality)
     if not rows:
         return 0
+    try:                                    # trial 261 shadow variant
+        import sector_tilt
+        sector_of = {r['symbol']: r.get('sector') for r in rows}
+        sector_tilt.apply(rows, sector_tilt.sector_trends(rows, sector_of), sector_of)
+    except Exception as e:
+        print(f"[universe_calls] sector tilt skipped (non-fatal): {e}")
     for i in range(0, len(rows), 500):
         db.supabase.table(TABLE).upsert(rows[i:i + 500],
                                         on_conflict='run_date,symbol').execute()
@@ -106,6 +112,7 @@ def grade_rows(queue: list, bars: dict) -> list:
             done.append({**row, 'outcome_return_pct': None,
                          'outcome_vs_nifty_pct': None,
                          'outcome_correct_alpha': None,
+                         'sector_outcome_correct_alpha': None,
                          'evaluation_horizon_days': None, 'evaluated_at': now})
             continue
         horizon = bt.horizon_for(row)
@@ -117,7 +124,11 @@ def grade_rows(queue: list, bars: dict) -> list:
         nret = bt._index_return_between(nifty, str(row['run_date']),
                                         str(end['timestamp'])[:10])
         o = bt.evaluate_verdict(row, fwd, nret)
-        done.append({**row, 'outcome_return_pct': o['outcome_return_pct'],
+        sv = row.get('sector_verdict')
+        so = (bt.evaluate_verdict({'verdict': sv}, fwd, nret)['outcome_correct_alpha']
+              if sv else None)
+        done.append({**row, 'sector_outcome_correct_alpha': so,
+                     'outcome_return_pct': o['outcome_return_pct'],
                      'outcome_vs_nifty_pct': o['outcome_vs_nifty_pct'],
                      'outcome_correct_alpha': o['outcome_correct_alpha'],
                      'evaluation_horizon_days': horizon, 'evaluated_at': now})

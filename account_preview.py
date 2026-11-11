@@ -78,6 +78,22 @@ def build_preview(market_data, acct: str, today: str = None) -> dict:
             print(f"[preview:{acct}] {sym} skipped: {e}")
 
     sector_map = {u['symbol']: u.get('sector') for u in config.NIFTY500_UNIVERSE}
+    # Sector layer on top of v1 (trial 261): v1 kept as v1_verdict, the
+    # sector-aware call becomes this account's verdict. Before rotations so
+    # sizing follows the shown call (TRIM = half).
+    sectors = None
+    try:
+        import sector_tilt
+        import sector_view
+        sectors = sector_view.compute(today, rows)
+        trends = {g['group']: g['trend_median'] for g in sectors['groups']
+                  if g['names'] >= sector_tilt.MIN_NAMES and g['trend_median'] is not None}
+        sector_tilt.apply(rows, trends, sector_map)
+        for r in rows:
+            r['v1_verdict'] = r['verdict']
+            r['verdict'] = r['sector_verdict']
+    except Exception as e:
+        print(f"[preview:{acct}] sector layer skipped (non-fatal): {e}")
     try:
         attach_rotations(rows, today, regime)
     except Exception as e:
@@ -91,12 +107,6 @@ def build_preview(market_data, acct: str, today: str = None) -> dict:
         risk = portfolio_risk(rows, sector_map=sector_map, closes_by_symbol=closes_by_symbol)
     except Exception as e:
         print(f"[preview:{acct}] risk skipped (non-fatal): {e}")
-    sectors = None
-    try:
-        import sector_view
-        sectors = sector_view.compute(today, rows)
-    except Exception as e:
-        print(f"[preview:{acct}] sector view skipped (non-fatal): {e}")
     return {'account': acct, 'label': PREVIEW_ACCOUNTS.get(acct, acct),
             'run_date': today, 'run_at': now.isoformat(), 'regime': regime,
             'holdings_count': len(rows), 'rows': rows, 'portfolio_risk': risk,
@@ -161,7 +171,9 @@ def call_rows(payload: dict) -> list:
         th = (r.get('indicators') or {}).get('thesis') or {}
         out.append({
             'account': payload['account'], 'run_date': payload['run_date'],
-            'symbol': r['symbol'], 'verdict': r.get('verdict'),
+            'symbol': r['symbol'], 'verdict': r.get('v1_verdict') or r.get('verdict'),
+            'sector_verdict': r.get('sector_verdict'), 'sector_trend': r.get('sector_trend'),
+            'sector_rule': r.get('sector_rule'),
             'trigger_type': r.get('trigger_type'), 'trend_score': r.get('trend_score'),
             'confidence': r.get('confidence'), 'regime': payload.get('regime'),
             'last_price': r.get('last_price'), 'quantity': r.get('quantity'),
