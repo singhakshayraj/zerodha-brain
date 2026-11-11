@@ -37,7 +37,8 @@ def test_preview_advises_holdings_and_writes_only_its_blob():
          patch.object(ap.fundamentals, 'load_store', return_value={'by_symbol': {}}), \
          patch.object(ap, 'news_sentiment', return_value=None), \
          patch.object(ap, 'log_calls', return_value=1) as logged, \
-         patch('universe_calls.grade_due', return_value=0):
+         patch('universe_calls.grade_due', return_value=0), \
+         patch('sector_view.compute', return_value={'groups': []}):
         n = ap.run_preview('natwar', FakeMD())
     assert logged.call_count == 1
     assert n == 1                                   # zero-qty holding skipped

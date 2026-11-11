@@ -386,6 +386,14 @@ def run_advisor(market_data) -> int:
                 print(f"[advisor.universe_calls] logged {n_log}, graded {n_grd}")
             except Exception as e:
                 print(f"[advisor.universe_calls] failed (non-fatal): {e}")
+            # Sector view (display only): your weight vs index, trend, mix.
+            try:
+                import sector_view
+                sv = sector_view.compute(run_date, rows)
+                db.write_config('sector_view_latest', json.dumps(sv, default=str))
+                print(f"[advisor.sectors] {len(sv['groups'])} groups")
+            except Exception as e:
+                print(f"[advisor.sectors] failed (non-fatal): {e}")
             sector_of = {u['symbol']: u.get('sector')
                          for u in config.NIFTY500_UNIVERSE}
             # Regime-adaptive gate: chop demands a wider score gap before a

@@ -91,9 +91,16 @@ def build_preview(market_data, acct: str, today: str = None) -> dict:
         risk = portfolio_risk(rows, sector_map=sector_map, closes_by_symbol=closes_by_symbol)
     except Exception as e:
         print(f"[preview:{acct}] risk skipped (non-fatal): {e}")
+    sectors = None
+    try:
+        import sector_view
+        sectors = sector_view.compute(today, rows)
+    except Exception as e:
+        print(f"[preview:{acct}] sector view skipped (non-fatal): {e}")
     return {'account': acct, 'label': PREVIEW_ACCOUNTS.get(acct, acct),
             'run_date': today, 'run_at': now.isoformat(), 'regime': regime,
-            'holdings_count': len(rows), 'rows': rows, 'portfolio_risk': risk}
+            'holdings_count': len(rows), 'rows': rows, 'portfolio_risk': risk,
+            'sector_view': sectors}
 
 
 def todays_universe_scores(today: str, exclude: set) -> dict:
