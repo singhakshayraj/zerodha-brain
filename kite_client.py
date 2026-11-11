@@ -133,7 +133,17 @@ class KiteClient:
     # --- PORTFOLIO ---
 
     def get_holdings(self) -> list:
-        return self._get('/portfolio/holdings') or []
+        """Holdings with bought-but-unsettled shares counted. Zerodha reports
+        a buy as `t1_quantity` until it settles, so `quantity` alone hid
+        yesterday's buys from the advisor for a day. `quantity` here is
+        settled + T1; the settled figure stays in `settled_quantity`."""
+        out = self._get('/portfolio/holdings') or []
+        for h in out:
+            t1 = h.get('t1_quantity') or 0
+            h['settled_quantity'] = h.get('quantity') or 0
+            if t1:
+                h['quantity'] = h['settled_quantity'] + t1
+        return out
 
     def get_positions(self) -> dict:
         data = self._get('/portfolio/positions')

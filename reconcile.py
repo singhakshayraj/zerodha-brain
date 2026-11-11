@@ -36,6 +36,7 @@ FOLLOW_WINDOW = 3             # trading days a call stays "standing"
 IMPACT_DAYS = 10
 SELL_CALLS = ('SELL', 'SELL_ON_BOUNCE', 'TRIM')
 INDEX = 'NIFTY 50'
+T1_IN_HOLDINGS_FROM = '2026-11-12'
 
 
 # ── pure core ────────────────────────────────────────────────────────────────
@@ -284,8 +285,11 @@ def run(account: str = 'primary') -> dict:
         return {'account': account, 'days': 0}
     a_day = anchor_time[:10]
     prior = [d for d in days if d < a_day]
-    pos = positions_by_day(anchor, anchor_time, fills, days,
-                           unsettled_from=prior[-1] if prior else a_day)
+    # Holdings count T+1 buys from 2026-11-12 (kite_client.get_holdings), so
+    # only the anchor day's own buys are missing; older anchors also missed
+    # the previous day's.
+    unsettled = a_day if a_day >= T1_IN_HOLDINGS_FROM else (prior[-1] if prior else a_day)
+    pos = positions_by_day(anchor, anchor_time, fills, days, unsettled_from=unsettled)
     rows = daily_pnl(days, pos, closes, [f for f in fills if str(f['trade_date']) >= START])
     now = datetime.now(IST).isoformat()
     for r in rows:
