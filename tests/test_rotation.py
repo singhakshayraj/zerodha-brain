@@ -139,7 +139,9 @@ def test_run_advisor_attaches_rotation_when_enabled():
          patch.object(pa, 'news_sentiment', return_value=None), \
          patch.object(pa.db, 'get_tradebook', return_value=[]), \
          patch.object(pa.db, 'upsert_tradebook', return_value=0), \
-         patch.object(pa.db, 'write_official_portfolio_advice', side_effect=capture):
+         patch.object(pa.db, 'write_official_portfolio_advice', side_effect=capture), \
+         patch('household.other_accounts_positions', return_value={'OTHER': 1_000_000}):
+        # A real household is large; a one-stock book would trip the 8% cap.
         n = pa.run_advisor(md)
 
     assert n == 1

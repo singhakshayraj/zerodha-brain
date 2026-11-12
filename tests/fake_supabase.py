@@ -63,9 +63,11 @@ class _Query:
         rows = self.db.tables.setdefault(self.table, [])
         self.db.calls.append((self.table, self.op, self.kw))
         if self.op == 'upsert':
-            keys = [k.strip() for k in (self.kw['on_conflict'] or 'id').split(',')]
+            default = 'key' if self.table == 'app_config' else 'id'
+            keys = [k.strip() for k in (self.kw['on_conflict'] or default).split(',')]
             for new in self.payload:
-                hit = next((r for r in rows if all(r.get(k) == new.get(k) for k in keys)), None)
+                hit = None if any(new.get(k) is None for k in keys) else \
+                    next((r for r in rows if all(r.get(k) == new.get(k) for k in keys)), None)
                 if hit is None:
                     rows.append(dict(new))
                 elif not self.kw['ignore_duplicates']:

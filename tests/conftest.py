@@ -60,6 +60,18 @@ def few_candles():
     ] * 5
 
 
+@pytest.fixture(autouse=True)
+def _no_production_database():
+    """Every test runs against an in-memory Supabase. Production must be
+    unreachable from the suite: on 2026-11-13 a full-advisor test wrote its
+    fake 'LOSER' holding into the live app_config (sector_view_latest,
+    portfolio_risk_latest). Tests that need specific behaviour still patch
+    database.supabase / db.* themselves; that patch wins."""
+    from tests.fake_supabase import FakeSupabase
+    with patch("database.supabase", FakeSupabase()):
+        yield
+
+
 @pytest.fixture
 def mock_supabase():
     """Mock Supabase client — prevents any real DB calls."""
