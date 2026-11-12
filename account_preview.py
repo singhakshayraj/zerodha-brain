@@ -95,7 +95,7 @@ def build_preview(market_data, acct: str, today: str = None) -> dict:
     except Exception as e:
         print(f"[preview:{acct}] sector layer skipped (non-fatal): {e}")
     try:
-        attach_rotations(rows, today, regime)
+        attach_rotations(rows, today, regime, acct)
     except Exception as e:
         print(f"[preview:{acct}] rotation skipped (non-fatal): {e}")
     try:
@@ -128,7 +128,7 @@ def todays_universe_scores(today: str, exclude: set) -> dict:
     return out
 
 
-def attach_rotations(rows: list, today: str, regime: str) -> int:
+def attach_rotations(rows: list, today: str, regime: str, account: str = 'natwar') -> int:
     """Same rotation call as the official run (gate + sizing), fed from today's
     stored scan. Returns targets attached."""
     scored = todays_universe_scores(today, {r['symbol'] for r in rows})
@@ -136,10 +136,25 @@ def attach_rotations(rows: list, today: str, regime: str) -> int:
         return 0
     sector_of = {u['symbol']: u.get('sector') for u in config.NIFTY500_UNIVERSE}
     min_gap = market_regime.rotation_min_gap_for(regime)
+    try:                                     # household book (P-53)
+        import household
+        guard = household.guard_for(account, rows)
+    except Exception as e:
+        print(f"[preview] household unavailable (non-fatal): {e}")
+        guard = None
     n = 0
     for row in rows:
-        t = find_rotation_candidate(row.get('trend_score'), sector_of.get(row['symbol']),
-                                    scored, min_gap=min_gap)
+        if guard is not None:
+            buy = household.buy_estimate(row)
+            t, note = household.pick(row.get('trend_score'), sector_of.get(row['symbol']),
+                                     scored, guard, buy, min_gap=min_gap)
+            if t:
+                guard.commit(row['symbol'], buy / household.DEPLOY, t['symbol'], buy)
+            if note:
+                row.setdefault('indicators', {})['household'] = note
+        else:
+            t = find_rotation_candidate(row.get('trend_score'), sector_of.get(row['symbol']),
+                                        scored, min_gap=min_gap)
         if not t:
             continue
         row['rotation_target_symbol'] = t['symbol']

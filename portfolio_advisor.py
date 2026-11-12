@@ -426,10 +426,28 @@ def run_advisor(market_data) -> int:
             if min_gap != config.ROTATION_MIN_GAP:
                 print(f"[advisor.regime] rotation gap widened to {min_gap} "
                       f"({regime})")
+            # Household book (P-53): both accounts as one portfolio for
+            # where freed money goes. Falls back to the plain rule on error.
+            try:
+                import household
+                guard = household.guard_for('primary', rows)
+            except Exception as e:
+                print(f"[advisor.household] unavailable (non-fatal): {e}")
+                guard = None
             for row in rows:
-                target = find_rotation_candidate(
-                    row.get('trend_score'), sector_of.get(row['symbol']),
-                    scored, min_gap=min_gap)
+                if guard is not None:
+                    buy = household.buy_estimate(row)
+                    target, hh_note = household.pick(
+                        row.get('trend_score'), sector_of.get(row['symbol']),
+                        scored, guard, buy, min_gap=min_gap)
+                    if target:
+                        guard.commit(row['symbol'], buy / household.DEPLOY, target['symbol'], buy)
+                    if hh_note:
+                        row.setdefault('indicators', {})['household'] = hh_note
+                else:
+                    target = find_rotation_candidate(
+                        row.get('trend_score'), sector_of.get(row['symbol']),
+                        scored, min_gap=min_gap)
                 if target:
                     row['rotation_target_symbol'] = target['symbol']
                     row['rotation_target_score'] = target['score']

@@ -66,7 +66,9 @@ def test_rotation_targets_come_from_todays_stored_scan():
                  'advisor_score_updated_at': '2026-11-09T10:00:00+05:30',
                  'advisor_detail': {'last_price': 10.0}}]
     with patch.object(ap.db, 'get_universe_by_sector', return_value=universe, create=True), \
-         patch.object(ap.market_regime, 'rotation_min_gap_for', return_value=40):
+         patch.object(ap.market_regime, 'rotation_min_gap_for', return_value=40), \
+         patch('household.other_accounts_positions', return_value={'BIG': 1_000_000}), \
+         patch('household._index_weights', return_value={}):
         n = ap.attach_rotations(rows, '2026-11-11', 'trend')
     assert n == 1
     assert rows[0]['rotation_target_symbol'] == 'ZZZ'       # stale OLD row ignored
