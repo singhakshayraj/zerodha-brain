@@ -318,6 +318,19 @@ def _maybe_sync_daily_bars() -> bool:
 _preview_done = {}     # acct -> (date, token) already attempted
 
 
+PREVIEW_SCAN_DEADLINE = (11, 30)
+
+
+def _scan_landed(today: str) -> bool:
+    """True once today's universe scan rows exist (non-fatal: False on error)."""
+    try:
+        res = (db.supabase.table('universe_calls').select('symbol')
+               .eq('run_date', today).limit(1).execute())
+        return bool(res.data)
+    except Exception:
+        return False
+
+
 def _maybe_run_account_previews() -> None:
     """P-45 provisional: once per trading day per preview account, after the
     primary advisor has stored today's official batch, advise that account's
@@ -330,6 +343,12 @@ def _maybe_run_account_previews() -> None:
         return
     rh, rm = _parse_hhmm(config.ADVISOR_RUN_AFTER_IST, (9, 45))
     if (now.hour, now.minute) < (rh, rm):
+        return
+    # Rotation targets, sector trends and the universe log all come from the
+    # primary run's daily scan; previewing before it lands leaves every call
+    # without a target (2026-11-12: 0/28). Wait for it, but not past
+    # PREVIEW_SCAN_DEADLINE in case the official run never completes.
+    if not _scan_landed(today) and (now.hour, now.minute) < PREVIEW_SCAN_DEADLINE:
         return
     for acct in account_preview.PREVIEW_ACCOUNTS:
         token = db.get_config(account_preview.token_key(acct))
