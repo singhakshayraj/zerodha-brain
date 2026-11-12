@@ -316,6 +316,30 @@ def last_completed_trading_day(now_ist) -> str:
     return d.isoformat()
 
 
+def preview_account_holdings(known: set) -> list:
+    """[(symbol, instrument_token)] held in preview accounts and not in
+    `known`. Non-fatal per account."""
+    out = []
+    try:
+        import account_preview
+        from kite_client import KiteClient
+        for acct in account_preview.PREVIEW_ACCOUNTS:
+            tok = db.get_config(account_preview.token_key(acct))
+            if not tok:
+                continue
+            try:
+                for h in KiteClient(tok).get_holdings() or []:
+                    s, t = h.get('tradingsymbol'), h.get('instrument_token')
+                    if s and t and s not in known:
+                        out.append((s, t))
+                        known.add(s)
+            except Exception as e:
+                print(f"[daily_bars] {acct} holdings unavailable (non-fatal): {e}")
+    except Exception as e:
+        print(f"[daily_bars] preview accounts skipped (non-fatal): {e}")
+    return out
+
+
 def _has_day_bars(sym: str) -> bool:
     try:
         return bool(db.supabase.table('candles').select('symbol').eq('symbol', sym)
@@ -353,6 +377,12 @@ def sync_daily_bars(market_data, now_ist=None) -> int:
         raise
     except Exception as e:
         print(f"[daily_bars] holdings list unavailable (non-fatal): {e}")
+    # Preview accounts' holdings too (their own token for the LIST only; the
+    # bars come through this token by instrument). A dead preview token never
+    # affects the primary sync.
+    for sym, tok in preview_account_holdings({s for s, _ in jobs}):
+        jobs.append((sym, tok))
+        held.add(sym)
     total, failed = 0, []
     for sym, tok in jobs:
         try:
