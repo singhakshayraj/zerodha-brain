@@ -59,3 +59,11 @@ def test_other_accounts_same_day_suggested_buys_count():
              'rotation_target_symbol': 'LTTS', 'rotation_buy_qty': 17, 'rotation_buy_price': 4249.0}]
     assert hh.add_rows({}, rows, pending=True) == {'SILVERBEES': 74800.0, 'LTTS': 72233.0}
     assert hh.add_rows({}, rows, pending=False) == {'SILVERBEES': 74800.0}
+
+
+def test_same_sector_swap_nets_out_the_sold_holding():
+    sector = {**SECTOR, 'BANKBARODA': 'Financial Services'}
+    g = hh.Guard({'SBIN': 2000, 'PNB': 17500, 'X': 80500}, sector, {})   # PSU banks 19.5%
+    ok, why = g.check('BANKBARODA', 1900, sold_sym='SBIN', sold_inr=2000)
+    assert ok is True, why                                   # 19.5 + 1.9 - 2.0 stays under 20%
+    assert g.check('BANKBARODA', 1900)[0] is False           # without netting it would breach

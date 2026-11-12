@@ -42,9 +42,11 @@ class Guard:
         v = sum(val for s, val in self.value.items() if self.group(s) == g)
         return (v + extra) / self.total * 100
 
-    def check(self, sym: str, buy_inr: float):
-        """(ok, reason) for buying buy_inr of sym."""
+    def check(self, sym: str, buy_inr: float, sold_sym: str = None, sold_inr: float = 0.0):
+        """(ok, reason) for buying buy_inr of sym, funded by selling sold_inr
+        of sold_sym (a same-sector swap must not count the sold holding)."""
         g = self.group(sym)
+        freed_here = sold_inr if sold_sym and self.group(sold_sym) == g else 0.0
         held = self.value.get(sym, 0.0)
         capped = g not in NOT_SECTORS
         if held and (held + buy_inr) / self.total * 100 > DUP_CAP_PCT:
@@ -52,8 +54,9 @@ class Guard:
                            f"{(held + buy_inr) / self.total * 100:.1f}% after this buy (cap {DUP_CAP_PCT:.0f}%)")
         if (held + buy_inr) / self.total * 100 > SINGLE_NAME_CAP_PCT:
             return False, f"{sym} would exceed {SINGLE_NAME_CAP_PCT:.0f}%"
-        if capped and self.group_pct(g, buy_inr) > SECTOR_CAP_PCT:
-            return False, f"{g} would be {self.group_pct(g, buy_inr):.0f}% of the household (cap {SECTOR_CAP_PCT:.0f}%)"
+        after = self.group_pct(g, buy_inr - freed_here)
+        if capped and after > SECTOR_CAP_PCT:
+            return False, f"{g} would be {after:.0f}% of the household (cap {SECTOR_CAP_PCT:.0f}%)"
         return True, None
 
     def underweight(self, sym: str) -> bool:
@@ -68,7 +71,7 @@ class Guard:
 
 
 def pick(exit_score, sector: str, scored: dict, guard: Guard, buy_inr: float,
-         min_gap: int = None, min_target: int = None):
+         min_gap: int = None, min_target: int = None, sold_sym: str = None):
     """Household-aware rotation target, or None. Same gate as
     advisor_rotation.find_rotation_candidate; returns (target, note)."""
     min_gap = config.ROTATION_MIN_GAP if min_gap is None else min_gap
@@ -83,7 +86,7 @@ def pick(exit_score, sector: str, scored: dict, guard: Guard, buy_inr: float,
     for c in ranked:
         if c.get('sector') and not guard.sector_of.get(c['symbol']):
             guard.sector_of[c['symbol']] = c['sector']
-        good, why = guard.check(c['symbol'], buy_inr)
+        good, why = guard.check(c['symbol'], buy_inr, sold_sym, buy_inr / DEPLOY)
         if good:
             ok.append(c)
         elif len(skipped) < 3:

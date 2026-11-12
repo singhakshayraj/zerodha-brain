@@ -22,3 +22,8 @@ def test_parse_console_export():
     assert (r['symbol'], r['trade_type'], r['quantity'], r['price'], r['trade_id'], r['order_id']) == \
            ('TATAPOWER', 'sell', 50.0, 381.0, '608591307', '1300000096883861')
     assert r['executed_at'] == '2026-04-01T15:10:22+05:30' and r['source'] == 'console_import'
+
+
+def test_parse_tags_account():
+    assert it.parse(TABLE, 'natwar')[0]['account'] == 'natwar'
+    assert it.parse(TABLE)[0]['account'] == 'primary'

@@ -147,9 +147,7 @@ def attach_rotations(rows: list, today: str, regime: str, account: str = 'natwar
         if guard is not None:
             buy = household.buy_estimate(row)
             t, note = household.pick(row.get('trend_score'), sector_of.get(row['symbol']),
-                                     scored, guard, buy, min_gap=min_gap)
-            if t:
-                guard.commit(row['symbol'], buy / household.DEPLOY, t['symbol'], buy)
+                                     scored, guard, buy, min_gap=min_gap, sold_sym=row['symbol'])
             if note:
                 row.setdefault('indicators', {})['household'] = note
         else:
@@ -163,6 +161,9 @@ def attach_rotations(rows: list, today: str, regime: str, account: str = 'natwar
         sizing = size_rotation(row.get('verdict'), row.get('quantity'),
                                row.get('last_price'), t.get('last_close'))
         row.update(sizing)
+        if guard is not None and sizing.get('rotation_buy_qty'):
+            guard.commit(row['symbol'], sizing.get('rotation_freed_inr') or 0, t['symbol'],
+                         sizing['rotation_buy_qty'] * (sizing.get('rotation_buy_price') or 0))
         size_note = ''
         if sizing.get('rotation_buy_qty'):
             size_note = (f" Size: sell {sizing['rotation_sell_qty']} "

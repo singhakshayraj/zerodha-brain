@@ -439,9 +439,7 @@ def run_advisor(market_data) -> int:
                     buy = household.buy_estimate(row)
                     target, hh_note = household.pick(
                         row.get('trend_score'), sector_of.get(row['symbol']),
-                        scored, guard, buy, min_gap=min_gap)
-                    if target:
-                        guard.commit(row['symbol'], buy / household.DEPLOY, target['symbol'], buy)
+                        scored, guard, buy, min_gap=min_gap, sold_sym=row['symbol'])
                     if hh_note:
                         row.setdefault('indicators', {})['household'] = hh_note
                 else:
@@ -461,6 +459,12 @@ def run_advisor(market_data) -> int:
                     # flags + refuse/resize when enabled; True = rotation refused.
                     if apply_rotation_quality(row, target, sizing, total_value):
                         continue
+                    # Record the buy in the household only once it is real
+                    # (sized and not refused by the entry-quality gate).
+                    if guard is not None and sizing.get('rotation_buy_qty'):
+                        guard.commit(row['symbol'], sizing.get('rotation_freed_inr') or 0,
+                                     target['symbol'],
+                                     sizing['rotation_buy_qty'] * (sizing.get('rotation_buy_price') or 0))
                     size_note = ''
                     if sizing.get('rotation_buy_qty'):
                         size_note = (f" Size: sell {sizing['rotation_sell_qty']} "

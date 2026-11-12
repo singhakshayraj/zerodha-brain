@@ -322,10 +322,12 @@ PREVIEW_SCAN_DEADLINE = (11, 30)
 
 
 def _scan_landed(today: str) -> bool:
-    """True once today's universe scan rows exist (non-fatal: False on error)."""
+    """True once today's official primary run is stored — written after its
+    scan AND its rotations, so the household guard sees the primary's
+    same-day buys (non-fatal: False on error)."""
     try:
-        res = (db.supabase.table('universe_calls').select('symbol')
-               .eq('run_date', today).limit(1).execute())
+        res = (db.supabase.table('portfolio_advice').select('symbol')
+               .eq('run_date', today).eq('is_official', True).limit(1).execute())
         return bool(res.data)
     except Exception:
         return False

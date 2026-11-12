@@ -194,6 +194,8 @@ def ledger(fills: list, calls: list, closes: dict, days: list) -> list:
         if (sym, rd) in acted:
             continue
         fwd = [x for x in days if x >= rd][:FOLLOW_WINDOW + 1]
+        if len(fwd) < FOLLOW_WINDOW + 1:
+            continue                         # window still open — not ignored yet
         if sold_days[sym] & set(fwd):
             continue
         i = bisect_right(days, rd)
@@ -255,8 +257,10 @@ def _load(account: str):
                        .eq('run_date', last[0]['run_date']).execute().data) if last else []
         anchor_time = _ist(last[0]['created_at']) if last else '1970-01-01'
         calls = _paged(lambda: sb.table('account_calls')
-                       .select('symbol,run_date,verdict,quantity,last_price,rotation_target_symbol')
+                       .select('symbol,run_date,verdict,sector_verdict,quantity,last_price,rotation_target_symbol')
                        .eq('account', account).order('run_date'))
+        for c in calls:                      # the call this account was SHOWN (sector layer)
+            c['verdict'] = c.get('sector_verdict') or c['verdict']
         obs = [{'symbol': c['symbol'], 'run_date': c['run_date'], 'last_price': c['last_price']}
                for c in calls]
     anchor = {r['symbol']: r['quantity'] for r in anchor_rows if r.get('quantity')}

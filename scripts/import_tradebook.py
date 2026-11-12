@@ -1,6 +1,6 @@
 """Import a Zerodha Console tradebook export (Equity) into `tradebook`.
 
-    python3 scripts/import_tradebook.py data/console/tradebook-EQ-<date>.xlsx
+    python3 scripts/import_tradebook.py data/console/tradebook-EQ-<date>.xlsx [--account natwar]
 
 Console -> Reports -> Tradebook -> Equity -> date range -> download (.xlsx or
 .csv). Upserts on (exchange, trade_id, order_id), the same key the live
@@ -31,7 +31,7 @@ def read_rows(path: str) -> list:
         return list(csv.reader(f))
 
 
-def parse(table: list) -> list:
+def parse(table: list, account: str = 'primary') -> list:
     """Pure: Console table -> tradebook rows. Header is the row containing
     'Symbol' and 'Trade ID'; leading blank columns and title rows ignored."""
     hdr_i = next(i for i, r in enumerate(table)
@@ -54,15 +54,21 @@ def parse(table: list) -> list:
             'trade_id': str(g('trade_id')).strip(), 'order_id': str(g('order_id')).strip(),
             'executed_at': (ts + '+05:30') if ts and '+' not in ts else (ts or None),
             'source': 'console_import',
+            'account': account,
         })
     return out
 
 
 def main():
-    if len(sys.argv) != 2:
+    args = sys.argv[1:]
+    account = 'primary'
+    if '--account' in args:
+        account = args[args.index('--account') + 1]
+        args = [a for a in args if a not in ('--account', account)]
+    if len(args) != 1:
         sys.exit(__doc__)
     import database as db
-    rows = parse(read_rows(sys.argv[1]))
+    rows = parse(read_rows(args[0]), account)
     if not rows:
         sys.exit("no fills found in the file")
     n = 0

@@ -316,6 +316,14 @@ def last_completed_trading_day(now_ist) -> str:
     return d.isoformat()
 
 
+def _has_day_bars(sym: str) -> bool:
+    try:
+        return bool(db.supabase.table('candles').select('symbol').eq('symbol', sym)
+                    .eq('interval', 'day').limit(1).execute().data)
+    except Exception:
+        return True                          # unknown: don't trigger a big refetch
+
+
 def sync_daily_bars(market_data, now_ist=None) -> int:
     """Upsert every completed daily bar newer than the watermark, then advance
     it. Idempotent; a missed day is backfilled by the next live token (Kite
@@ -332,12 +340,15 @@ def sync_daily_bars(market_data, now_ist=None) -> int:
         for k, t in config.NIFTY500_INSTRUMENT_TOKENS.items()]
     # Held names outside the Nifty 500 (ETFs, small caps): the P&L
     # reconciliation marks every holding to its close, so they need bars too.
+    held = set()
     try:
         known = {s for s, _ in jobs}
-        jobs += [(h['tradingsymbol'], h['instrument_token'])
+        extra = [(h['tradingsymbol'], h['instrument_token'])
                  for h in market_data.kite.get_holdings() or []
                  if h.get('tradingsymbol') and h.get('instrument_token')
                  and h['tradingsymbol'] not in known]
+        held = {s for s, _ in extra}
+        jobs += extra
     except TokenExpiredError:
         raise
     except Exception as e:
@@ -347,10 +358,16 @@ def sync_daily_bars(market_data, now_ist=None) -> int:
         try:
             market_data._instrument_cache[f'NSE:{sym}'] = tok
             bars = market_data.get_candles(f'NSE:{sym}', 'day', 400) or []
+            # A held name seen for the first time gets the whole window from
+            # DAILY_BARS_START, not just bars past the shared watermark.
+            since = through
+            if sym in held and not _has_day_bars(sym):
+                since = DAILY_BARS_START
             new = [b for b in bars
-                   if through < str(b.get('timestamp', ''))[:10] <= target]
+                   if since < str(b.get('timestamp', ''))[:10] <= target]
             if not new:
-                failed.append(sym)
+                if sym not in held:          # illiquid holdings never block the watermark
+                    failed.append(sym)
                 continue
             n = db.upsert_candles(
                 db.candle_rows(None, sym, 'NSE', new, 'day', tail=len(new)))
@@ -364,7 +381,8 @@ def sync_daily_bars(market_data, now_ist=None) -> int:
             return total
         except Exception as e:
             print(f"[daily_bars] {sym} failed: {e}")
-            failed.append(sym)
+            if sym not in held:
+                failed.append(sym)
 
     if len(failed) <= _MAX_SYNC_FAILURES:
         db.write_config(DAILY_BARS_KEY, target)

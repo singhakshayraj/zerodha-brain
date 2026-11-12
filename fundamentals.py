@@ -101,6 +101,8 @@ def map_headers(headers: list) -> dict:
                 continue
             if field in ('opm', 'eps', 'high_52w', 'low_52w') and 'last year' in hl:
                 continue
+            if field in ('high_52w', 'low_52w') and ('down from' in hl or 'up from' in hl):
+                continue                     # 'Down from 52w high %' is a distance, not a price
             if field in ('fii', 'dii', 'promoter') and 'change' in hl:
                 continue
             if field in ('roce', 'roe') and ('avg' in hl or 'average' in hl):
@@ -272,13 +274,16 @@ def match_symbols(rows: list, universe: dict, extra_names: dict = None):
 def merge_store(existing: dict, rows: list, asof: str = None) -> dict:
     """Merge parsed+matched rows into the store dict, field by field: a
     second paste with different columns (the extended export) adds to a
-    symbol's record instead of replacing it. None values never overwrite."""
+    symbol's record instead of replacing it; a blank in a pasted column
+    clears that field."""
     asof = asof or date.today().isoformat()
     store = {'asof': asof, 'by_symbol': dict((existing or {}).get('by_symbol') or {})}
     for r in rows:
         rec = dict(store['by_symbol'].get(r['symbol']) or {})
-        rec.update({k: v for k, v in r.items()
-                    if k not in ('name', 'symbol', 'sector') and v is not None})
+        # Every column in this paste overwrites — a blank cell clears a stale
+        # value (P/E gone blank on a loss). Columns absent from the paste are
+        # untouched, so a second export still extends the record.
+        rec.update({k: v for k, v in r.items() if k not in ('name', 'symbol', 'sector')})
         rec['asof'] = asof
         rec['name'] = r.get('name')
         store['by_symbol'][r['symbol']] = rec

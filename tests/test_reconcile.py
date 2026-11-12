@@ -68,3 +68,14 @@ def test_unsettled_buys_are_added_on_top_of_a_post_trade_snapshot():
 
 def test_ist_parses_short_microseconds():
     assert rc._ist('2026-11-11T13:33:18.41192+00:00') == '2026-11-11T19:03:18'
+
+
+def test_ignored_only_after_the_follow_window_closes():
+    days = ['2026-11-02', '2026-11-03', '2026-11-04']           # window needs 4 trading days
+    closes = {'H': {d: 80 for d in days}}
+    calls = [{'symbol': 'H', 'run_date': '2026-11-02', 'verdict': 'SELL', 'quantity': 10,
+              'last_price': 100, 'rotation_target_symbol': None}]
+    assert rc.ledger([], calls, closes, days) == []
+    days5 = days + ['2026-11-05', '2026-11-06']
+    closes5 = {'H': {d: 80 for d in days5}}
+    assert [r['kind'] for r in rc.ledger([], calls, closes5, days5)] == ['ignored_call']

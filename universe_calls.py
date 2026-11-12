@@ -71,9 +71,11 @@ def log_scan(scored: dict, run_date: str, regime: str = None) -> int:
         sector_tilt.apply(rows, sector_tilt.sector_trends(rows, sector_of), sector_of)
     except Exception as e:
         print(f"[universe_calls] sector tilt skipped (non-fatal): {e}")
+    # First scan of the day is the call: a forced re-run never moves the
+    # baseline price or verdict the grader measures from.
     for i in range(0, len(rows), 500):
-        db.supabase.table(TABLE).upsert(rows[i:i + 500],
-                                        on_conflict='run_date,symbol').execute()
+        db.supabase.table(TABLE).upsert(rows[i:i + 500], on_conflict='run_date,symbol',
+                                        ignore_duplicates=True).execute()
     return len(rows)
 
 
