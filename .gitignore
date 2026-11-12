@@ -8,3 +8,4 @@ data/daily_history.pkl
 data/console/
 data/*screener*.txt
 data/hero_picks_*.csv
+data/universe_extended*.txt
