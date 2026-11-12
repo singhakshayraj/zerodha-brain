@@ -53,8 +53,11 @@ def front_month_tokens(today: str) -> dict:
 
 
 def _series(market_data, name: str, token: int, n: int = 400) -> dict:
+    from advisor_scoring import completed_bars
     market_data._instrument_cache[f'MACRO:{name}'] = token
-    bars = market_data.get_candles(f'MACRO:{name}', 'day', n) or []
+    # Completed sessions only: during market hours Kite returns today's
+    # forming bar, which must not be stored as the day's close.
+    bars = completed_bars(market_data.get_candles(f'MACRO:{name}', 'day', n) or [])
     return {str(b['timestamp'])[:10]: float(b['close']) for b in bars if b.get('close') is not None}
 
 
@@ -85,6 +88,18 @@ def build_rows(series: dict, breadth: dict = None) -> list:
         data['fii_net_cr'] = None                  # no clean source yet
         rows.append({'date': d, 'data': data})
     return rows
+
+
+def merge_data(existing: dict, fresh: dict) -> dict:
+    """Pure: fresh market fields over the stored row; keys only the stored
+    row has (fii, dii, fut, valuation, fii_net_cr set by the importer) survive.
+    fresh's None placeholders never clobber a stored value."""
+    out = dict(existing or {})
+    for k, v in fresh.items():
+        if v is None and out.get(k) is not None:
+            continue
+        out[k] = v
+    return out
 
 
 def breadth_from_calls(run_date: str) -> dict:
@@ -121,6 +136,13 @@ def run(market_data, today: str = None, backfill_days: int = 30) -> int:
         except Exception:
             pass
     out = rows[-backfill_days:]
+    # Merge, never replace: other jobs put fii/dii/fut/valuation on these rows.
+    if out:
+        have = {r['date']: r['data'] for r in (
+            db.supabase.table('macro_daily').select('date,data')
+            .gte('date', out[0]['date']).lte('date', out[-1]['date']).execute().data or [])}
+        for r in out:
+            r['data'] = merge_data(have.get(r['date']), r['data'])
     for i in range(0, len(out), 200):
         db.supabase.table('macro_daily').upsert(out[i:i + 200], on_conflict='date').execute()
     last = out[-1]['data'] if out else {}

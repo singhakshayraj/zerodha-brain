@@ -16,3 +16,12 @@ def test_build_rows_moves_and_vix_change():
     assert last['crude']['d1'] == 0.0 and last['crude']['d5'] is None
     assert last['breadth'] == {'n': 480} and 'breadth' not in rows[0]['data']
     assert last['fii_net_cr'] is None
+
+
+def test_merge_data_keeps_importer_fields_and_refreshes_market_fields():
+    stored = {'nifty': {'close': 1}, 'fii_net_cr': 12563.33, 'fii': {'net': 12563.33}, 'fut': {'fii_net': -70413}}
+    fresh = {'nifty': {'close': 2}, 'vix': {'close': 17}, 'fii_net_cr': None}
+    m = ms.merge_data(stored, fresh)
+    assert m['nifty']['close'] == 2 and m['vix']['close'] == 17
+    assert m['fii_net_cr'] == 12563.33 and m['fii']['net'] == 12563.33 and m['fut']['fii_net'] == -70413
+    assert ms.merge_data(None, fresh)['fii_net_cr'] is None
