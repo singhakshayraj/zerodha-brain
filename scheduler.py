@@ -315,7 +315,7 @@ def _maybe_sync_daily_bars() -> bool:
     return True
 
 
-_preview_done = {}     # acct -> (date, token) already attempted
+_preview_done = {}     # acct -> (date, token, scan_landed) already attempted
 
 
 PREVIEW_SCAN_DEADLINE = (11, 30)
@@ -350,21 +350,27 @@ def _maybe_run_account_previews() -> None:
     # primary run's daily scan; previewing before it lands leaves every call
     # without a target (2026-11-12: 0/28). Wait for it, but not past
     # PREVIEW_SCAN_DEADLINE in case the official run never completes.
-    if not _scan_landed(today) and (now.hour, now.minute) < PREVIEW_SCAN_DEADLINE:
+    # A preview that ran without the scan (deadline fallback, or tokens pasted
+    # after it: 2026-11-13, 0/15 targets) reruns once when the scan lands and
+    # replaces that day's calls.
+    landed = _scan_landed(today)
+    if not landed and (now.hour, now.minute) < PREVIEW_SCAN_DEADLINE:
         return
     for acct in account_preview.PREVIEW_ACCOUNTS:
         token = db.get_config(account_preview.token_key(acct))
-        if not token or _preview_done.get(acct) == (today, token):
+        prev = _preview_done.get(acct)
+        if not token or prev in ((today, token, True), (today, token, landed)):
             continue
-        _preview_done[acct] = (today, token)
+        rerun = prev == (today, token, False)
+        _preview_done[acct] = (today, token, landed)
         if not _token_is_live(token):
             print(f"[preview:{acct}] token not live — skipped today")
             continue
 
-        def _run(acct=acct, token=token):
+        def _run(acct=acct, token=token, rerun=rerun):
             try:
                 from market_data import MarketData
-                account_preview.run_preview(acct, MarketData(KiteClient(token)))
+                account_preview.run_preview(acct, MarketData(KiteClient(token)), overwrite=rerun)
             except Exception as e:
                 print(f"[preview:{acct}] failed (non-fatal): {e}")
 

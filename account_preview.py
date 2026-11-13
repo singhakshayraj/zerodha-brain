@@ -199,24 +199,25 @@ def call_rows(payload: dict) -> list:
     return [x for x in out if x['verdict']]
 
 
-def log_calls(payload: dict) -> int:
+def log_calls(payload: dict, overwrite: bool = False) -> int:
     """First preview of the day is the call: later same-day runs (a re-pasted
-    token) never overwrite it."""
+    token) never overwrite it — except the rerun after the primary scan
+    lands, which replaces calls made without rotation targets."""
     rows = call_rows(payload)
     if rows:
         db.supabase.table(CALLS_TABLE).upsert(
             rows, on_conflict='account,run_date,symbol',
-            ignore_duplicates=True).execute()
+            ignore_duplicates=not overwrite).execute()
     return len(rows)
 
 
-def run_preview(acct: str, market_data) -> int:
+def run_preview(acct: str, market_data, overwrite: bool = False) -> int:
     """Build and store the preview. Returns rows stored."""
     payload = build_preview(market_data, acct)
     db.write_config(result_key(acct), json.dumps(payload, default=str))
     try:
         import universe_calls
-        n_log = log_calls(payload)
+        n_log = log_calls(payload, overwrite)
         n_grd = universe_calls.grade_due(payload['run_date'], CALLS_TABLE,
                                          'account,run_date,symbol')
         print(f"[preview:{acct}] calls logged {n_log}, graded {n_grd}")
