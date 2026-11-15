@@ -31,6 +31,7 @@ def test_every_rule_fires_with_its_number():
     # banks: leverage rules don't apply
     assert 'interest_coverage' not in _names(td.flags_from_fundamentals(bad, 'Financial Services'))
     assert _names(td.flags_from_fundamentals(None)) == ['no_fundamentals']
+    assert 'low_promoter' not in _names(td.flags_from_fundamentals({**CLEAN, 'promoter': 0.0}))   # L&T
 
 
 def test_news_and_attach():

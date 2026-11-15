@@ -29,7 +29,7 @@ def flags_from_fundamentals(f: dict, sector: str = None) -> list:
     if pc is not None and pc <= -5:
         add('promoter_selling', 'red', f"promoter holding down {abs(pc):g}pp in 3y")
     pr = f.get('promoter')
-    if pr is not None and pr < 25:
+    if pr and pr < 25:                       # 0 = no promoter group (L&T, ITC): not a flag
         add('low_promoter', 'amber', f"promoter holding {pr:g}%")
     fc = f.get('fii_change')
     if fc is not None and fc <= -2:
