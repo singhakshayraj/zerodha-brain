@@ -38,6 +38,7 @@ from advisor_digest import (  # noqa: F401  facade re-export (SE4 split)
     build_digest, build_decision_keyboard, send_daily_digest,
 )
 import market_regime
+import sector_view
 import news_jobs
 import telegram  # noqa: F401  facade re-export (tests patch pa.telegram)
 from indicators import run_all_indicators
@@ -435,6 +436,8 @@ def run_advisor(market_data) -> int:
                 print(f"[advisor.household] unavailable (non-fatal): {e}")
                 guard = None
             for row in rows:
+                if sector_view.is_etf(row['symbol']):   # hedge sleeve: never rotated out
+                    continue
                 if guard is not None:
                     buy = household.buy_estimate(row)
                     target, hh_note = household.pick(

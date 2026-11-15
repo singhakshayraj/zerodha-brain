@@ -17,6 +17,7 @@ import config
 import database as db
 import fundamentals
 import market_regime
+import sector_view
 import thesis
 from advisor_risk import portfolio_risk
 from advisor_rotation import find_rotation_candidate, size_rotation
@@ -144,6 +145,8 @@ def attach_rotations(rows: list, today: str, regime: str, account: str = 'natwar
         guard = None
     n = 0
     for row in rows:
+        if sector_view.is_etf(row['symbol']):   # hedge sleeve: never rotated out
+            continue
         if guard is not None:
             buy = household.buy_estimate(row)
             t, note = household.pick(row.get('trend_score'), sector_of.get(row['symbol']),

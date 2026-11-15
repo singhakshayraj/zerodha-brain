@@ -95,3 +95,18 @@ def test_call_rows_one_per_holding_with_thesis_and_rotation():
     r = rows[0]
     assert (r['account'], r['symbol'], r['verdict'], r['thesis_action'], r['quality'], r['rotation_target_symbol']) == \
            ('natwar', 'DABUR', 'SELL', 'HOLD', 72, 'MARICO')
+
+
+def test_etf_holdings_are_never_rotated_out():
+    """ETFs are the hedge sleeve (P-53): a weak GOLDBEES gets no target."""
+    rows = [{'symbol': 'GOLDBEES', 'verdict': 'SELL', 'trend_score': -30,
+             'quantity': 10, 'last_price': 100.0, 'reasons': []}]
+    universe = [{'symbol': 'ZZZ', 'advisor_score': 90, 'sector': 'X',
+                 'advisor_score_updated_at': '2026-11-11T10:00:00+05:30',
+                 'advisor_detail': {'last_price': 50.0}}]
+    with patch.object(ap.db, 'get_universe_by_sector', return_value=universe, create=True), \
+         patch.object(ap.market_regime, 'rotation_min_gap_for', return_value=40), \
+         patch('household.other_accounts_positions', return_value={}), \
+         patch('household._index_weights', return_value={}):
+        assert ap.attach_rotations(rows, '2026-11-11', 'trend') == 0
+    assert 'rotation_target_symbol' not in rows[0]

@@ -30,8 +30,12 @@ CAPITAL_MARKETS = {'HDFCAMC', 'ICICIAMC', 'NAM-INDIA', 'UTIAMC', 'ABSLAMC',
 PSU_LENDERS = {'PFC', 'RECLTD', 'IRFC', 'IREDA', 'HUDCO', 'IFCI'}
 
 
+def is_etf(symbol: str) -> bool:
+    return symbol.endswith('BEES') or 'ETF' in symbol or symbol in ('HDFCSENSEX',)
+
+
 def group_of(symbol: str, sector: str) -> str:
-    if symbol.endswith('BEES') or 'ETF' in symbol or symbol in ('HDFCSENSEX',):
+    if is_etf(symbol):
         return 'ETFs (gold, silver, index)'
     if sector != 'Financial Services':
         return sector or 'Outside Nifty 500'
