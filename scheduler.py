@@ -688,6 +688,36 @@ def _maybe_backfill_candles() -> None:
         print(f"[SCHEDULER] candle backfill errored (non-fatal): {e}")
 
 
+_watchdog_days = set()
+
+
+def _maybe_run_watchdog() -> None:
+    """[P-56] DB-only data checks once per trading day, 16:40+ IST (after the
+    post-close fills sync + reconcile at 15:35-16:30). Writes watchdog_latest;
+    the next morning's brief carries the failures. Never raises."""
+    if config.QA_MODE:
+        return
+    try:
+        now = datetime.now(IST)
+        today = now.date().isoformat()
+        if now.weekday() > 4 or today in config.NSE_HOLIDAYS:
+            return
+        if (now.hour, now.minute) < (16, 40) or today in _watchdog_days:
+            return
+        _watchdog_days.add(today)
+
+        def _run():
+            try:
+                import data_watchdog
+                data_watchdog.run(today)
+            except Exception as e:
+                print(f"[SCHEDULER] watchdog failed (non-fatal): {e}")
+
+        threading.Thread(target=_run, daemon=True, name='watchdog').start()
+    except Exception as e:
+        print(f"[SCHEDULER] watchdog errored (non-fatal): {e}")
+
+
 _activity_pruned_days = set()
 
 
@@ -941,6 +971,8 @@ def run():
             _maybe_ingest_amfi_nav()
             # Retention for the write-only live-feed table ([P-38]).
             _maybe_prune_activity()
+            # [P-56] post-close data checks (DB only).
+            _maybe_run_watchdog()
             # Portfolio advisor: once per day when a live token exists.
             # Advisory-only, independent of trading sessions; never blocks
             # the loop (runs on a daemon thread).

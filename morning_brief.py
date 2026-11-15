@@ -45,7 +45,7 @@ def _skew(label: str, view: dict) -> list:
 
 
 def compose(today: str, primary: list, prior: list, prior_date, natwar: dict,
-            views: dict, macro: dict, fund_asof) -> list:
+            views: dict, macro: dict, fund_asof, watchdog: dict = None) -> list:
     """-> [{'kind', 'text', 'warn'}]. primary/prior: advisor rows; natwar:
     the preview payload or None; views: {label: sector_view}; macro: latest
     macro_daily row or None; fund_asof: fundamentals store date or None."""
@@ -88,6 +88,11 @@ def compose(today: str, primary: list, prior: list, prior_date, natwar: dict,
         stale.append(f"fundamentals {fund_asof}")
     if stale:
         lines.append({'kind': 'stale', 'warn': True, 'text': 'Stale: ' + '; '.join(stale)})
+    bad = [c for c in (watchdog or {}).get('checks') or [] if c['status'] != 'PASS']
+    if bad and (watchdog or {}).get('run_date') == prev:
+        lines.append({'kind': 'watch', 'warn': any(c['status'] == 'FAIL' for c in bad),
+                      'text': f"Last session ({prev}): " + '; '.join(f"{c['status']} {c['name']} — {c['evidence']}" for c in bad[:3])
+                      + (f" (+{len(bad) - 3} more)" if len(bad) > 3 else '')})
     return lines[:6]
 
 
@@ -112,8 +117,8 @@ def publish(today: str) -> dict:
     macro = (db.supabase.table('macro_daily').select('date,data')
              .order('date', desc=True).limit(1).execute().data or [None])[0]
     fund_asof = (_cfg_json('fundamentals_latest') or {}).get('asof')
-    out = {'run_date': today, 'lines': compose(today, primary, prior, prior_date,
-                                               natwar, views, macro, fund_asof)}
+    out = {'run_date': today, 'lines': compose(today, primary, prior, prior_date, natwar, views,
+                                               macro, fund_asof, _cfg_json('watchdog_latest'))}
     db.write_config(KEY, json.dumps(out, default=str))
     print(f"[brief] {len(out['lines'])} lines")
     return out
