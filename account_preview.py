@@ -100,6 +100,11 @@ def build_preview(market_data, acct: str, today: str = None) -> dict:
     except Exception as e:
         print(f"[preview:{acct}] rotation skipped (non-fatal): {e}")
     try:
+        import target_dd                              # P-57: red flags on buy targets
+        target_dd.attach(rows, fundamentals.load_store(), sector_map)
+    except Exception as e:
+        print(f"[preview:{acct}] target_dd skipped (non-fatal): {e}")
+    try:
         thesis.attach_theses(rows, fundamentals.load_store(), sector_map, today)
     except Exception as e:
         print(f"[preview:{acct}] thesis skipped (non-fatal): {e}")
