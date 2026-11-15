@@ -522,6 +522,12 @@ def run_advisor(market_data) -> int:
         _sector_of = {u['symbol']: u.get('sector') for u in config.NIFTY500_UNIVERSE}
         try:                                          # P-57: red flags on buy targets (display only)
             import target_dd
+            targets = sorted({r['rotation_target_symbol'] for r in rows if r.get('rotation_target_symbol')})
+            if targets:                               # Marketaux scope is held names; add today's targets
+                try:
+                    news_jobs.collect([f"{t}.NS" for t in targets][:20])
+                except Exception as e:
+                    print(f"[advisor.target_dd] news refresh failed (non-fatal): {e}")
             n_dd = target_dd.attach(rows, _store, _sector_of)
             print(f"[advisor.target_dd] {n_dd} target(s) flagged")
         except Exception as e:
