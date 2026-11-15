@@ -226,6 +226,11 @@ def run_preview(acct: str, market_data, overwrite: bool = False) -> int:
         print(f"[preview:{acct}] calls logged {n_log}, graded {n_grd}")
     except Exception as e:
         print(f"[preview:{acct}] call log/grade failed (non-fatal): {e}")
+    try:                                             # P-55: brief covers both books
+        import morning_brief
+        morning_brief.publish(payload['run_date'])
+    except Exception as e:
+        print(f"[preview:{acct}] brief failed (non-fatal): {e}")
     print(f"[preview:{acct}] stored {payload['holdings_count']} holdings "
           f"(regime {payload['regime']})")
     return payload['holdings_count']

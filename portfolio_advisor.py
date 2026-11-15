@@ -569,6 +569,11 @@ def run_advisor(market_data) -> int:
     n = db.write_official_portfolio_advice(rows)
     print(f"[advisor] stored {n} recommendations for {run_date} (official, run_id={run_id})")
     send_daily_digest(rows, run_date, risk=risk)   # non-fatal by construction
+    try:                                             # P-55 morning brief (display only)
+        import morning_brief
+        morning_brief.publish(run_date)
+    except Exception as e:
+        print(f"[advisor.brief] failed (non-fatal): {e}")
     return n
 
 
