@@ -26,7 +26,7 @@ def _base(series: dict, day: str):
 
 
 def score_call(call: dict, bars: dict, nifty_days: list, prior: dict = None,
-               cohorts: dict = None) -> list:
+               cohorts: dict = None, entry_adjust: float = 1.0) -> list:
     """One row per scored day. `prior` = {'td','date','mae','mfe'} continues a
     call already stored: running min/max carry on, only later days are emitted.
     `cohorts` = {'sector': [peers], 'size': [peers]} adds sector_alpha_pct /
@@ -34,6 +34,8 @@ def score_call(call: dict, bars: dict, nifty_days: list, prior: dict = None,
     import benchmarks
     nifty, sym = bars.get(INDEX, {}), bars.get(call['symbol'], {})
     n0, entry = _base(nifty, call['run_date']), call['entry']
+    if entry and entry_adjust != 1.0:
+        entry = entry * entry_adjust        # corporate action after the call: scale the pre-action entry
     tgt = bars.get(call['target'], {}) if call.get('target') else {}
     t_entry = call.get('target_entry')
     if not n0 or not entry:

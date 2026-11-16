@@ -79,3 +79,13 @@ def test_brief_carries_last_sessions_failures():
     watch = next(l for l in lines if l['kind'] == 'watch')
     assert watch['warn'] and watch['text'] == 'Last session (2026-11-13): FAIL bars_fresh — 2/30 missing; WARN fii_row — fii_net_cr None'
     assert not [l for l in mb.compose(T, [], [], None, None, {}, None, None, {**wdog, 'run_date': '2026-11-10'}) if l['kind'] == 'watch']
+
+
+def test_bar_integrity_warns_on_an_unexplained_halving():
+    f = _fake(candles=[{'symbol': 'ATGL', 'interval': 'day', 'trade_date': '2026-11-12', 'close': 100.0},
+                       {'symbol': 'ATGL', 'interval': 'day', 'trade_date': '2026-11-13', 'close': 48.0},
+                       {'symbol': 'INFY', 'interval': 'day', 'trade_date': '2026-11-13', 'close': 10.0}])
+    with patch.object(wd.db, 'supabase', f), patch.object(wd.data_jobs.db, 'supabase', f):
+        out = wd.run(T)
+    c = next(c for c in out['checks'] if c['name'] == 'bar_integrity')
+    assert c['status'] == 'WARN' and 'ATGL 0.48' in c['evidence']

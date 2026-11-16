@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta
 
 import pytz
 
+import data_jobs
 import database as db
 from morning_brief import prev_trading_day
 from sector_view import is_etf
@@ -134,6 +135,11 @@ def run_checks(today: str) -> list:
     age = (date.fromisoformat(today) - date.fromisoformat(asof)).days if asof else None
     add('fundamentals_age', age is not None and age <= FUND_MAX_AGE, f"fundamentals as of {asof} ({age}d)",
         "paste fresh Screener exports, scripts/ingest_fundamentals.py", warn=True)
+
+    # [P-68] Bar integrity: yesterday's closes vs the bar before, unexplained by corporate_actions.csv.
+    bad = data_jobs.check_bar_integrity(prev)
+    add('bar_integrity', not bad, ', '.join(f"{b['symbol']} {b['ratio']}" for b in bad) or 'no jumps',
+        "unadjusted split/demerger or a bad print — add a data/corporate_actions.csv row, then rescore", warn=True)
 
     # Morning brief landed (V-32).
     brief = _cfg_json('morning_brief_latest') or {}

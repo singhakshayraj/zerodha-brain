@@ -1,0 +1,3 @@
+symbol,date,factor,kind,note
+ABFRL,2025-05-22,0.441,demerger,ABLBL spun out; Kite does not adjust demergers
+SPLPETRO,2022-06-07,0.509,unknown,close halved day-over-day in the Kite series; verify

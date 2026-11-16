@@ -9,6 +9,7 @@ import sys
 from datetime import date, datetime
 
 import benchmarks
+import corporate_actions
 import data_jobs
 import database as db
 import sector_view
@@ -124,7 +125,7 @@ def update(through: str = None, since: str = None, rescore: bool = False) -> int
     if since is None:                  # open calls: fewer than HORIZON Nifty days since the call
         since = days[-(HORIZON + 1)] if len(days) > HORIZON else days[0]
     days = [d for d in days if d >= since]
-    bars = _bars(since, through)
+    bars = corporate_actions.adjust(_bars(since, through))
     stored = {} if rescore else _stored(since, days[-RECENT_DAYS] if len(days) >= RECENT_DAYS else None)
     sect, size, priced = benchmarks.sectors(), benchmarks.size_buckets(), list(bars)
     new, n_calls = [], 0
@@ -138,7 +139,8 @@ def update(through: str = None, since: str = None, rescore: bool = False) -> int
             if prior['td'] >= HORIZON:
                 continue
         rows = score_call(c, bars, days, prior,
-                          cohorts=benchmarks.cohorts_for(c['symbol'], priced, sect, size))
+                          cohorts=benchmarks.cohorts_for(c['symbol'], priced, sect, size),
+                          entry_adjust=corporate_actions.entry_factor(c['symbol'], c['run_date']))
         if rows:
             n_calls += 1
             new += rows

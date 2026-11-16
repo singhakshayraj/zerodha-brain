@@ -348,6 +348,35 @@ def _has_day_bars(sym: str) -> bool:
         return True                          # unknown: don't trigger a big refetch
 
 
+INTEGRITY_LO, INTEGRITY_HI = 0.6, 1.6
+
+
+def check_bar_integrity(day: str, lo: float = INTEGRITY_LO, hi: float = INTEGRITY_HI) -> list:
+    """[P-68] Closes on `day` whose ratio to the symbol's previous bar is
+    outside (lo, hi) and not explained by data/corporate_actions.csv —
+    an unadjusted split/demerger or a bad print. -> [{symbol, date, ratio}]."""
+    import corporate_actions
+    since = (datetime.fromisoformat(day) - timedelta(days=10)).date().isoformat()
+    rows = (db.supabase.table('candles').select('symbol,trade_date,close').eq('interval', 'day')
+            .gte('trade_date', since).lte('trade_date', day).order('trade_date').execute().data or [])
+    known = {(a['symbol'], a['date']) for a in corporate_actions.load()}
+    series = {}
+    for r in rows:
+        if r.get('close') is not None:
+            series.setdefault(r['symbol'], {})[str(r['trade_date'])[:10]] = float(r['close'])
+    out = []
+    for sym, s in series.items():
+        if day not in s or (sym, day) in known:
+            continue
+        before = [d for d in s if d < day]
+        if not before:
+            continue
+        ratio = round(s[day] / s[max(before)], 2)
+        if not lo < ratio < hi:
+            out.append({'symbol': sym, 'date': day, 'ratio': ratio})
+    return sorted(out, key=lambda r: r['symbol'])
+
+
 def sync_daily_bars(market_data, now_ist=None) -> int:
     """Upsert every completed daily bar newer than the watermark, then advance
     it. Idempotent; a missed day is backfilled by the next live token (Kite
