@@ -32,3 +32,20 @@ def test_sync_skips_404_days_and_advances_the_watermark():
 
 def test_url_for_a_day():
     assert ib.url('2026-11-13') == 'https://nsearchives.nseindia.com/content/indices/ind_close_all_13112026.csv'
+
+
+def test_watermark_advances_per_day_so_a_crash_resumes():
+    f = FakeSupabase()
+    f.tables['index_bars'] = []
+    f.tables['app_config'] = [{'key': ib.KEY, 'value': '2026-11-10'}]
+
+    def served(d):
+        if d == '2026-11-12':
+            raise OSError('broken pipe')
+        return CSV.replace('13-11-2026', f'{d[8:]}-{d[5:7]}-{d[:4]}')
+    with patch.object(ib.db, 'supabase', f), patch.object(ib, 'fetch', served):
+        try:
+            ib.sync(through='2026-11-13')
+        except OSError:
+            pass
+    assert next(r['value'] for r in f.tables['app_config'] if r['key'] == ib.KEY) == '2026-11-11'

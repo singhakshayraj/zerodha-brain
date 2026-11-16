@@ -74,8 +74,7 @@ def sync(through: str = None) -> int:
             db.supabase.table(TABLE).upsert(rows[i:i + 500], on_conflict='index_name,trade_date').execute()
         n += len(rows)
         served = day
-    if served != last:
-        db.write_config(KEY, served)
+        db.write_config(KEY, served)          # per day: a crash resumes from the last day stored
     print(f"[index_bars] {last} -> {served}: {n} rows")
     return n
 
