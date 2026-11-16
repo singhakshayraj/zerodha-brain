@@ -16,12 +16,24 @@ from universe_calls import _paged
 
 TABLE = 'call_outcomes'
 BARS_START = '2026-08-25'          # first stored daily bars
+RECENT_DAYS = 10                   # stored rows read per morning: each row carries running mae/mfe,
+                                   # so a call's latest row is enough; a longer gap recomputes from td 1
 _KEY = ('source', 'account', 'run_date', 'symbol')
 
 
-def _rows(table: str, since: str, cols: str = '*') -> list:
-    return _paged(lambda: db.supabase.table(table).select(cols).gte('run_date', since)
-                  .order('run_date').order('symbol'))
+# a total order per table: paging with ties at a 1000-row boundary skips rows
+_ORDER = {'portfolio_advice': ('run_date', 'symbol', 'id'), 'account_calls': ('run_date', 'account', 'symbol'),
+          'universe_calls': ('run_date', 'symbol'), TABLE: ('run_date', 'source', 'account', 'symbol', 'td')}
+
+
+def _rows(table: str, since: str, cols: str = '*', date_from: str = None) -> list:
+    def q():
+        x = db.supabase.table(table).select(cols).gte('run_date', since)
+        x = x.gte('date', date_from) if date_from else x
+        for c in _ORDER[table]:
+            x = x.order(c)
+        return x
+    return _paged(q)
 
 
 def key(c: dict) -> tuple:
@@ -88,10 +100,10 @@ def _bars(since: str, through: str) -> dict:
     return out
 
 
-def _stored(since: str) -> dict:
-    """call key -> all stored rows, for calls with run_date >= since."""
+def _stored(since: str, date_from: str = None) -> dict:
+    """call key -> stored rows (dated >= date_from when given), for calls with run_date >= since."""
     out = {}
-    for r in _rows(TABLE, since):
+    for r in _rows(TABLE, since, date_from=date_from):
         out.setdefault(key(r), []).append(r)
     return out
 
@@ -100,13 +112,17 @@ def update(through: str = None, since: str = None) -> int:
     if through is None:                # never score a bar that is still trading
         import pytz
         through = data_jobs.last_completed_trading_day(datetime.now(pytz.timezone('Asia/Kolkata')))
-    bars = _bars(since or BARS_START, through)
-    days = sorted(bars.get(INDEX, {}))
+    nifty = _paged(lambda: db.supabase.table('candles').select('trade_date').eq('interval', 'day')
+                   .eq('symbol', INDEX).gte('trade_date', since or BARS_START).lte('trade_date', through)
+                   .order('trade_date'))
+    days = sorted(str(r['trade_date'])[:10] for r in nifty)
     if not days:
         return 0
     if since is None:                  # open calls: fewer than HORIZON Nifty days since the call
         since = days[-(HORIZON + 1)] if len(days) > HORIZON else days[0]
-    stored = _stored(since)
+    days = [d for d in days if d >= since]
+    bars = _bars(since, through)
+    stored = _stored(since, days[-RECENT_DAYS] if len(days) >= RECENT_DAYS else None)
     new, n_calls = [], 0
     for c in load_calls(since):
         have = stored.get(key(c), [])

@@ -59,3 +59,38 @@ def test_default_through_skips_a_partial_bar():
          patch.object(co.data_jobs, 'last_completed_trading_day', return_value='2026-11-13'):
         co.update()
     assert max(r['date'] for r in f.tables['call_outcomes']) == '2026-11-13'
+
+
+def test_update_reads_only_recent_stored_rows():
+    # rows carry running mae/mfe, so continuing a call needs only its latest row
+    f = _fake()
+    read = []
+    orig = co._rows
+    def spy(table, since, cols='*', **kw):
+        out = orig(table, since, cols, **kw)
+        if table == co.TABLE:
+            read.extend(out)
+        return out
+    with patch.object(co.db, 'supabase', f), patch.object(co, '_rows', spy), patch.object(co, 'RECENT_DAYS', 1):
+        co.update('2026-11-14')
+        read.clear()
+        assert co.update('2026-11-14') == 0
+    assert len(read) == 5                                 # 5 calls x their 11-14 row, not all 20
+
+
+def test_paged_reads_order_by_a_unique_key():
+    # Postgres pages are only stable when the order is total; ties at a
+    # 1000-row boundary skip or repeat rows (CEMPRO 11-11 was skipped live).
+    from tests import fake_supabase as fs
+    seen = {}
+    orig = fs._Query.order
+    def rec(self, c, desc=False):
+        seen.setdefault(self.table, [])
+        if c not in seen[self.table]:
+            seen[self.table].append(c)
+        return orig(self, c, desc)
+    with patch.object(co.db, 'supabase', _fake()), patch.object(fs._Query, 'order', rec):
+        co.update('2026-11-14')
+    assert seen['portfolio_advice'][-1] == 'id'
+    assert seen['account_calls'] == ['run_date', 'account', 'symbol']
+    assert seen['call_outcomes'] == ['run_date', 'source', 'account', 'symbol', 'td']
