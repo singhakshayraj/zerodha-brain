@@ -94,3 +94,29 @@ def test_paged_reads_order_by_a_unique_key():
     assert seen['portfolio_advice'][-1] == 'id'
     assert seen['account_calls'] == ['run_date', 'account', 'symbol']
     assert seen['call_outcomes'] == ['run_date', 'source', 'account', 'symbol', 'td']
+
+
+def test_update_writes_cohort_columns():
+    f = _fake()
+    for i, s in enumerate(['C1', 'C2', 'C3', 'C4', 'C5']):
+        f.tables['candles'] += [{'symbol': s, 'interval': 'day', 'trade_date': d, 'close': 100 + 3 * j} for j, d in enumerate(DAYS)]
+    sect = {s: 'X' for s in ['AAA', 'BBB', 'C1', 'C2', 'C3', 'C4', 'C5']}
+    with patch.object(co.db, 'supabase', f), patch.object(co.benchmarks, 'sectors', lambda: sect), \
+            patch.object(co.benchmarks, 'size_buckets', lambda: {'AAA': 'large'}):
+        co.update('2026-11-12')
+    r = next(r for r in f.tables['call_outcomes'] if r['source'] == 'advice' and r['td'] == 1)
+    assert 'sector_alpha_pct' in r and 'size_alpha_pct' in r
+    # AAA -1%, cohort (BBB +2, C* +3) = +2.8 -> SELL signed: -(-1 - 2.8) = 3.8
+    assert r["sector_alpha_pct"] == 3.83 and r['size_alpha_pct'] is None
+
+
+def test_rescore_rewrites_rows_already_stored():
+    f = _fake()
+    with patch.object(co.db, 'supabase', f):
+        co.update('2026-11-12')
+        for r in f.tables['call_outcomes']:
+            r.pop('sector_alpha_pct', None)                 # rows written before the column existed
+        assert co.update('2026-11-12') == 0                 # normal mode: nothing to add
+        assert co.update('2026-11-12', rescore=True) > 0    # --all: recompute every row
+    r = next(r for r in f.tables['call_outcomes'] if r['source'] == 'advice' and r['td'] == 1)
+    assert 'sector_alpha_pct' in r

@@ -25,9 +25,13 @@ def _base(series: dict, day: str):
     return series[max(before)] if before else None
 
 
-def score_call(call: dict, bars: dict, nifty_days: list, prior: dict = None) -> list:
+def score_call(call: dict, bars: dict, nifty_days: list, prior: dict = None,
+               cohorts: dict = None) -> list:
     """One row per scored day. `prior` = {'td','date','mae','mfe'} continues a
-    call already stored: running min/max carry on, only later days are emitted."""
+    call already stored: running min/max carry on, only later days are emitted.
+    `cohorts` = {'sector': [peers], 'size': [peers]} adds sector_alpha_pct /
+    size_alpha_pct (signed like signed_alpha_pct; None when the cohort is thin)."""
+    import benchmarks
     nifty, sym = bars.get(INDEX, {}), bars.get(call['symbol'], {})
     n0, entry = _base(nifty, call['run_date']), call['entry']
     tgt = bars.get(call['target'], {}) if call.get('target') else {}
@@ -54,10 +58,14 @@ def score_call(call: dict, bars: dict, nifty_days: list, prior: dict = None) -> 
         pair = None
         if day in tgt and t_entry:
             pair = round((tgt[day] / t_entry - 1) * 100 - ret - PAIR_COST_PCT, 2)
+        alphas = {}
+        for k in ('sector', 'size'):
+            c = benchmarks.cohort_return(bars, (cohorts or {}).get(k) or [], call['run_date'], day)
+            alphas[f'{k}_alpha_pct'] = None if c is None else round(call['direction'] * (ret - c), 2)
         rows.append({'source': call['source'], 'account': call['account'], 'run_date': call['run_date'],
                      'symbol': call['symbol'], 'td': td, 'date': day, 'close': sym[day],
                      'ret_pct': round(ret, 2), 'nifty_pct': round(npct, 2), 'signed_alpha_pct': signed,
-                     'mae_pct': mae, 'mfe_pct': mfe, 'pair_pct': pair})
+                     'mae_pct': mae, 'mfe_pct': mfe, 'pair_pct': pair, **alphas})
     return rows
 
 

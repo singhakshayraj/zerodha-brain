@@ -8,6 +8,7 @@ bars only (token-free). Never writes the official grade columns.
 import sys
 from datetime import date, datetime
 
+import benchmarks
 import data_jobs
 import database as db
 import sector_view
@@ -108,7 +109,9 @@ def _stored(since: str, date_from: str = None) -> dict:
     return out
 
 
-def update(through: str = None, since: str = None) -> int:
+def update(through: str = None, since: str = None, rescore: bool = False) -> int:
+    """`rescore` ignores stored rows and recomputes every day of every call
+    since `since` (upsert overwrites) — for a column added after the fact."""
     if through is None:                # never score a bar that is still trading
         import pytz
         through = data_jobs.last_completed_trading_day(datetime.now(pytz.timezone('Asia/Kolkata')))
@@ -122,7 +125,8 @@ def update(through: str = None, since: str = None) -> int:
         since = days[-(HORIZON + 1)] if len(days) > HORIZON else days[0]
     days = [d for d in days if d >= since]
     bars = _bars(since, through)
-    stored = _stored(since, days[-RECENT_DAYS] if len(days) >= RECENT_DAYS else None)
+    stored = {} if rescore else _stored(since, days[-RECENT_DAYS] if len(days) >= RECENT_DAYS else None)
+    sect, size, priced = benchmarks.sectors(), benchmarks.size_buckets(), list(bars)
     new, n_calls = [], 0
     for c in load_calls(since):
         have = stored.get(key(c), [])
@@ -133,7 +137,8 @@ def update(through: str = None, since: str = None) -> int:
                      'mae': min(float(r['mae_pct']) for r in have), 'mfe': max(float(r['mfe_pct']) for r in have)}
             if prior['td'] >= HORIZON:
                 continue
-        rows = score_call(c, bars, days, prior)
+        rows = score_call(c, bars, days, prior,
+                          cohorts=benchmarks.cohorts_for(c['symbol'], priced, sect, size))
         if rows:
             n_calls += 1
             new += rows
@@ -153,4 +158,4 @@ def latest_summary(calls: list) -> dict:
 
 if __name__ == '__main__':
     args = sys.argv[1:]
-    update(None, BARS_START if '--all' in args else None)
+    update(None, BARS_START if '--all' in args else None, rescore='--all' in args)

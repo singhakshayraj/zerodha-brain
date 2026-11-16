@@ -48,3 +48,18 @@ def test_hold_should_have_sold_and_horizon_cap():
     rows = cs.score_call(call, {'NIFTY 50': nifty, 'AAA': closes}, days)
     assert len(rows) == 60 and rows[-1]['td'] == 60
     assert cs.summarize(rows, 1)['should_have_sold'] is True and cs.direction('INSUFFICIENT') == 0
+
+
+def test_sector_alpha_signed_by_direction():
+    from call_scoring import score_call
+    days = ['2026-11-10', '2026-11-11']
+    bars = {'NIFTY 50': {d: 100 for d in days}, 'AAA': {'2026-11-10': 100, '2026-11-11': 99}}
+    for i, s in enumerate(['C1', 'C2', 'C3', 'C4', 'C5']):
+        bars[s] = {'2026-11-10': 100, '2026-11-11': 102}           # cohort +2%
+    call = {'source': 'advice', 'account': 'primary', 'run_date': '2026-11-10', 'symbol': 'AAA',
+            'entry': 100.0, 'direction': -1, 'target': None, 'target_entry': None}
+    rows = score_call(call, bars, days, cohorts={'sector': ['C1', 'C2', 'C3', 'C4', 'C5'], 'size': ['C1']})
+    assert rows[0]['sector_alpha_pct'] == 3.0       # SELL: -(−1 − 2)
+    assert rows[0]['size_alpha_pct'] is None         # cohort too thin
+    plain = score_call(call, bars, days)
+    assert plain[0]['sector_alpha_pct'] is None and plain[0]['size_alpha_pct'] is None
