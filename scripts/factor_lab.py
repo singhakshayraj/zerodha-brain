@@ -169,7 +169,7 @@ def sector_neutralise(z: dict, sectors: dict) -> dict:
             for sym, v in z.items()}
 
 
-def build_panel(horizon: int, stride: int, sector_neutral: bool):
+def build_panel(horizon: int, stride: int, sector_neutral: bool, pit: bool = False):
     with open(CACHE, 'rb') as fh:
         cache = pickle.load(fh)
     with open(UNIVERSE) as fh:
@@ -185,7 +185,11 @@ def build_panel(horizon: int, stride: int, sector_neutral: bool):
     bidx = {d: i for i, d in enumerate(grid)}
     sample_dates = set(grid[WARMUP:len(grid) - horizon:stride])
     print(f"grid {len(grid)} days -> {len(sample_dates)} sample dates "
-          f"| sector_neutral={sector_neutral}")
+          f"| sector_neutral={sector_neutral} | pit={pit}")
+    pit_members = None
+    if pit:
+        import universe_history as uh
+        pit_members = {d: set(uh.members(d)) for d in sample_dates}
 
     raw = {}     # date -> {symbol: {factor: value}}
     fwd = {}     # date -> {symbol: forward alpha %}
@@ -206,6 +210,8 @@ def build_panel(horizon: int, stride: int, sector_neutral: bool):
             d = dates[i]
             if d not in sample_dates:
                 continue
+            if pit_members is not None and sym not in pit_members[d]:
+                continue                      # not a Nifty 500 member that day
             f = compute_factors(i, closes, highs, vols, rets, brets)
             raw.setdefault(d, {})[sym] = f
             sr = _ret(closes[i + horizon], closes[i])
@@ -322,11 +328,12 @@ def main():
     ap.add_argument('--horizon', type=int, default=10)
     ap.add_argument('--sector-neutral', action='store_true')
     ap.add_argument('--selftest', action='store_true')
+    ap.add_argument('--pit', action='store_true', help='point-in-time Nifty 500 membership')
     args = ap.parse_args()
     if args.selftest:
         return selftest()
 
-    panel = build_panel(args.horizon, args.horizon, args.sector_neutral)
+    panel = build_panel(args.horizon, args.horizon, args.sector_neutral, pit=args.pit)
     results, explore, holdout, chosen = evaluate(panel, args.horizon)
 
     print(f"\n{len(explore)} explore dates | {len(holdout)} holdout dates\n")
@@ -350,7 +357,7 @@ def main():
     with open(RESULTS, 'a') as fh:
         fh.write(json.dumps({
             'run_at': datetime.now(timezone.utc).isoformat(),
-            'horizon': args.horizon, 'sector_neutral': args.sector_neutral,
+            'horizon': args.horizon, 'sector_neutral': args.sector_neutral, 'pit': args.pit,
             'explore_dates': len(explore), 'holdout_dates': len(holdout),
             'selected_on_explore': chosen, 'survivors': survivors,
             'results': results}) + '\n')

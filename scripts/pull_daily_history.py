@@ -57,6 +57,23 @@ def main() -> int:
         universe = [(r['symbol'], int(r['instrument_token']))
                     for r in csv.DictReader(f)]
     targets = [(BENCHMARK, NIFTY50_INDEX_TOKEN)] + universe
+    # [P-68] --symbols-from data/universe_history.csv: names that left the
+    # Nifty 500 but still trade, tokens from Kite's public instrument master.
+    if '--symbols-from' in sys.argv:
+        import urllib.request
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scripts'))
+        from audit_nifty500_tokens import INSTRUMENTS_URL, live_equity_tokens
+        extra_csv = sys.argv[sys.argv.index('--symbols-from') + 1]
+        req = urllib.request.Request(INSTRUMENTS_URL, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            live = live_equity_tokens(r.read().decode('utf-8', 'replace'))
+        known = {s for s, _ in targets}
+        with open(extra_csv) as f:
+            extra = [(r['symbol'], int(live[r['symbol']])) for r in csv.DictReader(f)
+                     if r.get('left') and r.get('status') == 'trading'
+                     and r['symbol'] in live and r['symbol'] not in known]
+        print(f"extra symbols from {extra_csv}: {len(extra)}")
+        targets += extra
 
     fetched = failed = skipped = 0
     for i, (sym, token) in enumerate(targets, 1):

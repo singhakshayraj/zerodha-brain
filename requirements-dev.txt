@@ -1,0 +1,1 @@
+pypdf>=4,<7        # scripts/build_universe_history.py: parse NSE Indices press releases

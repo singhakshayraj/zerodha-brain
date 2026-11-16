@@ -127,7 +127,13 @@ def _bar_date(bar: dict) -> str:
     return ts[:10] if isinstance(ts, str) else str(ts)[:10]
 
 
-def load_panel(horizon: int, stride: int, limit_symbols: int = None):
+def _pit_members(sample_dates):
+    """date -> set of Nifty 500 members that day (point-in-time, [P-68])."""
+    import universe_history as uh
+    return {d: set(uh.members(d)) for d in sample_dates}
+
+
+def load_panel(horizon: int, stride: int, limit_symbols: int = None, pit: bool = False):
     """-> {date: [(symbol, {variant: score}, fwd_alpha_pct), ...]}
 
     Sampling runs on the BENCHMARK's date grid, not each symbol's own index.
@@ -146,7 +152,8 @@ def load_panel(horizon: int, stride: int, limit_symbols: int = None):
     # Every observation must see a full production-depth window, so the replay
     # scores what production would have scored rather than a thinner series.
     sample_dates = set(grid[PROD_WINDOW_BARS:len(grid) - horizon:stride])
-    print(f"benchmark grid: {len(grid)} days -> {len(sample_dates)} sample dates")
+    print(f"benchmark grid: {len(grid)} days -> {len(sample_dates)} sample dates | pit={pit}")
+    pit_members = _pit_members(sample_dates) if pit else None
 
     symbols = sorted(s for s in cache if s != BENCHMARK)
     if limit_symbols:
@@ -165,6 +172,8 @@ def load_panel(horizon: int, stride: int, limit_symbols: int = None):
         for i in range(PROD_WINDOW_BARS, len(bars) - horizon):
             if dates[i] not in sample_dates:
                 continue
+            if pit_members is not None and sym not in pit_members[dates[i]]:
+                continue                      # not a Nifty 500 member that day
             lo = i - PROD_WINDOW_BARS + 1
             window, w_closes, w_bench = bars[lo:i + 1], closes[lo:i + 1], bench[lo:i + 1]
             ind = run_all_indicators(window)
@@ -284,6 +293,7 @@ def main() -> int:
     ap.add_argument('--symbols', type=int, default=None,
                     help='cap symbol count (for a quick run)')
     ap.add_argument('--selftest', action='store_true')
+    ap.add_argument('--pit', action='store_true', help='point-in-time Nifty 500 membership')
     args = ap.parse_args()
 
     if args.selftest:
@@ -291,7 +301,7 @@ def main() -> int:
 
     stride = args.horizon          # non-overlapping forward windows
     print(f"horizon={args.horizon}d stride={stride} variants={len(VARIANTS)}")
-    panel = load_panel(args.horizon, stride, args.symbols)
+    panel = load_panel(args.horizon, stride, args.symbols, pit=args.pit)
     res, explore, holdout = evaluate(panel, args.horizon)
 
     obs = sum(len(v) for v in panel.values())
@@ -337,7 +347,7 @@ def main() -> int:
            'horizon': args.horizon, 'observations': obs,
            'explore_dates': len(explore), 'holdout_dates': len(holdout),
            'variants': {n: VARIANTS[n] for n in VARIANTS},
-           'results': res, 'winners': winners}
+           'results': res, 'winners': winners, 'pit': args.pit}
     with open(RESULTS, 'a') as f:
         f.write(json.dumps(row) + '\n')
     print(f"\nappended to {RESULTS}")
