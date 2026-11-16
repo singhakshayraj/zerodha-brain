@@ -694,6 +694,31 @@ def _maybe_backfill_candles() -> None:
 
 
 _watchdog_days = set()
+_lessons_days = set()
+
+
+def _maybe_run_lessons() -> None:
+    """[P-60] Weekly call lessons + scorecard, Sunday 08:00+ IST, once per
+    date. DB only; daemon thread; never raises."""
+    if config.QA_MODE:
+        return
+    try:
+        now = datetime.now(IST)
+        today = now.date().isoformat()
+        if now.weekday() != 6 or now.hour < 8 or today in _lessons_days:
+            return
+        _lessons_days.add(today)
+
+        def _run():
+            try:
+                import call_lessons
+                call_lessons.compute()
+            except Exception as e:
+                print(f"[SCHEDULER] call lessons failed (non-fatal): {e}")
+
+        threading.Thread(target=_run, daemon=True, name='call_lessons').start()
+    except Exception as e:
+        print(f"[SCHEDULER] call lessons errored (non-fatal): {e}")
 
 
 def _maybe_run_watchdog() -> None:
@@ -978,6 +1003,7 @@ def run():
             _maybe_prune_activity()
             # [P-56] post-close data checks (DB only).
             _maybe_run_watchdog()
+            _maybe_run_lessons()
             # Portfolio advisor: once per day when a live token exists.
             # Advisory-only, independent of trading sessions; never blocks
             # the loop (runs on a daemon thread).

@@ -45,7 +45,7 @@ def _skew(label: str, view: dict) -> list:
 
 
 def compose(today: str, primary: list, prior: list, prior_date, natwar: dict,
-            views: dict, macro: dict, fund_asof, watchdog: dict = None) -> list:
+            views: dict, macro: dict, fund_asof, watchdog: dict = None, lessons: dict = None) -> list:
     """-> [{'kind', 'text', 'warn'}]. primary/prior: advisor rows; natwar:
     the preview payload or None; views: {label: sector_view}; macro: latest
     macro_daily row or None; fund_asof: fundamentals store date or None."""
@@ -93,6 +93,11 @@ def compose(today: str, primary: list, prior: list, prior_date, natwar: dict,
         lines.append({'kind': 'watch', 'warn': any(c['status'] == 'FAIL' for c in bad),
                       'text': f"Last session ({prev}): " + '; '.join(f"{c['status']} {c['name']} — {c['evidence']}" for c in bad[:3])
                       + (f" (+{len(bad) - 3} more)" if len(bad) > 3 else '')})
+    # [P-60] weekly lessons run (Sunday): only the run since the last session
+    if lessons and prev <= str(lessons.get('asof')) < today and (lessons.get('new') or lessons.get('cleared')):
+        text = '; '.join([f'New lesson: {t}' for t in lessons.get('new') or []]
+                         + [f'Lesson cleared: {t}' for t in lessons.get('cleared') or []])
+        lines.insert(1, {'kind': 'lessons', 'warn': False, 'text': text})
     return lines[:6]
 
 
@@ -118,7 +123,8 @@ def publish(today: str) -> dict:
              .order('date', desc=True).limit(1).execute().data or [None])[0]
     fund_asof = (_cfg_json('fundamentals_latest') or {}).get('asof')
     out = {'run_date': today, 'lines': compose(today, primary, prior, prior_date, natwar, views,
-                                               macro, fund_asof, _cfg_json('watchdog_latest'))}
+                                               macro, fund_asof, _cfg_json('watchdog_latest'),
+                                               _cfg_json('call_lessons_latest'))}
     db.write_config(KEY, json.dumps(out, default=str))
     print(f"[brief] {len(out['lines'])} lines")
     return out
