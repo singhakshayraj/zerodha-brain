@@ -1,6 +1,9 @@
 """Ingest a pasted Screener.in table into app_config['fundamentals_latest'].
 
-    python3 scripts/ingest_fundamentals.py paste.txt [more.txt ...]
+    python3 scripts/ingest_fundamentals.py [--asof YYYY-MM-DD] paste.txt [more.txt ...]
+
+--asof is the Screener export date (default today): it stamps the store and
+the point-in-time copy in fundamentals_snapshots [P-68 phase 4].
 
 Paste source: Screener.in -> a screen or your watchlist -> select the results
 table in the browser -> copy -> save to a text file. Columns to show (Edit
@@ -50,18 +53,29 @@ def coverage_gaps(store: dict, universe: dict) -> dict:
     return {'held': sorted(held - have - etfs), 'nifty500': sorted(set(universe) - have)}
 
 
+def asof_from_args(argv: list):
+    """-> (asof, paths): pulls `--asof YYYY-MM-DD` out of the argument list."""
+    argv = list(argv)
+    asof = date.today().isoformat()
+    if '--asof' in argv:
+        i = argv.index('--asof')
+        asof = argv[i + 1]
+        del argv[i:i + 2]
+    return asof, argv
+
+
 def main():
-    if len(sys.argv) < 2:
+    asof, paths = asof_from_args(sys.argv[1:])
+    if not paths:
         sys.exit(__doc__)
     universe = fundamentals.load_universe()
     rows = []
-    for path in sys.argv[1:]:
+    for path in paths:
         rows += fundamentals.parse_paste(open(path).read())
     matched, unmatched = fundamentals.match_symbols(rows, universe, holdings_names())
     missing = sorted({f for f in ('roce', 'piotroski', 'cash', 'debt', 'cfo', 'pledge', 'pe')
                       if all(r.get(f) is None for r in matched)})
-    store = fundamentals.merge_store(fundamentals.load_store(), matched,
-                                     date.today().isoformat())
+    store = fundamentals.merge_store(fundamentals.load_store(), matched, asof)
     fundamentals.save_store(store)
     n_snap = fundamentals.save_snapshot(store, [r['symbol'] for r in matched],
                                         store['asof'])
