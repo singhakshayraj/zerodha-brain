@@ -72,16 +72,22 @@ def score_call(call: dict, bars: dict, nifty_days: list, prior: dict = None,
 def summarize(rows: list, direction: int) -> dict:
     rows = sorted(rows, key=lambda r: r['td'])
     at = {k: None for k in CHECKPOINTS}
+    at_sector = {k: None for k in CHECKPOINTS}
+    at_size = {k: None for k in CHECKPOINTS}
     for r in rows:
         if r['td'] in at:
             at[r['td']] = float(r['signed_alpha_pct'])
+            for k, d in (('sector_alpha_pct', at_sector), ('size_alpha_pct', at_size)):
+                if r.get(k) is not None:
+                    d[r['td']] = float(r[k])
     if not rows:
         return {'days': 0, 'signed_alpha_pct': None, 'mae_pct': None, 'mfe_pct': None, 'correct': False,
-                'early_wrong_days': 0, 'should_have_sold': False, 'at': at}
+                'early_wrong_days': 0, 'should_have_sold': False, 'at': at, 'at_sector': at_sector, 'at_size': at_size}
     last = rows[-1]
     first_right = next((i for i, r in enumerate(rows) if float(r['signed_alpha_pct']) > 0), len(rows))
     mae = min(float(r['mae_pct']) for r in rows)
     return {'days': int(last['td']), 'signed_alpha_pct': float(last['signed_alpha_pct']),
             'mae_pct': mae, 'mfe_pct': max(float(r['mfe_pct']) for r in rows),
             'correct': float(last['signed_alpha_pct']) > 0, 'early_wrong_days': first_right,
-            'should_have_sold': direction > 0 and mae <= SHOULD_HAVE_SOLD_PCT, 'at': at}
+            'should_have_sold': direction > 0 and mae <= SHOULD_HAVE_SOLD_PCT, 'at': at,
+            'at_sector': at_sector, 'at_size': at_size}

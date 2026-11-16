@@ -63,3 +63,10 @@ def test_sector_alpha_signed_by_direction():
     assert rows[0]['size_alpha_pct'] is None         # cohort too thin
     plain = score_call(call, bars, days)
     assert plain[0]['sector_alpha_pct'] is None and plain[0]['size_alpha_pct'] is None
+
+
+def test_summarize_carries_cohort_alpha_at_checkpoints():
+    rows = [{'td': t, 'signed_alpha_pct': 1.0, 'mae_pct': 0.0, 'mfe_pct': 1.0,
+             'sector_alpha_pct': 2.0 if t == 5 else None, 'size_alpha_pct': None} for t in (1, 5)]
+    s = cs.summarize(rows, 1)
+    assert s['at_sector'][5] == 2.0 and s['at_sector'][10] is None and s['at_size'][5] is None

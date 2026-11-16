@@ -119,20 +119,62 @@ def find_lessons(calls: list, scores: dict, prior: dict = None, asof: str = None
     return out
 
 
+BOOT_N = 1000
+BOOT_SEED = 0
+
+
+def block_bootstrap(values_by_date: dict, stat, n: int = BOOT_N, seed: int = BOOT_SEED):
+    """95% percentile interval of `stat` over the pooled values, resampling
+    whole dates with replacement (calls made the same day are not independent).
+    One date, or all-identical values, gives a degenerate (v, v)."""
+    import numpy as np
+    dates = [d for d, v in values_by_date.items() if v]
+    if not dates:
+        return (None, None)
+    rng = np.random.default_rng(seed)
+    pools = [values_by_date[d] for d in dates]
+    stats = []
+    for _ in range(n):
+        pick = rng.integers(0, len(pools), len(pools))
+        stats.append(stat([x for i in pick for x in pools[i]]))
+    return (round(float(np.percentile(stats, 2.5)), 2), round(float(np.percentile(stats, 97.5)), 2))
+
+
+def _cell(by_date: dict):
+    v = [x for xs in by_date.values() for x in xs]
+    if not v:
+        return None
+    hit = lambda xs: 100 * sum(a > 0 for a in xs) / len(xs)
+    mean = lambda xs: sum(xs) / len(xs)
+    return {'n': len(v), 'hit_pct': round(hit(v), 1), 'mean_alpha_pct': round(mean(v), 2),
+            'hit_ci': list(block_bootstrap(by_date, hit)), 'alpha_ci': list(block_bootstrap(by_date, mean))}
+
+
 def scorecard(calls: list, scores: dict) -> dict:
+    """by_source[src][cp] = nifty cell {n, hit_pct, mean_alpha_pct, hit_ci, alpha_ci}
+    plus 'sector' / 'size' sub-cells of the same shape (None when no call has
+    that cohort). Nifty stays top-level so existing readers keep working."""
     by = {}
     for c in calls:
         s = scores.get(key(c))
         if not s:
             continue
         for cp in CHECKPOINTS:
-            a = s['at'].get(cp)
-            if a is not None:
-                by.setdefault(c['source'], {}).setdefault(cp, []).append(a)
-    return {'asof': date.today().isoformat(),
-            'by_source': {src: {cp: {'n': len(v), 'hit_pct': round(100 * sum(a > 0 for a in v) / len(v), 1),
-                                     'mean_alpha_pct': round(sum(v) / len(v), 2)} for cp, v in cps.items()}
-                          for src, cps in by.items()}}
+            if s['at'].get(cp) is None:
+                continue
+            slot = by.setdefault(c['source'], {}).setdefault(cp, {'nifty': {}, 'sector': {}, 'size': {}})
+            for bench, src in (('nifty', 'at'), ('sector', 'at_sector'), ('size', 'at_size')):
+                a = (s.get(src) or {}).get(cp)
+                if a is not None:
+                    slot[bench].setdefault(c['run_date'], []).append(a)
+    out = {}
+    for src, cps in by.items():
+        out[src] = {}
+        for cp, slot in cps.items():
+            cell = _cell(slot['nifty'])
+            cell['sector'], cell['size'] = _cell(slot['sector']), _cell(slot['size'])
+            out[src][cp] = cell
+    return {'asof': date.today().isoformat(), 'by_source': out}
 
 
 def compute() -> dict:

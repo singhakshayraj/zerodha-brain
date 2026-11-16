@@ -51,7 +51,8 @@ def test_universe_is_its_own_population_and_targets_only_in_scorecard():
     res = cl.find_lessons(calls, scores)
     assert res['populations']['universe']['overall']['n'] == 40 and res['populations']['holdings']['overall']['n'] == 0
     sc = cl.scorecard(calls, scores)
-    assert sc['by_source']['target'][20] == {'n': 40, 'hit_pct': 75.0, 'mean_alpha_pct': 2.5}
+    cell = sc['by_source']['target'][20]
+    assert {k: cell[k] for k in ('n', 'hit_pct', 'mean_alpha_pct')} == {'n': 40, 'hit_pct': 75.0, 'mean_alpha_pct': 2.5}
 
 
 def test_brief_line_on_new_or_cleared_lesson():
@@ -61,3 +62,27 @@ def test_brief_line_on_new_or_cleared_lesson():
     assert [l for l in lines if l['kind'] == 'lessons'][0]['text'] == 'New lesson: SELL calls in CHOP: 10 of 40 right (25%) vs 53% overall, p=0.000'
     old = dict(lessons, asof='2026-11-08')
     assert not [l for l in mb.compose('2026-11-16', [], [], None, None, {}, None, None, None, old) if l['kind'] == 'lessons']
+
+
+def test_bootstrap_degenerate_on_single_date():
+    mean = lambda v: sum(v) / len(v)
+    assert cl.block_bootstrap({'2026-11-10': [1.0, 1.0, 1.0]}, mean) == (1.0, 1.0)
+    assert cl.block_bootstrap({}, mean) == (None, None)
+    lo, hi = cl.block_bootstrap({'a': [0.0], 'b': [10.0], 'c': [20.0], 'd': [30.0]}, mean, n=200)
+    assert lo < 15.0 < hi and lo >= 0.0 and hi <= 30.0
+
+
+def test_scorecard_carries_ci_per_benchmark():
+    base = _calls(20, 'BULL', 10)
+    for i, (c, s) in enumerate(base):
+        c['run_date'] = f'2026-10-{1 + i % 5:02d}'
+        s['at_sector'] = {20: 1.0 if i % 2 else -3.0}
+        s['at_size'] = {20: None}
+    calls, scores = [c for c, _ in base], {cl.key(c): s for c, s in base}
+    cell = cl.scorecard(calls, scores)['by_source']['advice'][20]
+    assert cell['n'] == 20 and cell['hit_pct'] == 50.0 and cell['mean_alpha_pct'] == 0.0
+    assert len(cell['hit_ci']) == 2 and cell['hit_ci'][0] <= 50.0 <= cell['hit_ci'][1]
+    assert len(cell['alpha_ci']) == 2
+    assert cell['sector'] == {'n': 20, 'hit_pct': 50.0, 'mean_alpha_pct': -1.0,
+                              'hit_ci': cell['sector']['hit_ci'], 'alpha_ci': cell['sector']['alpha_ci']}
+    assert cell['size'] is None
