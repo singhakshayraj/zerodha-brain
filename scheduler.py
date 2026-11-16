@@ -312,6 +312,11 @@ def _maybe_sync_daily_bars() -> bool:
                 call_outcomes.update()
             except Exception as e:
                 print(f"[SCHEDULER] call outcomes failed (non-fatal): {e}")
+            try:                  # P-68: every NSE index close + P/E, P/B, yield (public archive)
+                import index_bars
+                index_bars.sync()
+            except Exception as e:
+                print(f"[SCHEDULER] index bars failed (non-fatal): {e}")
         except Exception as e:
             print(f"[daily_bars] sync failed (non-fatal): {e}")
 
