@@ -307,6 +307,11 @@ def _maybe_sync_daily_bars() -> bool:
                 macro_snapshot.run(md)
             except Exception as e:
                 print(f"[SCHEDULER] macro snapshot failed (non-fatal): {e}")
+            try:                  # P-60: score every open call through the new bars
+                import call_outcomes
+                call_outcomes.update()
+            except Exception as e:
+                print(f"[SCHEDULER] call outcomes failed (non-fatal): {e}")
         except Exception as e:
             print(f"[daily_bars] sync failed (non-fatal): {e}")
 
