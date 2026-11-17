@@ -154,3 +154,60 @@ def test_tax_summary_splits_lots_and_lists_crossings_90d():
     assert out['ltcg_calendar'] == [{'symbol': 'AAA', 'account': 'A', 'date': '2026-11-21', 'qty': 6}]
     assert out['harvest'] == [{'symbol': 'BBB', 'account': 'A', 'loss_inr': 200.0}]
     assert out['fy_realised'] == {'A': 500.0, 'B': None}
+
+
+# ---- rebalance -------------------------------------------------------------
+from datetime import date as _date
+from household_book import rebalance, _h
+
+
+def _xr(ps, sectors=None, iw=None):
+    return xray(ps, sectors or {}, {}, iw or {}, {}, DEFAULT_TARGETS)
+
+
+def _fill(n, v):   # n equal 5% -> small names, no breach
+    return [_pos('A', f'F{i}', 1, v) for i in range(n)]
+
+
+def test_trim_brings_breach_inside_target_whole_shares():
+    ps = [_pos('A', 'BIG', 112, 100)] + _fill(20, 4440)          # total 100000, BIG 11.2%
+    out = rebalance(_xr(ps), ps, {}, {}, DEFAULT_TARGETS, _date(2026, 11, 17))
+    trims = [r for r in out if r['kind'] == 'trim']
+    assert len(trims) == 1
+    t = trims[0]
+    assert t['symbol'] == 'BIG' and isinstance(t['qty'], int) and t['qty'] == 32
+    assert (11200 - t['freed_inr']) / 100000 * 100 <= 8.0
+    assert t['freed_inr'] == 3200 and t['cost_inr'] > 0 and t['reason'] == 'BIG 11.2% > 8% name cap'
+
+
+def test_trim_never_exceeds_held():
+    ps = [_pos('A', 'BIG', 5, 1000), _pos('B', 'BIG', 3, 1000)] + _fill(20, 100)
+    out = [r for r in rebalance(_xr(ps), ps, {}, {}, dict(DEFAULT_TARGETS, name_cap_pct=1.0),
+                                _date(2026, 11, 17)) if r['kind'] == 'trim' and r['symbol'] == 'BIG']
+    held = {('A', 'BIG'): 5, ('B', 'BIG'): 3}
+    for t in out:
+        held[(t['account'], t['symbol'])] -= t['qty']
+    assert all(v >= 0 for v in held.values())
+    assert sum(t['qty'] for t in out) == 8          # cap unreachable -> sells exactly what exists
+
+
+def test_trim_prefers_lowest_tax_lots():
+    ps = [_pos('A', 'BIG', 20, 100), _pos('B', 'BIG', 20, 100)] + _fill(20, 100)
+    ps = [p if p['symbol'] != 'BIG' else dict(p, last_price=150) for p in ps]   # BIG ~ 6000/9000
+    ps += [_pos('A', f'G{i}', 1, 5000) for i in range(2)]
+    lots = {'A': {'BIG': [{'qty': 20, 'price': 50, 'date': '2026-10-01'}]},     # short-term gain
+            'B': {'BIG': [{'qty': 20, 'price': 50, 'date': '2024-01-01'}]}}     # long-term, under exemption
+    fy = {'A': {'fy_known': True}, 'B': {'fy_known': True}}
+    out = [r for r in rebalance(_xr(ps), ps, lots, fy, DEFAULT_TARGETS, _date(2026, 11, 17))
+           if r['kind'] == 'trim' and r['symbol'] == 'BIG']
+    assert out[0]['account'] == 'B' and out[0]['tax_inr'] == 0
+
+
+def test_underweight_sector_names_only():
+    ps = [_pos('A', 'X', 10, 100)]
+    xr = {'names': [], 'sectors': [{'name': 'IT', 'pct': 0, 'drift_pp': -9.0, 'breach': False},
+                                   {'name': 'Banks', 'pct': 0, 'drift_pp': -3.0, 'breach': False},
+                                   {'name': 'Auto', 'pct': 5, 'drift_pp': 2.0, 'breach': False}]}
+    assert rebalance(xr, ps, {}, {}, DEFAULT_TARGETS, _date(2026, 11, 17)) == [
+        {'kind': 'underweight', 'sector': 'IT', 'gap_pp': 9.0},
+        {'kind': 'underweight', 'sector': 'Banks', 'gap_pp': 3.0}]

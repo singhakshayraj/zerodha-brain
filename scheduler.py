@@ -302,6 +302,11 @@ def _maybe_sync_daily_bars() -> bool:
             md = MarketData(KiteClient(token))
             data_jobs.sync_daily_bars(md)
             _reconcile_all()      # yesterday's real closes replace provisional prices
+            try:
+                import household_book
+                household_book.publish()
+            except Exception as e:
+                print(f"[SCHEDULER] household book failed (non-fatal): {e}")
             try:                  # tape context for every call logged today
                 import macro_snapshot
                 macro_snapshot.run(md)
@@ -495,6 +500,11 @@ def _maybe_run_advisor() -> None:
             if is_official_run:
                 n = portfolio_advisor.run_advisor(md)
                 print(f"[SCHEDULER] advisor (official) done: {n} holdings analyzed")
+                try:
+                    import household_book
+                    household_book.publish()
+                except Exception as e:
+                    print(f"[SCHEDULER] household book failed (non-fatal): {e}")
                 if config.ADVISOR_BACKTEST_ENABLED:
                     try:
                         import advisor_backtest

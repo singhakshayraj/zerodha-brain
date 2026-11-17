@@ -242,3 +242,190 @@ def tax_summary(positions, lots_by_account, fy_by_account, today):
             'unrealised_ltcg': round(sum(v['ltcg'] for v in by_acct.values()), 2),
             'by_account': {a: {k: round(x, 2) for k, x in v.items()} for a, v in by_acct.items()},
             'ltcg_calendar': cal, 'harvest': harvest, 'unmatched': unmatched}
+
+
+# ---- rebalance list --------------------------------------------------------
+import math
+import tax_actions
+import tax_context
+
+
+def _tax_for(a, sym, qty, px, lots_by_account, fy_by_account, today_s):
+    lots = ((lots_by_account or {}).get(a) or {}).get(sym) or []
+    r = costs.after_tax_pct(lots, qty, px, today_s)
+    return tax_actions.fy_tax(r['stcg_inr'], r['ltcg_inr'], (fy_by_account or {}).get(a) or {})
+
+
+def rebalance(xray_out, positions, lots_by_account, fy_by_account, targets, today, sectors=None):
+    """Whole-share trims that bring each breach inside its cap, from the account
+    where the trim is cheapest in tax (never more than held there), plus sector-only
+    underweights vs the index. Pure."""
+    total = sum(_val(p) for p in positions)
+    today_s = today.isoformat()
+    held = {(p['account'], p['symbol']): int(p.get('quantity') or 0) for p in positions}
+    px = {p['symbol']: p['last_price'] for p in positions if p.get('last_price')}
+    trims = []
+
+    def trim(sym, excess_inr, reason):
+        need = math.ceil(excess_inr / px[sym])
+        accts = [a for (a, s), q in held.items() if s == sym and q > 0]
+        # cheapest tax per share first; the remainder (if any) comes from the other account
+        per_share = lambda a: _tax_for(a, sym, min(need, held[(a, sym)]), px[sym], lots_by_account,
+                                       fy_by_account, today_s) / min(need, held[(a, sym)])
+        for a in sorted(accts, key=per_share):
+            q = min(need, held[(a, sym)])
+            if q <= 0:
+                break
+            held[(a, sym)] -= q
+            need -= q
+            freed = round(q * px[sym], 2)
+            trims.append({'kind': 'trim', 'symbol': sym, 'account': a, 'qty': q, 'freed_inr': freed,
+                          'tax_inr': _tax_for(a, sym, q, px[sym], lots_by_account, fy_by_account, today_s),
+                          'cost_inr': round(costs.round_trip_cost_pct(None) / 100 * freed / 2, 2),
+                          'reason': reason})
+
+    for n in xray_out['names']:
+        if n['breach'] and n['symbol'] in px:
+            cap = targets['name_cap_pct'] if n['breach'] == 'name' else targets['dup_cap_pct']
+            trim(n['symbol'], (n['pct'] - cap) / 100 * total,
+                 f"{n['symbol']} {n['pct']}% > {cap:g}% {'name' if n['breach'] == 'name' else 'overlap'} cap")
+    for s in xray_out['sectors']:
+        if not s['breach']:
+            continue
+        done = sum(t['freed_inr'] for t in trims
+                   if sector_view.group_of(t['symbol'], (sectors or {}).get(t['symbol'])) == s['name'])
+        excess = (s['pct'] - s['target_pct']) / 100 * total - done
+        top = sorted(((sym, d['value']) for sym, d in _by_symbol(positions).items()
+                      if sym in px and sector_view.group_of(sym, (sectors or {}).get(sym)) == s['name']),
+                     key=lambda r: r[1], reverse=True)[:3]
+        tv = sum(v for _, v in top) or 1.0
+        for sym, v in top:
+            if excess > 0:
+                trim(sym, excess * v / tv,
+                     f"sector {s['name']} {s['pct']}% > {s['target_pct']:g}% cap")
+    trims.sort(key=lambda t: t['freed_inr'], reverse=True)
+    under = sorted((s for s in xray_out['sectors'] if s['drift_pp'] < 0 and s['name'] not in _h.NOT_SECTORS),
+                   key=lambda s: s['drift_pp'])[:3]
+    return trims + [{'kind': 'underweight', 'sector': s['name'], 'gap_pp': round(-s['drift_pp'], 2)}
+                    for s in under]
+
+
+# ---- publish (the one DB-touching entry point) -----------------------------
+import json
+import pytz
+from datetime import datetime
+
+import benchmarks
+import database as db
+from universe_calls import _paged
+
+
+def _index_size_mix(sizes=None):
+    import config
+    import fundamentals
+    sizes = benchmarks.size_buckets() if sizes is None else sizes
+    by = (fundamentals.load_store() or {}).get('by_symbol') or {}
+    g = {}
+    for u in config.NIFTY500_UNIVERSE:
+        m = (by.get(u['symbol']) or {}).get('mcap')
+        if m:
+            z = sizes.get(u['symbol'], 'micro')
+            g[z] = g.get(z, 0.0) + m
+    tot = sum(g.values()) or 1.0
+    return {k: v / tot * 100 for k, v in g.items()}
+
+
+def _positions():
+    t = db.supabase.table
+    top = t('portfolio_advice').select('run_id,run_date').eq('is_official', True) \
+        .order('created_at', desc=True).limit(1).execute().data or []
+    pos, run_date = [], None
+    if top:
+        run_date = str(top[0].get('run_date'))
+        pos = [{'account': 'primary', 'symbol': r['symbol'], 'quantity': r['quantity'],
+                'avg_price': r.get('avg_price'), 'last_price': r.get('last_price'),
+                'asset_class': 'etf_gold_silver' if sector_view.is_etf(r['symbol']) else 'equity'}
+               for r in _paged(lambda: t('portfolio_advice').select('*').eq('run_id', top[0]['run_id'])
+                               .order('symbol'))]
+    raw = db.get_config('advisor_natwar_latest')
+    for r in (json.loads(raw).get('rows') or []) if raw else []:
+        pos.append({'account': 'natwar', 'symbol': r['symbol'], 'quantity': r['quantity'],
+                    'avg_price': r.get('avg_price', r.get('average_price')), 'last_price': r.get('last_price'),
+                    'asset_class': 'etf_gold_silver' if sector_view.is_etf(r['symbol']) else 'equity'})
+    unconf = [r['holding_label'] for r in _paged(lambda: t('holding_scheme_map').select('*')
+              .eq('confirmed', False).order('holding_label'))]
+    pos += [{'account': 'unknown', 'symbol': u, 'quantity': 0, 'avg_price': 0, 'last_price': 0,
+             'asset_class': 'fund_unconfirmed'} for u in unconf]
+    return pos, unconf, run_date
+
+
+def _returns(accounts, positions, nw, today_s):
+    t = db.supabase.table
+    by_acct, comb = {}, {}
+    for a in accounts:
+        by_acct[a] = _paged(lambda: t('pnl_daily').select('date,pnl,value_open,nifty_pnl')
+                            .eq('account', a).order('date'))
+        for r in by_acct[a]:
+            c = comb.setdefault(r['date'], {'date': r['date'], 'pnl': 0.0, 'value_open': 0.0, 'nifty_pnl': 0.0})
+            for k in ('pnl', 'value_open', 'nifty_pnl'):
+                c[k] += float(r.get(k) or 0)
+    by_acct['household'] = sorted(comb.values(), key=lambda r: r['date'])
+    flows = {a: [(r['trade_date'], (-1 if str(r['trade_type']).lower() == 'buy' else 1)
+                  * float(r['quantity']) * float(r['price']))
+                 for r in _paged(lambda: t('tradebook').select('trade_date,trade_type,quantity,price')
+                                 .eq('account', a).order('trade_date').order('trade_id'))]
+             + [(today_s, nw['by_account'].get(a, 0.0))] for a in accounts}
+    flows['household'] = [f for a in accounts for f in flows[a]]
+    return by_acct, flows
+
+
+def publish(today=None):
+    today = today or datetime.now(pytz.timezone('Asia/Kolkata')).date()
+    today_s = today.isoformat()
+    positions, unconf, run_date = _positions()
+    nw = net_worth(positions)
+    held = [p for p in positions if p['account'] != 'unknown' and p.get('quantity')]
+    accounts = sorted({p['account'] for p in held})
+    syms = sorted({p['symbol'] for p in held})
+
+    ctx = {a: tax_context.context_for(a, today_s, sorted({p['symbol'] for p in held
+                                                                       if p['account'] == a}))
+           for a in accounts}
+    lots = {a: c['lots_by_symbol'] for a, c in ctx.items()}
+    fy = {a: c['fy'] for a, c in ctx.items()}
+    tax = tax_summary(held, lots, fy, today)
+
+    since = (today - timedelta(days=100)).isoformat()
+    closes = {}
+    for r in _paged(lambda: db.supabase.table('candles').select('symbol,trade_date,close')
+                    .eq('interval', 'day').in_('symbol', syms).gte('trade_date', since)
+                    .order('trade_date').order('symbol')) if syms else []:
+        if r.get('close') is not None:
+            closes.setdefault(r['symbol'], {})[str(r['trade_date'])] = float(r['close'])
+
+    daily, flows = _returns(accounts, positions, nw, today_s)
+    returns = {}
+    for k, d in daily.items():
+        tw, bm = twr(d), benchmark_twr(d)
+        accs = accounts if k == 'household' else [k]
+        returns[k] = {**{f: v for f, v in tw.items()}, **{f'bench_{f}': v for f, v in bm.items()},
+                      'max_drawdown': max_drawdown(tw['series']), 'xirr': xirr(flows[k]),
+                      'xirr_partial': any(tax['unmatched'].get(a) for a in accs)}
+
+    raw = db.get_config('household_targets')
+    targets = {**DEFAULT_TARGETS, **json.loads(raw)} if raw else dict(DEFAULT_TARGETS)
+    if not raw:
+        db.write_config('household_targets', json.dumps(DEFAULT_TARGETS))
+
+    sectors, sizes = benchmarks.sectors(), benchmarks.size_buckets()
+    xr = xray(held, sectors, sizes, _h._index_weights(), _index_size_mix(sizes), targets)
+    out = {'asof': today_s, 'net_worth': nw, 'returns': returns, 'xray': xr,
+           'risk': risk(held, closes), 'tax': tax,
+           'rebalance': rebalance(xr, held, lots, fy, targets, today, sectors),
+           'funds_unconfirmed': unconf, 'targets_source': targets.get('source', 'operator'),
+           'sections_asof': {'positions': run_date,
+                             'returns': (daily['household'][-1]['date'] if daily['household'] else None),
+                             'tax': today_s,
+                             'risk': max((d for v in closes.values() for d in v), default=None)}}
+    db.write_config('household_book_latest', json.dumps(out, default=str))
+    return out
