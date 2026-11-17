@@ -486,6 +486,14 @@ def run_advisor(market_data) -> int:
         except Exception as e:
             print(f"[advisor] rotation pass failed (non-fatal): {e}")
 
+    try:                                              # P-68: tax-aware action (display only)
+        import tax_actions
+        import tax_context
+        _tctx = tax_context.context_for('primary', run_date, [r['symbol'] for r in rows])
+        print(f"[advisor.tax] {tax_actions.attach(rows, _tctx, run_date)} row(s) tax-annotated")
+    except Exception as e:
+        print(f"[advisor.tax] failed (non-fatal): {e}")
+
     # Confidence calibration (Pillar 1, DARK): rebuild the reliability curve
     # from the graded track record, store it, and stamp each row with the
     # measured hit-rate for its confidence bucket. Self-refreshing so it stays

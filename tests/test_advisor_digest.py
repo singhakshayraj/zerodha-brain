@@ -102,3 +102,10 @@ def test_send_digest_failure_never_reaches_run_advisor():
         # just pin that storage happened BEFORE the digest attempt.
         assert n in (-1, 1)
         assert up.called
+
+
+def test_digest_tax_line():
+    rows = [dict(_ROWS[1], indicators={'tax': {'text': 'after tax: sell now · tax ₹10'}}), _ROWS[2]]
+    text = pa.build_digest(rows, '2026-07-13')
+    assert '\n  🧾 after tax: sell now · tax ₹10' in text
+    assert text.count('🧾') == 1

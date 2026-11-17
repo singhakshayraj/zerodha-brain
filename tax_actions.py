@@ -128,3 +128,32 @@ def plan(row, lots, ctx, curve, today, adv_inr, trading_days):
 
 def _lots_state(known, total):
     return 'known' if known == total else 'partial' if known else 'unknown'
+
+
+def nse_trading_days(a, b):
+    """NSE trading days after ISO date a up to and including b."""
+    from datetime import date, timedelta
+    from data_jobs import _is_trading_day
+    d, end, n = date.fromisoformat(a), date.fromisoformat(b), 0
+    while d < end:
+        d += timedelta(days=1)
+        n += _is_trading_day(d)
+    return n
+
+
+def attach(rows, ctx, today) -> int:
+    """Stamp indicators.tax (+ its text as a reason) on each held row. Touches
+    nothing else: verdict, rotation_*, stops stay byte-identical."""
+    n = 0
+    for row in rows:
+        if int(row.get('quantity') or 0) <= 0:
+            continue
+        p = plan(row, ctx['lots_by_symbol'].get(row['symbol'], []), ctx['fy'], ctx['curve'],
+                 today, ctx['adv_by_symbol'].get(row['symbol']), nse_trading_days)
+        if p is None:
+            continue
+        row.setdefault('indicators', {})['tax'] = p
+        if p['text']:
+            row['reasons'] = (row.get('reasons') or []) + [p['text']]
+        n += 1
+    return n

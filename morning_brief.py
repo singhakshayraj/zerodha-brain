@@ -44,6 +44,23 @@ def _skew(label: str, view: dict) -> list:
     return out
 
 
+def _tax_line(today: str, rows: list) -> str:
+    """Waits that pay + names turning long-term within 30 days (P-68)."""
+    from datetime import date, timedelta
+    taxes = [(r['symbol'], (r.get('indicators') or {}).get('tax') or {}) for r in rows]
+    waits = ["%s sell after %s (saves ₹%.1fk)" % (s, t['action'][11:], (t.get('saving_inr') or 0) / 1000)
+             for s, t in taxes if (t.get('action') or '').startswith('sell after')]
+    out = []
+    if waits:
+        out.append('Tax: ' + '; '.join(waits[:3]) + ('; +%d more' % (len(waits) - 3) if len(waits) > 3 else ''))
+    lim = (date.fromisoformat(today) + timedelta(days=30)).isoformat()
+    soon = sorted((t['ltcg_date'], s) for s, t in taxes if t.get('ltcg_date') and today < t['ltcg_date'] <= lim)
+    if soon:
+        names = ', '.join('%s (%s)' % (s, d[5:]) for d, s in soon[:3])
+        out.append('%d cross 12 months by %s: %s' % (len(soon), date.fromisoformat(soon[-1][0]).strftime('%b %-d'), names))
+    return ' · '.join(out)
+
+
 def compose(today: str, primary: list, prior: list, prior_date, natwar: dict,
             views: dict, macro: dict, fund_asof, watchdog: dict = None, lessons: dict = None) -> list:
     """-> [{'kind', 'text', 'warn'}]. primary/prior: advisor rows; natwar:
@@ -53,6 +70,9 @@ def compose(today: str, primary: list, prior: list, prior_date, natwar: dict,
     nat_rows = (natwar or {}).get('rows') or []
     lines.append({'kind': 'moves', 'warn': False,
                   'text': _moves('Kanaklata', primary) + ' · ' + (_moves('Natwar', nat_rows) if natwar else 'Natwar: no run')})
+    tax = _tax_line(today, primary + nat_rows)
+    if tax:
+        lines.append({'kind': 'tax', 'warn': False, 'text': tax})
     if prior:
         was = {r['symbol']: r.get('verdict') for r in prior}
         flips = [f"{r['symbol']} {was[r['symbol']]}→{r['verdict']}" for r in primary

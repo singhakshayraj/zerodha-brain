@@ -51,3 +51,15 @@ def test_publish_reads_official_rows_and_writes_config():
     assert out['lines'][0]['text'].startswith('Kanaklata: 1 sell, 1 trim')      # lite row ZZZ ignored
     stored = [r for r in fake.tables['app_config'] if r['key'] == mb.KEY]
     assert stored and json.loads(stored[0]['value'])['run_date'] == '2026-11-16'
+
+
+def test_brief_tax_line():
+    rows = [{'symbol': 'ATGL', 'verdict': 'SELL', 'indicators': {'tax': {'action': 'sell after 2027-01-07', 'saving_inr': 4500, 'ltcg_date': '2027-01-07'}}},
+            {'symbol': 'A', 'verdict': 'HOLD', 'indicators': {'tax': {'action': None, 'ltcg_date': '2026-12-01'}}},
+            {'symbol': 'B', 'verdict': 'HOLD', 'indicators': {'tax': {'action': None, 'ltcg_date': '2026-12-08'}}},
+            {'symbol': 'FAR', 'verdict': 'HOLD', 'indicators': {'tax': {'action': None, 'ltcg_date': '2027-06-01'}}}]
+    lines = mb.compose('2026-11-16', rows, [], None, None, {}, None, None)
+    by = {l['kind']: l['text'] for l in lines}
+    assert by['tax'] == 'Tax: ATGL sell after 2027-01-07 (saves ₹4.5k) · 2 cross 12 months by Dec 8: A (12-01), B (12-08)'
+    assert [l['kind'] for l in lines].index('tax') == 1
+    assert 'tax' not in {l['kind'] for l in mb.compose('2026-11-16', PRIMARY, [], None, None, {}, None, None)}

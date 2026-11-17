@@ -56,6 +56,9 @@ def build_digest(rows: list, run_date: str, risk: dict = None) -> str:
                          f"~{r.get('rotation_buy_qty')} "
                          f"{r['rotation_target_symbol']} "
                          f"@ ₹{r.get('rotation_buy_price'):,.2f}")
+        tax_text = ((r.get('indicators') or {}).get('tax') or {}).get('text')
+        if tax_text:
+            line += "\n  🧾 " + tax_text
         lines.append(line)
     if overflow > 0:
         lines.append(f"\n…and {overflow} more — full read on /advisor")

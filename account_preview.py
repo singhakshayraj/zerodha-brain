@@ -99,6 +99,13 @@ def build_preview(market_data, acct: str, today: str = None) -> dict:
         attach_rotations(rows, today, regime, acct)
     except Exception as e:
         print(f"[preview:{acct}] rotation skipped (non-fatal): {e}")
+    try:                                              # P-68: tax-aware action (display only)
+        import tax_actions
+        import tax_context
+        _tctx = tax_context.context_for(acct, today, [r['symbol'] for r in rows])
+        print(f"[preview:{acct}] tax: {tax_actions.attach(rows, _tctx, today)} row(s) tax-annotated")
+    except Exception as e:
+        print(f"[preview:{acct}] tax: failed (non-fatal): {e}")
     try:
         import target_dd                              # P-57: red flags on buy targets
         target_dd.attach(rows, fundamentals.load_store(), sector_map)
