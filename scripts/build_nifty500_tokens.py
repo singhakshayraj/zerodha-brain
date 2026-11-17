@@ -34,6 +34,9 @@ def build_rows(constituents: list, instruments: list) -> tuple:
         sym = (c.get('Symbol') or '').strip()
         if not sym:
             continue
+        series = (c.get('Series') or 'EQ').strip()
+        if sym not in tokens and series != 'EQ' and f'{sym}-{series}' in tokens:
+            sym = f'{sym}-{series}'      # Kite lists BE/BZ-series names as SYMBOL-BE
         token = tokens.get(sym)
         if not token:
             missing.append(sym)
