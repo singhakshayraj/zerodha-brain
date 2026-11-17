@@ -77,6 +77,8 @@ class _Query:
             if self.table == 'advisor_paper_positions':   # DB default uuid
                 import uuid
                 self.payload = [{'id': str(uuid.uuid4()), **r} for r in self.payload]
+            if self.table == 'lab_trades':                 # DB bigserial
+                self.payload = [{'id': len(rows) + i + 1, **r} for i, r in enumerate(self.payload)]
             rows.extend(dict(r) for r in self.payload)
             return _Res(self.payload)
         if self.op == 'update':
