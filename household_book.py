@@ -120,6 +120,8 @@ import costs
 import household as _h
 import sector_view
 
+FUND_BUCKET = 'Mutual funds'      # a bucket, not a sector: never against the sector cap
+
 DEFAULT_TARGETS = {'sector_cap_pct': _h.SECTOR_CAP_PCT, 'dup_cap_pct': _h.DUP_CAP_PCT,
                    'name_cap_pct': _h.SINGLE_NAME_CAP_PCT, 'etf_cap_pct': _h.HEDGE_SLEEVE_CAP_PCT,
                    'size_tolerance_pp': 10.0, 'source': 'default'}
@@ -145,7 +147,7 @@ def xray(positions, sectors, sizes, index_weights, index_size_mix, targets=DEFAU
     eq_total = sum(_val(p) for p in positions if p['asset_class'] == 'equity'
                    and not sector_view.is_etf(p['symbol'])) or 1.0
     for sym, d in _by_symbol(positions).items():
-        g = sector_view.group_of(sym, (sectors or {}).get(sym))
+        g = FUND_BUCKET if d['cls'] == 'fund' else sector_view.group_of(sym, (sectors or {}).get(sym))
         sec[g] = sec.get(g, 0.0) + d['value']
         if d['cls'] == 'equity' and not sector_view.is_etf(sym):   # size mix is equity-only
             z = (sizes or {}).get(sym, 'micro')
@@ -160,7 +162,7 @@ def xray(positions, sectors, sizes, index_weights, index_size_mix, targets=DEFAU
     sectors_out = [{'name': g, 'pct': pct(v), 'index_pct': (index_weights or {}).get(g, 0.0),
                     'target_pct': targets['sector_cap_pct'],
                     'drift_pp': round(pct(v) - (index_weights or {}).get(g, 0.0), 2),
-                    'breach': pct(v) > targets['sector_cap_pct'] and g not in _h.NOT_SECTORS}
+                    'breach': pct(v) > targets['sector_cap_pct'] and g not in _h.NOT_SECTORS and g != FUND_BUCKET}
                    for g, v in sec.items()]
     for g, w in (index_weights or {}).items():     # index groups the household holds none of
         if g not in sec and g not in _h.NOT_SECTORS:
@@ -225,6 +227,8 @@ def tax_summary(positions, lots_by_account, fy_by_account, today):
     horizon = today + timedelta(days=90)
     by_acct, cal, harvest, unmatched = {}, [], [], {}
     for p in positions:
+        if p['asset_class'] == 'fund':     # fund tax depends on the scheme type; not modelled here
+            continue
         a, sym, q = p['account'], p['symbol'], int(p.get('quantity') or 0)
         lots = ((lots_by_account or {}).get(a) or {}).get(sym) or []
         r = costs.after_tax_pct(lots, q, p['last_price'], today_s)
@@ -380,7 +384,26 @@ def _positions():
               .eq('confirmed', False).order('holding_label'))]
     pos += [{'account': 'unknown', 'symbol': u, 'quantity': 0, 'avg_price': 0, 'last_price': 0,
              'asset_class': 'fund_unconfirmed'} for u in unconf]
+    pos += _fund_positions()
     return pos, unconf, run_date, nat_date
+
+
+def _fund_positions():
+    """Confirmed Coin funds at their latest stored AMFI NAV.
+    ponytail: holding_scheme_map has no account column; every mapped fund sits
+    in the primary account's Coin today. Add the column when Natwar buys one."""
+    t = db.supabase.table
+    out = []
+    for m in _paged(lambda: t('holding_scheme_map').select('*').eq('confirmed', True).order('holding_label')):
+        code, units = m.get('amfi_scheme_code'), float(m.get('units') or 0)
+        if not code or code == 'TODO' or units <= 0:
+            continue
+        nav = t('amfi_nav').select('nav,nav_date').eq('scheme_code', code) \
+            .order('nav_date', desc=True).limit(1).execute().data or []
+        if nav:
+            out.append({'account': 'primary', 'symbol': m['holding_label'], 'quantity': units,
+                        'avg_price': None, 'last_price': float(nav[0]['nav']), 'asset_class': 'fund'})
+    return out
 
 
 def _flows(rows):

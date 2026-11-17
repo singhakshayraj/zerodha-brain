@@ -114,3 +114,17 @@ def test_publish_skips_on_malformed_natwar():
             r['value'] = '{not json'
     out = _run(f)
     assert 'skipped' in out and not any(r['key'] == 'household_book_latest' for r in f.tables['app_config'])
+
+
+def test_confirmed_funds_valued_at_latest_nav_outside_sector_caps():
+    f = _fake()
+    f.tables['holding_scheme_map'].append({'holding_label': 'Liquid Fund', 'amfi_scheme_code': '999',
+                                           'units': '10', 'confirmed': True, 'sleeve': 'debt_cash'})
+    f.tables['amfi_nav'] = [{'scheme_code': '999', 'nav': '400', 'nav_date': '2026-11-14'},
+                            {'scheme_code': '999', 'nav': '500', 'nav_date': '2026-11-16'}]
+    out = _run(f)
+    assert out['net_worth']['by_account']['primary'] == 14000.0 + 5000.0
+    assert out['net_worth']['by_asset_class']['fund'] == 5000.0
+    bucket = [s for s in out['xray']['sectors'] if s['name'] == 'Mutual funds']
+    assert bucket and bucket[0]['breach'] is False
+    assert 'Liquid Fund' not in json.dumps(out['tax']) and 'Liquid Fund' not in json.dumps(out['xray']['sizes'])
