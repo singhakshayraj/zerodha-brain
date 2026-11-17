@@ -408,6 +408,48 @@ def _maybe_run_catchups() -> None:
             _grade_advice_catchup(token)
 
 
+# [P-70] Strategy lab: one paper-trading thread per trading day. A thread that
+# ended on TOKEN_LOST restarts only once a different token is pasted.
+_lab_thread = None
+_lab_done_day = None
+_lab_dead_token = None
+
+
+def _maybe_run_lab() -> None:
+    global _lab_thread, _lab_done_day, _lab_dead_token
+    if not config.LAB_ENABLED or config.QA_MODE:
+        return
+    import data_jobs
+    now = _now_ist()
+    today = now.date().isoformat()
+    if (_lab_done_day == today or not data_jobs._is_trading_day(now.date())
+            or not ((9, 14) <= (now.hour, now.minute) < (15, 25))):
+        return
+    if _lab_thread is not None and _lab_thread.is_alive():
+        return
+    token = db.get_enc_token()
+    if not token or token == _lab_dead_token:
+        return
+
+    def _run():
+        global _lab_done_day, _lab_dead_token
+        try:
+            import lab
+            should_yield = lambda: _advisor_running or (_bars_thread is not None and _bars_thread.is_alive())
+            result = lab.LabRunner(KiteClient(token), today, should_yield).run()
+            if result == 'EOD':
+                _lab_done_day = today
+            else:
+                _lab_dead_token = token
+            print(f"[LAB] day ended: {result}")
+        except Exception as e:
+            print(f"[LAB] crashed (non-fatal, restarts next loop): {e}")
+            time.sleep(60)
+
+    _lab_thread = threading.Thread(target=_run, daemon=True, name='lab')
+    _lab_thread.start()
+
+
 def _maybe_run_advisor() -> None:
     """Portfolio advisory (ADVISORY ONLY — no orders).
 
@@ -1019,6 +1061,7 @@ def run():
             # [P-56] post-close data checks (DB only).
             _maybe_run_watchdog()
             _maybe_run_lessons()
+            _maybe_run_lab()
             # Portfolio advisor: once per day when a live token exists.
             # Advisory-only, independent of trading sessions; never blocks
             # the loop (runs on a daemon thread).

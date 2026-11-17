@@ -120,3 +120,11 @@ def sample_signal_sell():
             "ema_21": 1360.0, "macd_histogram": -0.5
         }
     }
+
+
+@pytest.fixture(autouse=True)
+def _lab_off_by_default(monkeypatch):
+    """[P-70] The scheduler loop must never start a real lab thread under test
+    (a run during market hours would hit live Kite). Lab tests opt back in."""
+    import config
+    monkeypatch.setattr(config, 'LAB_ENABLED', False)

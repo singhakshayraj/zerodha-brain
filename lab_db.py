@@ -69,7 +69,7 @@ def daily_history(strategy_id: str) -> list:
 
 
 def statuses() -> dict:
-    return {r['id']: r['status'] for r in (db.supabase.table('lab_strategies')
+    return {r['id']: r.get('status') or 'running' for r in (db.supabase.table('lab_strategies')
                                            .select('id,status').execute().data or [])}
 
 

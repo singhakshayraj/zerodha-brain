@@ -727,3 +727,9 @@ def get_tunable(key: str):
     except (ValueError, TypeError):
         print(f"[config.tunables] bad override {key}={override!r}; using default")
         return default
+
+
+# ── Strategy lab [P-70] — parallel intraday PAPER variants (lab.py) ──────────
+LAB_ENABLED = os.getenv('LAB_ENABLED', 'true').strip().lower() == 'true'
+LAB_UNIVERSE_N = int(os.getenv('LAB_UNIVERSE_N', '200'))
+LAB_FETCH_DELAY_S = float(os.getenv('LAB_FETCH_DELAY_S', '0.35'))
