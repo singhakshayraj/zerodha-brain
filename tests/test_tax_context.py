@@ -57,3 +57,27 @@ def test_fy_boundary_before_april():
         assert tc.context_for('primary', '2026-02-10', [])['fy']['ytd_net_realised_inr'] == 999.0   # FY25-26
         assert tc.context_for('primary', '2026-03-31', [])['fy']['fy_known'] is True
         assert tc.context_for('primary', '2024-09-10', [])['fy']['fy_known'] is False
+
+
+def test_curve_falls_back_to_stored_outcomes():
+    f = _fake()
+    f.tables['app_config'] = []
+    with patch.object(tc.db, 'supabase', f), \
+         patch.object(tc.call_outcomes, '_stored', return_value={'k': 1}) as st, \
+         patch.object(tc.call_outcomes, 'load_calls', return_value=['c']) as lc, \
+         patch.object(tc, 'cost_curve', return_value={'5': {'n': 25, 'mean_ret_pct': -1.0}}) as cc:
+        ctx = tc.context_for('primary', '2026-11-17', [])
+    st.assert_called_once_with(tc.call_outcomes.BARS_START)
+    lc.assert_called_once_with(tc.call_outcomes.BARS_START)
+    cc.assert_called_once_with({'k': 1}, ['c'])
+    assert ctx['curve'] == {'5': {'n': 25, 'mean_ret_pct': -1.0}}
+
+
+def test_fy_latest_period_to_wins():
+    f = _fake()
+    f.tables['pnl_statements'] = [
+        {'account': 'primary', 'period_from': '2026-04-01', 'period_to': '2026-09-30', 'summary': {'Realized P&L': 1.0}},
+        {'account': 'primary', 'period_from': '2026-04-01', 'period_to': '2026-11-01', 'summary': {'Realized P&L': 2.0}},
+        {'account': 'primary', 'period_from': '2026-04-01', 'period_to': '2026-10-15', 'summary': {'Realized P&L': 3.0}}]
+    with patch.object(tc.db, 'supabase', f):
+        assert tc.context_for('primary', '2026-11-17', [])['fy']['ytd_net_realised_inr'] == 2.0

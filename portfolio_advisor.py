@@ -687,6 +687,11 @@ def run_advisor_lite(market_data) -> int:
                 th = (official.get('indicators') or {}).get('thesis')
                 if th:
                     advice['indicators'] = {**(advice.get('indicators') or {}), 'thesis': th}
+                tx = (official.get('indicators') or {}).get('tax')
+                if tx:
+                    advice['indicators'] = {**(advice.get('indicators') or {}), 'tax': tx}
+                    if tx.get('text'):
+                        advice['reasons'] = (advice.get('reasons') or []) + [tx['text']]
             rows.append({'run_date': run_date, **advice})
         except Exception as e:
             print(f"[advisor.lite] {tsym} failed (skipped): {e}")

@@ -16,6 +16,7 @@ _ACTIONABLE = ('SELL', 'SELL_ON_BOUNCE', 'TRIM')
 # calls, each with a rotation + sizing block) can clear that. Cap the digest
 # to the worst N; the rest are one tap away on /advisor.
 _DIGEST_MAX_CALLS = 12
+_DIGEST_MAX_CHARS = 3800     # hard cap; send_daily_digest appends ~170 more
 
 
 def build_digest(rows: list, run_date: str, risk: dict = None) -> str:
@@ -63,8 +64,11 @@ def build_digest(rows: list, run_date: str, risk: dict = None) -> str:
     if overflow > 0:
         lines.append(f"\n…and {overflow} more — full read on /advisor")
     lines.extend(risk_lines)
-    lines.append("\nAdvisory only — you decide. Full read: /advisor")
-    return '\n'.join(lines)
+    footer = "\nAdvisory only — you decide. Full read: /advisor"
+    body = '\n'.join(lines)
+    if len(body) + len(footer) > _DIGEST_MAX_CHARS:     # headroom for the keyboard note
+        body = body[:_DIGEST_MAX_CHARS - len(footer) - 3] + '\n…'
+    return body + '\n' + footer
 
 
 def build_decision_keyboard(rows: list, run_date: str) -> dict:

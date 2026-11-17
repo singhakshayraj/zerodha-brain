@@ -20,3 +20,12 @@ def test_summarise_nets_tax_against_drift():
     assert _load().summarise(d) == {'calls': 3, 'told_to_wait': 2, 'tax_saved_inr': 1300.0,
                                     'drift_paid_inr': 500.56, 'net_inr': 799.44, 'net_pct': 2.66}
     assert _load().summarise([])['net_pct'] == 0.0
+
+
+def test_first_path_row_on_or_after_ltcg_date_else_none():
+    rows = [{'date': '2026-09-01', 'close': 1}, {'date': '2026-10-05', 'close': 2},
+            {'date': '2026-10-02', 'close': 3}]
+    m = _load()
+    assert m.first_on_or_after(rows, '2026-10-03')['close'] == 2
+    assert m.first_on_or_after(rows, '2026-10-02')['close'] == 3
+    assert m.first_on_or_after(rows, '2026-11-01') is None

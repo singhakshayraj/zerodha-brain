@@ -24,6 +24,10 @@ def summarise(decisions: list) -> dict:
             'net_pct': round(net / val * 100, 2) if val else 0.0}
 
 
+def first_on_or_after(rows, ld):
+    return next((x for x in sorted(rows, key=lambda x: str(x['date'])) if str(x['date'])[:10] >= ld), None)
+
+
 def main():
     import call_outcomes
     import database as db
@@ -61,14 +65,13 @@ def main():
         if p['action'].startswith('sell after'):
             ld = p['action'].split()[-1]
             k = ('advice', 'primary', rd, r['symbol'])
-            rows = sorted(paths.get(k) or [], key=lambda x: str(x['date']))
-            after = [x for x in rows if str(x['date'])[:10] >= ld] or rows[-1:]
-            if not after:                      # no path row at all yet
+            after = first_on_or_after(paths.get(k) or [], ld)
+            if after is None:                  # no bar dated >= the LTCG date yet
                 pending += 1
                 continue
             sq = tax_actions._sell_qty(row)
             d.update(tax_saved_inr=p['saving_inr'], sell_value_inr=sq * float(r['last_price']),
-                     drift_paid_inr=round(sq * (float(r['last_price']) - float(after[0]['close'])), 2))
+                     drift_paid_inr=round(sq * (float(r['last_price']) - float(after['close'])), 2))
             table.append((d['symbol'], rd, ld, d['tax_saved_inr'], d['drift_paid_inr'],
                           round(d['tax_saved_inr'] - d['drift_paid_inr'], 2)))
         out.append(d)

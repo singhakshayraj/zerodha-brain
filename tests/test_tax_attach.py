@@ -55,3 +55,14 @@ def test_hold_rows_only_get_ltcg_date():
 
 def test_nse_trading_days_skips_weekend():
     assert tax_actions.nse_trading_days('2026-11-13', '2026-11-16') == 1   # Fri -> Mon
+
+
+def test_attach_isolates_bad_rows():
+    rows = [dict(_rows()[0], symbol='SELLME'),
+            {'symbol': 'SELLME', 'quantity': 10, 'average_price': 100.0, 'last_price': None,
+             'verdict': 'SELL', 'indicators': None},
+            {'symbol': 'SELLME', 'quantity': 10, 'average_price': 100.0, 'last_price': 150.0,
+             'verdict': 'SELL', 'indicators': None, 'rotation_sell_qty': '5.0'}]
+    assert tax_actions.attach(rows, CTX, TODAY) == 2
+    assert 'tax' in rows[0]['indicators'] and 'tax' in rows[2]['indicators']
+    assert 'tax' not in (rows[1].get('indicators') or {})

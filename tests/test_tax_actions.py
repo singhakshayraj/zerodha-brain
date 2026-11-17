@@ -92,3 +92,34 @@ def test_expected_drop_interpolates_and_floors():
     assert ta.expected_drop_pct(c, 30) == 3.0
     assert ta.expected_drop_pct(c, 3) == 1.0
     assert ta.expected_drop_pct(curve(+2.0), 30) == 0.0
+
+
+def test_expected_drop_governing_checkpoint_with_thin_60():
+    c = curve(-1.0)
+    c['40'] = {'n': 50, 'mean_ret_pct': -4.0}
+    c['60'] = {'n': 3, 'mean_ret_pct': -9.0}
+    assert ta.expected_drop_pct(c, 60) == 4.0      # thin '60' skipped, '40' governs flat
+    assert ta.expected_drop_pct(c, 59) == 4.0      # next checkpoint thin -> flat, not interpolated
+
+
+def test_sell_qty_emitted_and_lots_suffix_both_branches():
+    lots = [{'qty': 30, 'price': 100.0, 'date': '2024-01-01'}]
+    p = ta.plan(row(quantity=100, last_price=200.0), lots, CTX, curve(), TODAY, None, wd)
+    assert p['sell_qty'] == 100 and p['action'] == 'sell now'
+    assert p['text'].endswith(' · lots: 30 of 100 dated')
+    p = ta.plan(row(verdict='TRIM', quantity=100, last_price=200.0), [], CTX, curve(), TODAY, None, wd)
+    assert p['sell_qty'] == 50 and ' · lots: unknown' in p['text']
+    lots = [{'qty': 100, 'price': 100.0, 'date': '2025-12-20'}]
+    p = ta.plan(row(last_price=700.0), lots, CTX, curve(-1.0), TODAY, None, wd)
+    assert 'lots:' not in p['text']
+
+
+def test_harvest_note_shown_on_underwater_sell_now():
+    lots = [{'qty': 100, 'price': 100.0, 'date': '2025-12-20'}]
+    p = ta.plan(row(last_price=80.0), lots, dict(CTX, ytd_net_realised_inr=5000.0), curve(), TODAY, None, wd)
+    assert "realising -₹2,000 offsets ₹2,000 of this year's gains" in p['text']
+    p = ta.plan(row(last_price=80.0), lots, CTX, curve(), TODAY, None, wd)
+    assert 'realising −₹2,000 this FY (no realised gains on record)' in p['text']
+    assert 'offsets ₹0' not in p['text']
+    p = ta.plan(row(last_price=80.0), lots, dict(CTX, fy_known=False), curve(), TODAY, None, wd)
+    assert 'no realised gains on record' in p['text']

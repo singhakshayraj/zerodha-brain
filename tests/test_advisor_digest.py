@@ -109,3 +109,12 @@ def test_digest_tax_line():
     text = pa.build_digest(rows, '2026-07-13')
     assert '\n  🧾 after tax: sell now · tax ₹10' in text
     assert text.count('🧾') == 1
+
+
+def test_digest_hard_cap_keeps_footer():
+    rows = [{'symbol': f'S{i}', 'verdict': 'SELL', 'trend_score': -i, 'pnl_percent': -1.0,
+             'indicators': {'tax': {'text': 'x' * 900}}} for i in range(12)]
+    text = pa.build_digest(rows, '2026-07-13')
+    assert len(text) <= 3800
+    assert text.endswith('Advisory only — you decide. Full read: /advisor')
+    assert '\n…\n' in text

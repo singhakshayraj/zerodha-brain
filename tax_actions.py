@@ -33,10 +33,10 @@ def expected_drop_pct(curve, days):
     def at(cp):
         c = (curve or {}).get(str(cp))
         return c if c and (c.get('n') or 0) >= CURVE_MIN_N else None
-    lo = max([c for c in _CPS if c <= days] or [5])
-    a = at(lo)
-    if a is None:
+    lo = max([c for c in _CPS if c <= max(days, 5) and at(c)] or [0])
+    if not lo:
         return None
+    a = at(lo)
     mean = a['mean_ret_pct']
     if days > lo and lo != _CPS[-1]:
         hi = _CPS[_CPS.index(lo) + 1]
@@ -75,7 +75,7 @@ def plan(row, lots, ctx, curve, today, adv_inr, trading_days):
     price = float(row['last_price'])
     out = {'action': None, 'ltcg_date': None, 'wait_days': None, 'tax_now_inr': None,
            'tax_after_inr': None, 'saving_inr': None, 'wait_cost_inr': None,
-           'cost_inr': None, 'lots': None, 'unmatched_qty': 0, 'harvest_inr': 0,
+           'cost_inr': None, 'sell_qty': None, 'lots': None, 'unmatched_qty': 0, 'harvest_inr': 0,
            'harvest_note': None, 'text': None}
     known_total = sum(l['qty'] for l in lots)
     if row['verdict'] not in SELL_GRADES:       # HOLD etc: LTCG date only
@@ -88,6 +88,7 @@ def plan(row, lots, ctx, curve, today, adv_inr, trading_days):
     now = _sale(lots, sq, price, today, row, ctx, adv_inr)
     ld = now['ltcg_date'] or None
     known_sq = sq - now['unmatched']
+    out['sell_qty'] = sq
     out.update(tax_now_inr=now['tax'], cost_inr=now['cost'], ltcg_date=ld,
                unmatched_qty=now['unmatched'], lots=_lots_state(known_sq, sq),
                action='sell now')
@@ -112,7 +113,9 @@ def plan(row, lots, ctx, curve, today, adv_inr, trading_days):
         out['harvest_inr'] = loss
         out['harvest_note'] = (
             "realising -%s offsets %s of this year's gains" % (_inr(loss), _inr(min(loss, ytd)))
-            if ytd >= 0 else
+            if ytd > 0 and ctx.get('fy_known') else
+            "realising −%s this FY (no realised gains on record)" % _inr(loss)
+            if ytd == 0 or not ctx.get('fy_known') else
             "adds to this FY's %s net loss (carries forward 8 years)" % _inr(-ytd))
     if out['action'] == 'sell now':
         shield = ' (FY loss shield %s)' % _inr(-ytd) if ytd < 0 and ctx.get('fy_known') else ''
@@ -120,8 +123,10 @@ def plan(row, lots, ctx, curve, today, adv_inr, trading_days):
     else:
         t = 'after tax: sell after %s (%d days) · saves %s vs %s expected drift' % (
             ld, out['wait_days'], _inr(out['saving_inr']), _inr(out['wait_cost_inr']))
-        if out['lots'] != 'known':
-            t += ' · lots: %d of %d dated' % (known_sq, sq)
+    if out['lots'] != 'known':
+        t += ' · lots: %d of %d dated' % (known_sq, sq) if known_sq else ' · lots: unknown'
+    if out['action'] == 'sell now' and out['harvest_note']:
+        t += ' · ' + out['harvest_note']
     out['text'] = t + note + ('' if ctx.get('fy_known') else ' · FY realised unknown')
     return out
 
@@ -146,13 +151,20 @@ def attach(rows, ctx, today) -> int:
     nothing else: verdict, rotation_*, stops stay byte-identical."""
     n = 0
     for row in rows:
-        if int(row.get('quantity') or 0) <= 0:
+        try:
+            if int(row.get('quantity') or 0) <= 0 or row.get('last_price') is None:
+                continue
+            if row.get('rotation_sell_qty'):
+                row['rotation_sell_qty'] = int(float(row['rotation_sell_qty']))
+            p = plan(row, ctx['lots_by_symbol'].get(row['symbol'], []), ctx['fy'], ctx['curve'],
+                     today, ctx['adv_by_symbol'].get(row['symbol']), nse_trading_days)
+        except Exception as e:
+            print(f"[advisor.tax] {row.get('symbol')} skipped (non-fatal): {e}")
             continue
-        p = plan(row, ctx['lots_by_symbol'].get(row['symbol'], []), ctx['fy'], ctx['curve'],
-                 today, ctx['adv_by_symbol'].get(row['symbol']), nse_trading_days)
         if p is None:
             continue
-        row.setdefault('indicators', {})['tax'] = p
+        row['indicators'] = row.get('indicators') or {}
+        row['indicators']['tax'] = p
         if p['text']:
             row['reasons'] = (row.get('reasons') or []) + [p['text']]
         n += 1
