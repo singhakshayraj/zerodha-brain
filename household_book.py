@@ -348,7 +348,14 @@ def _positions():
                for r in _paged(lambda: t('portfolio_advice').select('*').eq('run_id', top[0]['run_id'])
                                .order('symbol'))]
     raw = db.get_config('advisor_natwar_latest')
-    for r in (json.loads(raw).get('rows') or []) if raw else []:
+    try:
+        nat = json.loads(raw)['rows']
+        assert nat
+    except Exception:
+        return None, None, 'natwar payload missing or malformed'
+    if not top or not pos:
+        return None, None, 'no official portfolio_advice run'
+    for r in nat:
         pos.append({'account': 'natwar', 'symbol': r['symbol'], 'quantity': r['quantity'],
                     'avg_price': r.get('avg_price', r.get('average_price')), 'last_price': r.get('last_price'),
                     'asset_class': 'etf_gold_silver' if sector_view.is_etf(r['symbol']) else 'equity'})
@@ -359,30 +366,57 @@ def _positions():
     return pos, unconf, run_date
 
 
-def _returns(accounts, positions, nw, today_s):
+def _flows(rows):
+    """Windowed flows from pnl_daily rows: value_open on day 1, each day's
+    sells - buys (value_open(D) = value_close(D-1), so nothing is double-counted),
+    value_close on the last day. Returns {date: amount}."""
+    rows = sorted(rows, key=lambda r: r['date'])
+    out = {}
+    if not rows:
+        return out
+    add = lambda d, v: out.__setitem__(d, out.get(d, 0.0) + v)
+    add(rows[0]['date'], -float(rows[0].get('value_open') or 0))
+    for r in rows:
+        v = float(r.get('sells_inr') or 0) - float(r.get('buys_inr') or 0)
+        if v:
+            add(r['date'], v)
+    add(rows[-1]['date'], float(rows[-1].get('value_close') or 0))
+    return out
+
+
+def _returns(accounts):
     t = db.supabase.table
-    by_acct, comb = {}, {}
+    by_acct, comb, flows = {}, {}, {}
     for a in accounts:
-        by_acct[a] = _paged(lambda: t('pnl_daily').select('date,pnl,value_open,nifty_pnl')
+        by_acct[a] = _paged(lambda: t('pnl_daily').select('date,pnl,value_open,value_close,buys_inr,sells_inr,nifty_pnl')
                             .eq('account', a).order('date'))
+        flows[a] = _flows(by_acct[a])
         for r in by_acct[a]:
             c = comb.setdefault(r['date'], {'date': r['date'], 'pnl': 0.0, 'value_open': 0.0, 'nifty_pnl': 0.0})
             for k in ('pnl', 'value_open', 'nifty_pnl'):
                 c[k] += float(r.get(k) or 0)
     by_acct['household'] = sorted(comb.values(), key=lambda r: r['date'])
-    flows = {a: [(r['trade_date'], (-1 if str(r['trade_type']).lower() == 'buy' else 1)
-                  * float(r['quantity']) * float(r['price']))
-                 for r in _paged(lambda: t('tradebook').select('trade_date,trade_type,quantity,price')
-                                 .eq('account', a).order('trade_date').order('trade_id'))]
-             + [(today_s, nw['by_account'].get(a, 0.0))] for a in accounts}
-    flows['household'] = [f for a in accounts for f in flows[a]]
+    hh = {}
+    for a in accounts:
+        for d, v in flows[a].items():
+            hh[d] = hh.get(d, 0.0) + v
+    flows['household'] = hh
     return by_acct, flows
+
+
+def _xirr_window(fl):
+    if not fl or (date.fromisoformat(max(fl)) - date.fromisoformat(min(fl))).days < 30:
+        return None
+    return xirr(sorted(fl.items()))
 
 
 def publish(today=None):
     today = today or datetime.now(pytz.timezone('Asia/Kolkata')).date()
     today_s = today.isoformat()
     positions, unconf, run_date = _positions()
+    if positions is None:
+        print(f'[household] skipped: {run_date}')    # run_date carries the reason
+        return {'skipped': run_date}
     nw = net_worth(positions)
     held = [p for p in positions if p['account'] != 'unknown' and p.get('quantity')]
     accounts = sorted({p['account'] for p in held})
@@ -403,14 +437,14 @@ def publish(today=None):
         if r.get('close') is not None:
             closes.setdefault(r['symbol'], {})[str(r['trade_date'])] = float(r['close'])
 
-    daily, flows = _returns(accounts, positions, nw, today_s)
+    daily, flows = _returns(accounts)
     returns = {}
     for k, d in daily.items():
         tw, bm = twr(d), benchmark_twr(d)
-        accs = accounts if k == 'household' else [k]
         returns[k] = {**{f: v for f, v in tw.items()}, **{f'bench_{f}': v for f, v in bm.items()},
-                      'max_drawdown': max_drawdown(tw['series']), 'xirr': xirr(flows[k]),
-                      'xirr_partial': any(tax['unmatched'].get(a) for a in accs)}
+                      'max_drawdown': max_drawdown(tw['series']), 'xirr': _xirr_window(flows[k]),
+                      'xirr_partial': True, 'xirr_since': d[0]['date'] if d else None,
+                      'xirr_note': f"window since {d[0]['date'] if d else None}, excludes dividends"}
 
     raw = db.get_config('household_targets')
     targets = {**DEFAULT_TARGETS, **json.loads(raw)} if raw else dict(DEFAULT_TARGETS)
@@ -425,6 +459,7 @@ def publish(today=None):
            'funds_unconfirmed': unconf, 'targets_source': targets.get('source', 'operator'),
            'sections_asof': {'positions': run_date,
                              'returns': (daily['household'][-1]['date'] if daily['household'] else None),
+                             'xirr_since': (daily['household'][0]['date'] if daily['household'] else None),
                              'tax': today_s,
                              'risk': max((d for v in closes.values() for d in v), default=None)}}
     db.write_config('household_book_latest', json.dumps(out, default=str))
