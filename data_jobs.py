@@ -357,8 +357,9 @@ def check_bar_integrity(day: str, lo: float = INTEGRITY_LO, hi: float = INTEGRIT
     an unadjusted split/demerger or a bad print. -> [{symbol, date, ratio}]."""
     import corporate_actions
     since = (datetime.fromisoformat(day) - timedelta(days=10)).date().isoformat()
-    rows = (db.supabase.table('candles').select('symbol,trade_date,close').eq('interval', 'day')
-            .gte('trade_date', since).lte('trade_date', day).order('trade_date').execute().data or [])
+    from universe_calls import _paged          # PostgREST caps a select at 1,000 rows; 10 days ≈ 4,000
+    rows = _paged(lambda: db.supabase.table('candles').select('symbol,trade_date,close').eq('interval', 'day')
+                  .gte('trade_date', since).lte('trade_date', day).order('trade_date').order('symbol'))
     known = {(a['symbol'], a['date']) for a in corporate_actions.load()}
     series = {}
     for r in rows:

@@ -18,7 +18,7 @@ def test_fifo_splits_lots_across_twelve_months():
     assert r['stcg_inr'] == 300.0
     # LTCG 500 is under the exemption -> 0 tax; STCG 300 at 20% = 60
     assert r['tax_inr'] == 60.0
-    assert r['ltcg_date'] == '2027-03-01'
+    assert r['ltcg_date'] == '2027-03-02'          # long-term from the day after twelve months
 
 
 def test_fifo_consumes_sells_before_sizing_lots():
@@ -50,3 +50,18 @@ def test_net_pct_subtracts_tax_and_cost():
     assert r['stcg_inr'] == 1000.0 and r['tax_inr'] == 200.0
     assert r['cost_inr'] == round(11000 * 0.3 / 100, 2)
     assert r['net_pct'] == round((1000 - 200 - r['cost_inr']) / 10000 * 100, 2)
+
+
+def test_twelve_months_exactly_is_still_short_term():
+    lots = [{'qty': 10, 'price': 100.0, 'date': '2025-11-16'}]
+    on_day = costs.after_tax_pct(lots, 10, 200.0, '2026-11-16')
+    assert on_day['stcg_inr'] == 1000.0 and on_day['ltcg_inr'] == 0.0 and on_day['ltcg_date'] == '2026-11-17'
+    assert costs.after_tax_pct(lots, 10, 200.0, '2026-11-17')['ltcg_inr'] == 1000.0
+
+
+def test_oversell_is_reported_not_hidden():
+    lots = [{'qty': 10, 'price': 100.0, 'date': '2026-01-01'}]
+    r = costs.after_tax_pct(lots, 25, 110.0, '2026-06-01')
+    assert r['unmatched_qty'] == 15
+    assert r['gross_pct'] == 10.0            # on the 10 matched shares, not inflated by 25
+    assert costs.tax_lots([_t('X', 10, 100.0, '2026-01-01'), _t('X', 12, 120.0, '2026-02-01', 'sell')], 'X', 'primary') == []

@@ -4,7 +4,7 @@
 Tax constants are the post-July-2024 rates as reported for FY 2026-27; verify
 against the Finance Act before Phase 1 lets a verdict act on them.
 """
-from datetime import date
+from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 
 STCG_PCT = 20.0                 # listed equity held < 12 months (s.111A)
@@ -68,7 +68,9 @@ def after_tax_pct(lots: list, qty: int, sale_price: float, sale_date: str,
         take = min(left, lot['qty'])
         gain = take * (sale_price - lot['price'])
         cost += take * lot['price']
-        long_on = _d(lot['date']) + relativedelta(years=1)
+        # s.2(42A): "not more than twelve months" is short-term, so the day
+        # exactly one year on is still STCG; long-term starts the day after.
+        long_on = _d(lot['date']) + relativedelta(years=1) + timedelta(days=1)
         if sd >= long_on:
             ltcg += gain
         else:
@@ -76,9 +78,11 @@ def after_tax_pct(lots: list, qty: int, sale_price: float, sale_date: str,
             if ltcg_date is None or long_on.isoformat() < ltcg_date:
                 ltcg_date = long_on.isoformat()
         left -= take
+    matched = int(qty) - left                  # shares with a known lot; the rest have no buy date
     taxable_ltcg = max(0.0, ltcg - max(0.0, LTCG_EXEMPT_INR - ltcg_used_fy))
+    # ponytail: a short-term loss is not netted against LTCG (s.70 allows it); Phase 1 decides
     tax = max(0.0, stcg) * STCG_PCT / 100 + taxable_ltcg * LTCG_PCT / 100
-    proceeds = qty * sale_price
+    proceeds = matched * sale_price
     trading_cost = round(proceeds * round_trip_cost_pct(adv_inr) / 100, 2)
     gross = proceeds - cost
     return {
@@ -86,5 +90,5 @@ def after_tax_pct(lots: list, qty: int, sale_price: float, sale_date: str,
         'stcg_inr': round(stcg, 2), 'ltcg_inr': round(ltcg, 2),
         'tax_inr': round(tax, 2), 'cost_inr': trading_cost,
         'net_pct': round((gross - tax - trading_cost) / cost * 100, 2) if cost else None,
-        'ltcg_date': ltcg_date,
+        'ltcg_date': ltcg_date, 'matched_qty': matched, 'unmatched_qty': left,
     }

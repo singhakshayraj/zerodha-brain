@@ -37,3 +37,28 @@ def test_scoring_adjusts_across_a_listed_action():
             'entry': 100.0, 'direction': 1, 'target': None, 'target_entry': None}
     rows = cs.score_call(call, adj, days, entry_adjust=ca.entry_factor('AAA', '2026-11-10', known))
     assert rows[0]['ret_pct'] == 0.0 and rows[1]['ret_pct'] == 2.0
+
+
+def test_integrity_pages_past_the_1000_row_cap():
+    # 1,500 symbols × 2 days = 3,000 rows; a single unpaged select returns 1,000 (PostgREST cap)
+    rows = []
+    for i in range(1500):
+        rows += [(f'S{i:04d}', '2026-11-13', 100), (f'S{i:04d}', '2026-11-14', 49 if i == 1499 else 100)]
+    f = _fake(rows)
+    real = f.table
+
+    class Capped:
+        def __init__(self, q): self.q = q
+        def __getattr__(self, k):
+            a = getattr(self.q, k)
+            if k == 'execute':
+                def ex():
+                    r = a()
+                    r.data = (r.data or [])[:1000]
+                    return r
+                return ex
+            return lambda *x, **kw: Capped(a(*x, **kw))
+    f.table = lambda name: Capped(real(name))
+    with patch.object(data_jobs.db, 'supabase', f), patch.object(ca, 'load', lambda: []):
+        out = data_jobs.check_bar_integrity('2026-11-14')
+    assert out == [{'symbol': 'S1499', 'date': '2026-11-14', 'ratio': 0.49}]

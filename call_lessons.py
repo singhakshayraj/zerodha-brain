@@ -123,20 +123,24 @@ BOOT_N = 1000
 BOOT_SEED = 0
 
 
-def block_bootstrap(values_by_date: dict, stat, n: int = BOOT_N, seed: int = BOOT_SEED):
-    """95% percentile interval of `stat` over the pooled values, resampling
-    whole dates with replacement (calls made the same day are not independent).
+def block_bootstrap(values_by_date: dict, stat: str = 'mean', n: int = BOOT_N, seed: int = BOOT_SEED):
+    """95% percentile interval of `stat` ('mean' of the values, or 'hit' =
+    % > 0) over the pooled values, resampling whole dates with replacement
+    (calls made the same day are not independent). Works on per-date
+    (sum, hits, n) aggregates, so a draw costs O(dates), not O(values).
     One date, or all-identical values, gives a degenerate (v, v)."""
     import numpy as np
-    dates = [d for d, v in values_by_date.items() if v]
+    dates = [d for d, v in values_by_date.items() if len(v)]
     if not dates:
         return (None, None)
+    arr = [np.asarray(values_by_date[d], dtype=float) for d in dates]
+    sums = np.array([a.sum() for a in arr])
+    hits = np.array([(a > 0).sum() for a in arr], dtype=float)
+    cnt = np.array([a.size for a in arr], dtype=float)
+    num = hits * 100 if stat == 'hit' else sums
     rng = np.random.default_rng(seed)
-    pools = [values_by_date[d] for d in dates]
-    stats = []
-    for _ in range(n):
-        pick = rng.integers(0, len(pools), len(pools))
-        stats.append(stat([x for i in pick for x in pools[i]]))
+    picks = rng.integers(0, len(dates), (n, len(dates)))
+    stats = num[picks].sum(axis=1) / cnt[picks].sum(axis=1)
     return (round(float(np.percentile(stats, 2.5)), 2), round(float(np.percentile(stats, 97.5)), 2))
 
 
@@ -144,10 +148,9 @@ def _cell(by_date: dict):
     v = [x for xs in by_date.values() for x in xs]
     if not v:
         return None
-    hit = lambda xs: 100 * sum(a > 0 for a in xs) / len(xs)
-    mean = lambda xs: sum(xs) / len(xs)
-    return {'n': len(v), 'hit_pct': round(hit(v), 1), 'mean_alpha_pct': round(mean(v), 2),
-            'hit_ci': list(block_bootstrap(by_date, hit)), 'alpha_ci': list(block_bootstrap(by_date, mean))}
+    return {'n': len(v), 'hit_pct': round(100 * sum(a > 0 for a in v) / len(v), 1),
+            'mean_alpha_pct': round(sum(v) / len(v), 2),
+            'hit_ci': list(block_bootstrap(by_date, 'hit')), 'alpha_ci': list(block_bootstrap(by_date, 'mean'))}
 
 
 def scorecard(calls: list, scores: dict) -> dict:

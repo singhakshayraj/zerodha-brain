@@ -65,10 +65,10 @@ def test_brief_line_on_new_or_cleared_lesson():
 
 
 def test_bootstrap_degenerate_on_single_date():
-    mean = lambda v: sum(v) / len(v)
-    assert cl.block_bootstrap({'2026-11-10': [1.0, 1.0, 1.0]}, mean) == (1.0, 1.0)
-    assert cl.block_bootstrap({}, mean) == (None, None)
-    lo, hi = cl.block_bootstrap({'a': [0.0], 'b': [10.0], 'c': [20.0], 'd': [30.0]}, mean, n=200)
+    assert cl.block_bootstrap({'2026-11-10': [1.0, 1.0, 1.0]}, 'mean') == (1.0, 1.0)
+    assert cl.block_bootstrap({}, 'mean') == (None, None)
+    assert cl.block_bootstrap({'a': [1.0, -1.0]}, 'hit') == (50.0, 50.0)
+    lo, hi = cl.block_bootstrap({'a': [0.0], 'b': [10.0], 'c': [20.0], 'd': [30.0]}, 'mean', n=200)
     assert lo < 15.0 < hi and lo >= 0.0 and hi <= 30.0
 
 
@@ -86,3 +86,12 @@ def test_scorecard_carries_ci_per_benchmark():
     assert cell['sector'] == {'n': 20, 'hit_pct': 50.0, 'mean_alpha_pct': -1.0,
                               'hit_ci': cell['sector']['hit_ci'], 'alpha_ci': cell['sector']['alpha_ci']}
     assert cell['size'] is None
+
+
+def test_bootstrap_is_fast_at_universe_scale():
+    import time
+    by_date = {f'd{i}': [float(j % 7 - 3) for j in range(500)] for i in range(55)}
+    t0 = time.time()
+    lo, hi = cl.block_bootstrap(by_date, 'mean')
+    assert time.time() - t0 < 0.5, 'one cell must cost well under a second'
+    assert lo <= hi and abs(lo) < 1.0           # every date identical -> a tight interval around the mean

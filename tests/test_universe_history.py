@@ -68,3 +68,12 @@ def test_build_rows_from_events_and_pin():
     assert rows['NEW'] == {'symbol': 'NEW', 'joined': '2025-03-28', 'left': ''}
     assert rows['OLD'] == {'symbol': 'OLD', 'joined': '', 'left': '2025-03-28'}
     assert rows['BRIEF'] == {'symbol': 'BRIEF', 'joined': '2022-09-30', 'left': '2025-09-30'}
+
+
+def test_rejoiner_gets_one_row_per_spell():
+    pin = {'BACK'}
+    events = [{'effective': '2023-09-29', 'included': [], 'excluded': ['BACK']},
+              {'effective': '2025-03-28', 'included': ['BACK'], 'excluded': []}]
+    rows = [r for r in uh.build_rows(pin, events) if r['symbol'] == 'BACK']
+    assert rows == [{'symbol': 'BACK', 'joined': '', 'left': '2023-09-29'},
+                    {'symbol': 'BACK', 'joined': '2025-03-28', 'left': ''}]

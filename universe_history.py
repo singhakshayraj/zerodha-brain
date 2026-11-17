@@ -62,16 +62,31 @@ def parse_release(text: str, released: str) -> dict:
 
 
 def build_rows(pin: set, events: list) -> list:
-    """[{symbol, joined, left}] for every name in the current pin plus every
-    name an event ever excluded. Events: [{effective, included, excluded}]."""
-    rows = {s: {'symbol': s, 'joined': '', 'left': ''} for s in pin}
+    """One row per membership spell: [{symbol, joined, left}]. A name that
+    leaves and later rejoins gets two rows, so members() sees both spells.
+    Events: [{effective, included, excluded}]. joined == '' = member since
+    before our data; left == '' = still in."""
+    spells = {s: [{'symbol': s, 'joined': '', 'left': ''}] for s in pin}
+
+    def open_spell(s):
+        return next((r for r in spells.get(s, []) if r['left'] == ''), None)
+
     for ev in sorted(events, key=lambda e: e['effective']):
         d = ev['effective']
-        for s in ev['included']:
-            rows.setdefault(s, {'symbol': s, 'joined': '', 'left': ''})['joined'] = d
         for s in ev['excluded']:
-            rows.setdefault(s, {'symbol': s, 'joined': '', 'left': ''})['left'] = d
-    return sorted(rows.values(), key=lambda r: r['symbol'])
+            cur = open_spell(s)
+            if cur is None:
+                spells.setdefault(s, []).append({'symbol': s, 'joined': '', 'left': d})
+            else:
+                cur['left'] = d
+        for s in ev['included']:
+            cur = open_spell(s)
+            if cur is None:
+                spells.setdefault(s, []).append({'symbol': s, 'joined': d, 'left': ''})
+            elif cur['joined'] == '':
+                cur['joined'] = d                 # the seed (or unknown-start) spell began here
+    out = [r for rs in spells.values() for r in rs]
+    return sorted(out, key=lambda r: (r['symbol'], r['joined']))
 
 
 def rows(path: str = PATH) -> list:
