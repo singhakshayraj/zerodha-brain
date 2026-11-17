@@ -146,3 +146,30 @@ def test_scheduler_starts_single_lab_thread():
         scheduler._maybe_run_lab()
         scheduler._maybe_run_lab()
     assert started == ['lab']
+
+
+def test_yielded_cycle_retries_on_next_tick():
+    f = FakeSupabase()
+    busy = [True]
+    clock = Clock('09:30:30')
+    with patch.object(lab_db.db, 'supabase', f):
+        r = _runner(f, clock=clock, should_yield=lambda: busy[0])
+        r.tick()                                  # advisor busy: nothing fetched
+        assert not f.tables.get('lab_trades')
+        busy[0] = False
+        clock.sleep(10)
+        r.tick()                                  # same 09:30 boundary, now free
+    assert len(_open(f)) == 6
+
+
+def test_yield_mid_fetch_aborts_cycle():
+    f = FakeSupabase()
+    calls = {'n': 0}
+
+    def should_yield():
+        calls['n'] += 1
+        return calls['n'] > 1                     # free at cycle start, busy by first symbol
+
+    with patch.object(lab_db.db, 'supabase', f):
+        assert _runner(f, should_yield=should_yield).cycle() is False
+    assert not f.tables.get('lab_trades')

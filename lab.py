@@ -95,11 +95,15 @@ class LabRunner:
         now = self.clock()
         self._last_cycle = now.replace(minute=now.minute - now.minute % 5, second=0, microsecond=0)
 
-    def cycle(self):
+    def cycle(self) -> bool:
+        """One decision pass. False = yielded to the advisor/bar sync (Kite is
+        shared, ~3 req/s); the caller retries the same boundary next tick."""
         if self.should_yield():
-            return
+            return False
         now = self.clock()
         for sym, token, _ in self.universe:
+            if self.should_yield():
+                return False
             self.bars[sym] = self._fetch(token, self.bars.get(sym))
         self.nifty_bars = self._fetch(NIFTY_TOKEN, self.nifty_bars)
         ltps = self._ltps([s for s, _, _ in self.universe])
@@ -121,6 +125,7 @@ class LabRunner:
                 raise
             except Exception as e:
                 print(f'[lab] {sym} signal error (skipped): {e}')
+        return True
 
     def _rank_rs(self, now, nifty):
         npc = prior_close(nifty)
@@ -202,8 +207,8 @@ class LabRunner:
         boundary = now.replace(minute=now.minute - now.minute % 5, second=0, microsecond=0)
         if ((now - boundary).total_seconds() >= 30 and boundary != self._last_cycle
                 and (9, 30) <= (boundary.hour, boundary.minute) <= (14, 30)):
-            self._last_cycle = boundary
-            self.cycle()
+            if self.cycle():
+                self._last_cycle = boundary
         if self._last_exit is None or (now - self._last_exit).total_seconds() >= 30:
             self._last_exit = now
             self.check_exits()
