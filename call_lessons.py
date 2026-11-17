@@ -188,6 +188,9 @@ def compute() -> dict:
     res = find_lessons(calls, scores, json.loads(raw) if raw else None)
     db.write_config('call_lessons_latest', json.dumps(res, default=str))
     db.write_config('call_scorecard_latest', json.dumps(scorecard(calls, scores), default=str))
+    import tax_context
+    db.write_config('tax_cost_curve', json.dumps(tax_context.cost_curve(
+        call_outcomes._stored(min(c['run_date'] for c in calls)) if calls else {}, calls)))
     for pop, r in res['populations'].items():
         print(f"[lessons] {pop}: n={r['overall']['n']} at day {CHECKPOINT}, hit {r['overall']['hit_pct']}%, "
               f"{r['buckets_scanned']} buckets, {len(r['lessons'])} lessons")

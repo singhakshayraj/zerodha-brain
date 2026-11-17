@@ -95,3 +95,17 @@ def test_bootstrap_is_fast_at_universe_scale():
     lo, hi = cl.block_bootstrap(by_date, 'mean')
     assert time.time() - t0 < 0.5, 'one cell must cost well under a second'
     assert lo <= hi and abs(lo) < 1.0           # every date identical -> a tight interval around the mean
+
+
+def test_compute_writes_tax_cost_curve():
+    import json
+    from unittest.mock import patch
+    from tests.test_call_outcomes import _fake
+    f = _fake()
+    f.tables['call_outcomes'] = [{'source': 'advice', 'account': 'primary', 'run_date': '2026-11-10', 'symbol': 'AAA',
+                                  'td': 5, 'date': '2026-11-17', 'ret_pct': -3.0,
+                                  'signed_alpha_pct': 1.0, 'mae_pct': 0, 'mfe_pct': 0}]
+    with patch.object(cl.db, 'supabase', f):
+        cl.compute()
+    row = next(r for r in f.tables['app_config'] if r['key'] == 'tax_cost_curve')
+    assert json.loads(row['value']) == {'5': {'n': 1, 'mean_ret_pct': -3.0}}
