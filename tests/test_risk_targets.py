@@ -91,9 +91,6 @@ def test_step_halves_when_regime_drifted():
     n = 120
     base = np.random.RandomState(5).normal(0, 0.01, n)
     other = np.random.RandomState(6).normal(0, 0.01, n)
-    quiet = other.copy()
-    drift = other.copy()
-    drift[-60:] = base[-60:] + 0.1 * other[-60:]     # sleeve and rest decorrelated, then locked
     px = lambda r: _dated(list(100 * np.cumprod(1 + r)))
     ps = [_pos('A1'), _pos('A2'), _pos('B1', 5), _pos('B2', 5)]
     secs = {'A1': 'Tech', 'A2': 'Tech', 'B1': 'Oil', 'B2': 'Oil'}
@@ -107,3 +104,20 @@ def test_step_halves_when_regime_drifted():
     calm = rt.build(ps, {k: px(np.random.RandomState(i).normal(0, .01, n))
                          for i, k in enumerate(closes)}, secs)
     assert calm['step'] == 0.5
+
+
+def test_only_infeasible_cap_is_dropped():
+    names = ['N%02d' % i for i in range(20)]
+    groups = {s: ('S%d' % (i % 4), False) for i, s in enumerate(names)}
+    raw = {s: (30.0 if s == 'N00' else 1.0) for s in names}
+    t = sum(raw.values())
+    w, inf = rt.cap_weights({s: v / t for s, v in raw.items()}, groups, CAPS)
+    assert inf == ['sector'] and abs(sum(w.values()) - 1) < 1e-6
+    assert all(v * 100 <= 8 + 1e-6 for v in w.values())
+
+
+def test_build_excludes_only_unpriced_name():
+    a = _dated(_walk(1))
+    ps = [_pos('X'), _pos('Y'), _pos('Z', p=0)]
+    out = rt.build(ps, {'X': a, 'Y': _dated(_walk(2)), 'Z': dict(a)}, {})
+    assert out['excluded'] == ['Z'] and {t['symbol'] for t in out['targets']} == {'X', 'Y'}

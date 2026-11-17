@@ -43,11 +43,20 @@ def cap_weights(w, groups, caps):
     etf_c = caps['etf_cap_pct'] / 100
     active = {'name': name_c, 'sector': sec_c, 'etf': etf_c}
     infeasible = []
-    for k in ('name', 'sector', 'etf'):        # drop caps that cannot all hold, in this order
-        if _capacity(groups, active['name'] or 1.0, active['sector'], active['etf']) >= 1 - _EPS:
+
+    def _cap(a):
+        return _capacity(groups, a['name'] or 1.0, a['sector'], a['etf'])
+
+    for k in ('name', 'sector', 'etf'):        # each cap judged alone
+        if _cap({j: (active[j] if j == k else None) for j in active}) < 1 - _EPS:
+            active[k] = None
+            infeasible.append(k)
+    for k in ('sector', 'name', 'etf'):        # then the combination; drop until it fits
+        if _cap(active) >= 1 - _EPS:
             break
-        active[k] = None
-        infeasible.append(k)
+        if active[k] is not None:
+            active[k] = None
+            infeasible.append(k)
     m = active['name'] or 1.0
     x = {s: float(v) for s, v in w.items()}
     tot = sum(x.values()) or 1.0
@@ -107,8 +116,12 @@ def build(positions, closes_by_symbol, sectors, caps=None):
             v = (p.get('quantity') or 0) * (p.get('last_price') or 0)
             held[p['symbol']] = held.get(p['symbol'], 0.0) + v
     # same alignment + thinnest-history exclusion as household_book.risk
+    excluded = sorted(s for s, v in held.items() if v <= 0)     # unpriced / zero-qty: drop just them
+    held = {s: v for s, v in held.items() if v > 0}
     series = {s: (closes_by_symbol or {}).get(s) or {} for s in held}
-    excluded = []
+    for s in [s for s, d in series.items() if any(float(c) == 0 for c in d.values())]:
+        excluded.append(s)
+        del series[s]
     common = set()
     while series:
         common = set.intersection(*(set(v) for v in series.values()))
@@ -122,8 +135,6 @@ def build(positions, closes_by_symbol, sectors, caps=None):
     dates = sorted(common)[-(REGIME_DAYS + 1):]   # regime needs history beyond the 60d window
     syms = list(series)
     closes = {s: [float(series[s][d]) for d in dates] for s in syms}
-    if any(0 in c for c in closes.values()) or any(held[s] <= 0 for s in syms):
-        return _empty(excluded + syms)
     X = np.column_stack([np.diff(closes[s]) / np.array(closes[s][:-1]) for s in syms])
     tot = sum(held[s] for s in syms)
     cur = np.array([held[s] / tot for s in syms])
