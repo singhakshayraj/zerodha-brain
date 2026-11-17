@@ -136,7 +136,7 @@ def _by_symbol(positions):
     return out
 
 
-def xray(positions, sectors, sizes, index_weights, targets=DEFAULT_TARGETS, index_size_mix=None):
+def xray(positions, sectors, sizes, index_weights, index_size_mix, targets=DEFAULT_TARGETS):
     total = sum(_val(p) for p in positions) or 1.0
     pct = lambda v: round(v / total * 100, 2)
     sec, siz, names, etf = {}, {}, [], 0.0
@@ -172,21 +172,29 @@ def xray(positions, sectors, sizes, index_weights, targets=DEFAULT_TARGETS, inde
 
 
 def risk(positions, closes_by_symbol, lookback=60):
-    held = {s: d for s, d in _by_symbol(positions).items() if d['cls'] != 'fund_unconfirmed'}
-    rets, excluded = {}, []
-    for s in held:
-        c = np.asarray((closes_by_symbol or {}).get(s) or [], dtype=float)[-(lookback + 1):]
-        if len(c) < 31 or (c[:-1] == 0).any():
-            excluded.append(s)
-        else:
-            rets[s] = np.diff(c) / c[:-1]
-    if len(rets) < 2:
+    """closes_by_symbol = {symbol: {'YYYY-MM-DD': close}}; aligned on common dates."""
+    held = {s: d for s, d in _by_symbol(positions).items()
+            if d['cls'] in ('equity', 'etf_gold_silver')}
+    series = {s: (closes_by_symbol or {}).get(s) or {} for s in held}
+    excluded = []
+    while series:
+        common = set.intersection(*(set(v) for v in series.values()))
+        if len(common) >= 31 or len(series) < 2:
+            break
+        # drop the name with the thinnest history, then retry the overlap
+        worst = min(series, key=lambda s: len(series[s]))
+        excluded.append(worst)
+        del series[worst]
+    if len(series) < 2:
         return {'effective_bets': None, 'top_contributors': [], 'clusters': [],
-                'n_used': len(rets), 'excluded': excluded}
-    # ponytail: closes carry no dates; aligned on the common tail, upgrade if gaps matter
-    n = min(len(r) for r in rets.values())
-    syms = list(rets)
-    X = np.column_stack([rets[s][-n:] for s in syms])
+                'n_used': len(series), 'excluded': sorted(excluded)}
+    dates = sorted(common)[-(lookback + 1):]
+    syms = list(series)
+    closes = {s: [float(series[s][d]) for d in dates] for s in syms}
+    if any(c[0] == 0 or 0 in c[:-1] for c in closes.values()):
+        return {'effective_bets': None, 'top_contributors': [], 'clusters': [],
+                'n_used': 0, 'excluded': sorted(syms + excluded)}
+    X = np.column_stack([np.diff(closes[s]) / np.array(closes[s][:-1]) for s in syms])
     tot = sum(held[s]['value'] for s in syms) or 1.0
     w = np.array([held[s]['value'] / tot for s in syms])
     cov, _ = advisor_risk.ledoit_wolf_cov(X)
@@ -195,10 +203,10 @@ def risk(positions, closes_by_symbol, lookback=60):
                    'value_pct': round(float(w[i]) * 100, 1)} for i, s in enumerate(syms)),
                  key=lambda r: r['risk_pct'], reverse=True)[:5]
     corr = advisor_risk._correlation_read(
-        [{'symbol': s, 'weight_pct': w[i] * 100} for i, s in enumerate(syms)], closes_by_symbol)
+        [{'symbol': s, 'weight_pct': w[i] * 100} for i, s in enumerate(syms)], closes)
     return {'effective_bets': round(float(advisor_risk.effective_number_of_bets(cov, w)), 2),
             'top_contributors': top, 'clusters': (corr or {}).get('clusters', []),
-            'n_used': len(syms), 'excluded': excluded}
+            'n_used': len(syms), 'excluded': sorted(excluded)}
 
 
 def tax_summary(positions, lots_by_account, fy_by_account, today):

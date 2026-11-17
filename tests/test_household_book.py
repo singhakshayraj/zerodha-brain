@@ -70,7 +70,7 @@ def _pos(acct, sym, q, px, cls='equity', avg=None):
 
 def test_not_sectors_never_breach():
     ps = [_pos('A', 'GOLDBEES', 50, 100, 'etf_gold_silver'), _pos('A', 'FOO', 50, 100)]
-    out = xray(ps, {'FOO': ''}, {}, {})
+    out = xray(ps, {'FOO': ''}, {}, {}, {})
     rows = {r['name']: r for r in out['sectors']}
     assert rows['ETFs (gold, silver, index)']['pct'] == 50.0
     assert not rows['ETFs (gold, silver, index)']['breach']
@@ -80,18 +80,19 @@ def test_not_sectors_never_breach():
 
 def test_overlap_name_counted_once_and_flagged():
     ps = [_pos('A', 'TCS', 2, 100), _pos('B', 'TCS', 2, 100), _pos('A', 'INFY', 96, 100)]
-    names = {n['symbol']: n for n in xray(ps, {'TCS': 'IT', 'INFY': 'IT'}, {}, {})['names']}
+    names = {n['symbol']: n for n in xray(ps, {'TCS': 'IT', 'INFY': 'IT'}, {}, {}, {})['names']}
     assert names['TCS']['pct'] == 4.0 and names['TCS']['accounts'] == ['A', 'B']
     assert names['TCS']['breach'] == 'overlap'
     assert names['INFY']['breach'] == 'name'
-    out = xray(ps, {'TCS': 'IT', 'INFY': 'IT'}, {}, {})
+    out = xray(ps, {'TCS': 'IT', 'INFY': 'IT'}, {}, {}, {})
     assert out['sectors'][0]['pct'] == 100.0 and out['sectors'][0]['breach'] is True
 
 
 def test_size_drift_vs_index_mix():
     ps = [_pos('A', 'L', 50, 100), _pos('A', 'S', 30, 100), _pos('A', 'M', 20, 100)]
-    out = xray(ps, {}, {'L': 'large', 'S': 'small', 'M': 'mid'}, {},
-               index_size_mix={'large': 70.0, 'mid': 20.0, 'small': 10.0})
+    mix = {'large': 70.0, 'mid': 20.0, 'small': 10.0}
+    out = xray(ps, {}, {'L': 'large', 'S': 'small', 'M': 'mid'}, {}, mix)
+    assert xray(ps, {}, {'L': 'large', 'S': 'small', 'M': 'mid'}, {}, mix, DEFAULT_TARGETS) == out
     z = {r['size']: r for r in out['sizes']}
     assert z['large']['drift_pp'] == -20.0 and z['large']['breach'] is True
     assert z['small']['drift_pp'] == 20.0 and z['small']['breach'] is True
@@ -105,17 +106,39 @@ def _walk(seed, n=61):
     return list(100 * np.cumprod(1 + np.r_[0, r]))
 
 
+def _dated(vals):
+    from datetime import date, timedelta
+    d0 = date(2026, 1, 1)
+    return {(d0 + timedelta(days=i)).isoformat(): v for i, v in enumerate(vals)}
+
+
 def test_risk_effective_bets_two_identical_names_is_one():
-    a = _walk(1)
+    a = _dated(_walk(1))
     ps = [_pos('A', 'X', 10, 100), _pos('A', 'Y', 10, 100)]
-    out = risk(ps, {'X': a, 'Y': list(a)})
+    out = risk(ps, {'X': a, 'Y': dict(a)})
     assert abs(out['effective_bets'] - 1.0) < 0.05 and out['n_used'] == 2
     ps.append(_pos('A', 'Z', 10, 100))
-    out3 = risk(ps, {'X': a, 'Y': list(a), 'Z': _walk(2)})
+    out3 = risk(ps, {'X': a, 'Y': dict(a), 'Z': _dated(_walk(2))})
     assert out3['effective_bets'] > 1.3 and len(out3['top_contributors']) == 3
-    short = risk(ps, {'X': a, 'Y': list(a), 'Z': a[:10]})
+    short = risk(ps, {'X': a, 'Y': dict(a), 'Z': _dated(_walk(2, 10))})
     assert short['excluded'] == ['Z'] and short['n_used'] == 2
     assert risk(ps[:1], {'X': a})['effective_bets'] is None
+
+
+def test_risk_aligns_on_common_dates_when_a_day_is_missing():
+    a = _dated(_walk(1))
+    b = dict(a)
+    del b[sorted(b)[30]]
+    out = risk([_pos('A', 'X', 10, 100), _pos('A', 'Y', 10, 100)], {'X': a, 'Y': b})
+    assert abs(out['effective_bets'] - 1.0) < 0.05 and out['n_used'] == 2
+
+
+def test_risk_only_equity_and_etf():
+    a = _dated(_walk(1))
+    ps = [_pos('A', 'X', 10, 100), _pos('A', 'Y', 10, 100, 'etf_gold_silver'),
+          _pos('A', 'F', 10, 100, 'fund_unconfirmed'), _pos('A', 'O', 10, 100, 'other')]
+    out = risk(ps, {'X': a, 'Y': dict(a), 'F': dict(a), 'O': dict(a)})
+    assert out['n_used'] == 2 and {r['symbol'] for r in out['top_contributors']} == {'X', 'Y'}
 
 
 def test_tax_summary_splits_lots_and_lists_crossings_90d():
