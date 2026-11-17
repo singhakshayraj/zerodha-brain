@@ -15,8 +15,8 @@ def _fake(targets=None):
                                  'avg_price': avg, 'last_price': lp}
     f.tables['portfolio_advice'] = [adv('AAA', 100, 90, 100), adv('BBB', 50, 100, 80),
                                     {**adv('OLD', 1, 1, 1), 'run_id': 'r0', 'created_at': '2026-11-01T09:20:00'}]
-    nat = {'rows': [{'symbol': 'AAA', 'quantity': 40, 'avg_price': 95, 'last_price': 100},
-                    {'symbol': 'CCC', 'quantity': 10, 'average_price': 200, 'last_price': 210}]}
+    nat = {'rows': [{'symbol': 'AAA', 'quantity': 40, 'avg_price': 95, 'last_price': 100, 'run_date': '2026-11-15'},
+                    {'symbol': 'CCC', 'quantity': 10, 'average_price': 200, 'last_price': 210, 'run_date': '2026-11-15'}]}
     f.tables['app_config'] = [{'key': 'advisor_natwar_latest', 'value': json.dumps(nat)},
                               {'key': 'tax_cost_curve', 'value': json.dumps({'5': {'n': 3, 'mean_ret_pct': -1.0}})}]
     if targets:
@@ -60,7 +60,8 @@ def test_publish_writes_book_and_default_targets():
     assert set(out['returns']) == {'primary', 'natwar', 'household'}
     assert out['returns']['household']['start'] == '2026-11-10' and out['returns']['primary']['xirr'] is None   # 4-day window < 30
     assert out['returns']['primary']['xirr_since'] == '2026-11-10'
-    assert out['sections_asof'] == {'positions': '2026-11-16', 'returns': '2026-11-14',
+    assert out['sections_asof'] == {'positions': '2026-11-15', 'positions_primary': '2026-11-16',
+                                    'positions_natwar': '2026-11-15', 'returns': '2026-11-14',
                                     'xirr_since': '2026-11-10', 'tax': '2026-11-17', 'risk': '2026-10-28'}
     assert out['rebalance'] and out['tax']['by_account']['primary']
     assert 'OLD' not in json.dumps(out['xray'])

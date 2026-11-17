@@ -21,6 +21,8 @@ def _chain(daily, field):
 
 
 def _ret(rs, n=None):
+    if n is not None and len(rs) < n:
+        return None          # window longer than the history: no honest figure
     out = 1.0
     for r in (rs if n is None else rs[-n:]):
         out *= 1 + r
@@ -78,10 +80,10 @@ def xirr(flows):
     return round((lo + hi) / 2 * 100, 2)
 
 
-def max_drawdown(series):
+def max_drawdown(series, start=None):
     if not series:
         return {'pct': 0.0, 'peak': None, 'trough': None}
-    pk = series[0]
+    pk = {'date': start or series[0]['date'], 'index': 100.0}   # base point: the index starts at 100
     worst = {'pct': 0.0, 'peak': pk['date'], 'trough': pk['date']}
     for p in series:
         if p['index'] > pk['index']:
@@ -140,26 +142,35 @@ def xray(positions, sectors, sizes, index_weights, index_size_mix, targets=DEFAU
     total = sum(_val(p) for p in positions) or 1.0
     pct = lambda v: round(v / total * 100, 2)
     sec, siz, names, etf = {}, {}, [], 0.0
+    eq_total = sum(_val(p) for p in positions if p['asset_class'] == 'equity'
+                   and not sector_view.is_etf(p['symbol'])) or 1.0
     for sym, d in _by_symbol(positions).items():
         g = sector_view.group_of(sym, (sectors or {}).get(sym))
         sec[g] = sec.get(g, 0.0) + d['value']
-        z = (sizes or {}).get(sym, 'micro')
-        siz[z] = siz.get(z, 0.0) + d['value']
+        if d['cls'] == 'equity' and not sector_view.is_etf(sym):   # size mix is equity-only
+            z = (sizes or {}).get(sym, 'micro')
+            siz[z] = siz.get(z, 0.0) + d['value']
         if d['cls'] == 'etf_gold_silver' or sector_view.is_etf(sym):
             etf += d['value']
         n = pct(d['value'])
-        br = ('name' if n > targets['name_cap_pct']
-              else 'overlap' if len(d['accounts']) > 1 and n > targets['dup_cap_pct'] else None)
+        multi = len(d['accounts']) > 1      # held in 2+ accounts: the tighter overlap cap applies
+        br = ('overlap' if multi and n > min(targets['name_cap_pct'], targets['dup_cap_pct'])
+              else 'name' if n > targets['name_cap_pct'] else None)
         names.append({'symbol': sym, 'pct': n, 'accounts': sorted(d['accounts']), 'breach': br})
     sectors_out = [{'name': g, 'pct': pct(v), 'index_pct': (index_weights or {}).get(g, 0.0),
                     'target_pct': targets['sector_cap_pct'],
                     'drift_pp': round(pct(v) - (index_weights or {}).get(g, 0.0), 2),
                     'breach': pct(v) > targets['sector_cap_pct'] and g not in _h.NOT_SECTORS}
                    for g, v in sec.items()]
+    for g, w in (index_weights or {}).items():     # index groups the household holds none of
+        if g not in sec and g not in _h.NOT_SECTORS:
+            sectors_out.append({'name': g, 'pct': 0.0, 'index_pct': w, 'target_pct': targets['sector_cap_pct'],
+                                'drift_pp': -w, 'breach': False})
     mix = index_size_mix or {}
-    sizes_out = [{'size': z, 'pct': pct(v), 'index_pct': mix.get(z, 0.0),
-                  'drift_pp': round(pct(v) - mix.get(z, 0.0), 2),
-                  'breach': abs(pct(v) - mix.get(z, 0.0)) > targets['size_tolerance_pp']}
+    spct = lambda v: round(v / eq_total * 100, 2)
+    sizes_out = [{'size': z, 'pct': spct(v), 'index_pct': mix.get(z, 0.0),
+                  'drift_pp': round(spct(v) - mix.get(z, 0.0), 2),
+                  'breach': abs(spct(v) - mix.get(z, 0.0)) > targets['size_tolerance_pp']}
                  for z, v in siz.items()]
     for z, ip in mix.items():
         if z not in siz:
@@ -253,7 +264,8 @@ import tax_context
 def _tax_for(a, sym, qty, px, lots_by_account, fy_by_account, today_s):
     lots = ((lots_by_account or {}).get(a) or {}).get(sym) or []
     r = costs.after_tax_pct(lots, qty, px, today_s)
-    return tax_actions.fy_tax(r['stcg_inr'], r['ltcg_inr'], (fy_by_account or {}).get(a) or {})
+    return (tax_actions.fy_tax(r['stcg_inr'], r['ltcg_inr'], (fy_by_account or {}).get(a) or {}),
+            r['unmatched_qty'])
 
 
 def rebalance(xray_out, positions, lots_by_account, fy_by_account, targets, today, sectors=None):
@@ -270,17 +282,20 @@ def rebalance(xray_out, positions, lots_by_account, fy_by_account, targets, toda
         need = math.ceil(excess_inr / px[sym])
         accts = [a for (a, s), q in held.items() if s == sym and q > 0]
         # cheapest tax per share first; the remainder (if any) comes from the other account
-        per_share = lambda a: _tax_for(a, sym, min(need, held[(a, sym)]), px[sym], lots_by_account,
-                                       fy_by_account, today_s) / min(need, held[(a, sym)])
-        for a in sorted(accts, key=per_share):
+        def rank(a):
+            q = min(need, held[(a, sym)])
+            tax, unm = _tax_for(a, sym, q, px[sym], lots_by_account, fy_by_account, today_s)
+            return (unm > 0, tax / q)          # accounts with undated lots (tax unknown) go last
+        for a in sorted(accts, key=rank):
             q = min(need, held[(a, sym)])
             if q <= 0:
                 break
             held[(a, sym)] -= q
             need -= q
             freed = round(q * px[sym], 2)
+            tax, unm = _tax_for(a, sym, q, px[sym], lots_by_account, fy_by_account, today_s)
             trims.append({'kind': 'trim', 'symbol': sym, 'account': a, 'qty': q, 'freed_inr': freed,
-                          'tax_inr': _tax_for(a, sym, q, px[sym], lots_by_account, fy_by_account, today_s),
+                          'tax_inr': tax, 'tax_known': unm == 0, 'unmatched_qty': unm,
                           'cost_inr': round(costs.round_trip_cost_pct(None) / 100 * freed / 2, 2),
                           'reason': reason})
 
@@ -339,7 +354,7 @@ def _positions():
     t = db.supabase.table
     top = t('portfolio_advice').select('run_id,run_date').eq('is_official', True) \
         .order('created_at', desc=True).limit(1).execute().data or []
-    pos, run_date = [], None
+    pos, run_date, nat_date = [], None, None
     if top:
         run_date = str(top[0].get('run_date'))
         pos = [{'account': 'primary', 'symbol': r['symbol'], 'quantity': r['quantity'],
@@ -352,9 +367,11 @@ def _positions():
         nat = json.loads(raw)['rows']
         assert nat
     except Exception:
-        return None, None, 'natwar payload missing or malformed'
+        return None, None, 'natwar payload missing or malformed', None
     if not top or not pos:
-        return None, None, 'no official portfolio_advice run'
+        return None, None, 'no official portfolio_advice run', None
+    nat_date = max((str(r['run_date'])[:10] for r in nat if r.get('run_date')), default=None) \
+        or str(json.loads(raw).get('run_date') or '')[:10] or None
     for r in nat:
         pos.append({'account': 'natwar', 'symbol': r['symbol'], 'quantity': r['quantity'],
                     'avg_price': r.get('avg_price', r.get('average_price')), 'last_price': r.get('last_price'),
@@ -363,7 +380,7 @@ def _positions():
               .eq('confirmed', False).order('holding_label'))]
     pos += [{'account': 'unknown', 'symbol': u, 'quantity': 0, 'avg_price': 0, 'last_price': 0,
              'asset_class': 'fund_unconfirmed'} for u in unconf]
-    return pos, unconf, run_date
+    return pos, unconf, run_date, nat_date
 
 
 def _flows(rows):
@@ -413,7 +430,7 @@ def _xirr_window(fl):
 def publish(today=None):
     today = today or datetime.now(pytz.timezone('Asia/Kolkata')).date()
     today_s = today.isoformat()
-    positions, unconf, run_date = _positions()
+    positions, unconf, run_date, nat_date = _positions()
     if positions is None:
         print(f'[household] skipped: {run_date}')    # run_date carries the reason
         return {'skipped': run_date}
@@ -442,7 +459,7 @@ def publish(today=None):
     for k, d in daily.items():
         tw, bm = twr(d), benchmark_twr(d)
         returns[k] = {**{f: v for f, v in tw.items()}, **{f'bench_{f}': v for f, v in bm.items()},
-                      'max_drawdown': max_drawdown(tw['series']), 'xirr': _xirr_window(flows[k]),
+                      'max_drawdown': max_drawdown(tw['series'], tw['start']), 'xirr': _xirr_window(flows[k]),
                       'xirr_partial': True, 'xirr_since': d[0]['date'] if d else None,
                       'xirr_note': f"window since {d[0]['date'] if d else None}, excludes dividends"}
 
@@ -457,7 +474,8 @@ def publish(today=None):
            'risk': risk(held, closes), 'tax': tax,
            'rebalance': rebalance(xr, held, lots, fy, targets, today, sectors),
            'funds_unconfirmed': unconf, 'targets_source': targets.get('source', 'operator'),
-           'sections_asof': {'positions': run_date,
+           'sections_asof': {'positions': min(d for d in (run_date, nat_date) if d),   # the older of the two
+                             'positions_primary': run_date, 'positions_natwar': nat_date,
                              'returns': (daily['household'][-1]['date'] if daily['household'] else None),
                              'xirr_since': (daily['household'][0]['date'] if daily['household'] else None),
                              'tax': today_s,

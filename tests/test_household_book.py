@@ -21,7 +21,7 @@ def test_twr_chains_returns():
     daily = [_row('2026-01-01', 1000, 100000), _row('2026-01-02', 1010, 101000)]
     out = twr(daily)
     assert [p['index'] for p in out['series']] == [101.0, 102.01]
-    assert out['since'] == 2.01 and out['1m'] == 2.01 and out['3m'] == 2.01
+    assert out['since'] == 2.01 and out['1m'] is None
 
 
 def test_twr_skips_bad_rows_and_sorts():
@@ -158,7 +158,7 @@ def test_tax_summary_splits_lots_and_lists_crossings_90d():
 
 # ---- rebalance -------------------------------------------------------------
 from datetime import date as _date
-from household_book import rebalance, _h
+from household_book import rebalance, _h, _val
 
 
 def _xr(ps, sectors=None, iw=None):
@@ -211,3 +211,67 @@ def test_underweight_sector_names_only():
     assert rebalance(xr, ps, {}, {}, DEFAULT_TARGETS, _date(2026, 11, 17)) == [
         {'kind': 'underweight', 'sector': 'IT', 'gap_pp': 9.0},
         {'kind': 'underweight', 'sector': 'Banks', 'gap_pp': 3.0}]
+
+
+# ---- fix wave --------------------------------------------------------------
+def test_unheld_index_sector_listed_as_underweight():
+    ps = [_pos('A', 'X', 10, 100)]
+    xr = xray(ps, {'X': 'IT'}, {}, {'IT': 20.0, 'Banks': 15.0, 'ETFs (gold, silver, index)': 4.0}, {})
+    b = [s for s in xr['sectors'] if s['name'] == 'Banks'][0]
+    assert b == {'name': 'Banks', 'pct': 0.0, 'index_pct': 15.0, 'target_pct': 20.0,
+                 'drift_pp': -15.0, 'breach': False}
+    assert not any(s['name'] == 'ETFs (gold, silver, index)' for s in xr['sectors'])
+    out = rebalance(xr, ps, {}, {}, DEFAULT_TARGETS, _date(2026, 11, 17))
+    assert [r for r in out if r['kind'] == 'underweight'][0] == {'kind': 'underweight', 'sector': 'Banks', 'gap_pp': 15.0}
+
+
+def test_etf_does_not_change_size_mix():
+    base = [_pos('A', 'L', 50, 100), _pos('A', 'S', 50, 100)]
+    sz = {'L': 'large', 'S': 'small'}
+    a = xray(base, {}, sz, {}, {'large': 50.0, 'small': 50.0})['sizes']
+    b = xray(base + [_pos('A', 'GOLDBEES', 100, 100, 'etf_gold_silver')], {}, sz, {},
+             {'large': 50.0, 'small': 50.0})['sizes']
+    assert a == b and not any(r['size'] == 'micro' for r in b)
+
+
+def test_dated_account_trimmed_first_undated_flagged_unknown():
+    ps = [_pos('A', 'BIG', 20, 150), _pos('B', 'BIG', 20, 150)] + _fill(20, 100)
+    ps += [_pos('A', f'G{i}', 1, 5000) for i in range(2)]
+    lots = {'A': {'BIG': [{'qty': 20, 'price': 50, 'date': '2026-10-01'}]}}    # dated, STCG > 0; B undated
+    fy = {'A': {'fy_known': True}, 'B': {'fy_known': True}}
+    out = [r for r in rebalance(_xr(ps), ps, lots, fy, DEFAULT_TARGETS, _date(2026, 11, 17))
+           if r['kind'] == 'trim' and r['symbol'] == 'BIG']
+    assert out[0]['account'] == 'A' and out[0]['tax_inr'] > 0 and out[0]['tax_known'] is True
+    assert [t for t in out if t['account'] == 'B'][0]['tax_known'] is False
+
+
+def test_undated_account_not_chosen_over_dated_even_if_it_looks_free():
+    ps = [_pos('A', 'BIG', 20, 150), _pos('B', 'BIG', 20, 150)] + _fill(20, 100)
+    ps += [_pos('A', f'G{i}', 1, 5000) for i in range(2)]
+    lots = {'B': {'BIG': [{'qty': 20, 'price': 50, 'date': '2026-10-01'}]}}    # A undated (tax 0 by bug)
+    fy = {'A': {'fy_known': True}, 'B': {'fy_known': True}}
+    out = [r for r in rebalance(_xr(ps), ps, lots, fy, DEFAULT_TARGETS, _date(2026, 11, 17))
+           if r['kind'] == 'trim' and r['symbol'] == 'BIG']
+    assert out[0]['account'] == 'B'
+
+
+def test_both_account_name_above_name_cap_trimmed_to_overlap_cap():
+    ps = [_pos('A', 'DUP', 5, 100), _pos('B', 'DUP', 5, 100)] + _fill(18, 100)   # DUP 1000 of 2800 -> fix below
+    ps = [_pos('A', 'DUP', 5, 22.5), _pos('B', 'DUP', 5, 22.5)] + _fill(18, 100)   # 225 of 2025 ~ 11%
+    xr = _xr(ps)
+    d = [n for n in xr['names'] if n['symbol'] == 'DUP'][0]
+    assert d['pct'] > 8.0 and d['breach'] == 'overlap'
+    out = rebalance(xr, ps, {}, {}, DEFAULT_TARGETS, _date(2026, 11, 17))
+    freed = sum(t['freed_inr'] for t in out if t['kind'] == 'trim' and t['symbol'] == 'DUP')
+    tot = sum(_val(p) for p in ps)
+    assert (d['pct'] / 100 * tot - freed) / tot * 100 <= 3.0
+
+
+def test_max_drawdown_counts_drop_from_base_100():
+    s = [{'date': 'a', 'index': 95.0}, {'date': 'b', 'index': 97.0}]
+    assert max_drawdown(s, start='s') == {'pct': -5.0, 'peak': 's', 'trough': 'a'}
+
+
+def test_short_window_returns_are_none():
+    out = twr([_row('2026-01-01', 1000, 100000), _row('2026-01-02', 1010, 101000)])
+    assert out['1m'] is None and out['3m'] is None and out['since'] == 2.01
