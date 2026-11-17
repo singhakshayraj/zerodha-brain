@@ -1,0 +1,4 @@
+symbol,date,kind,ratio,parent,cost_share,lot_date,note
+NMDC,2024-12-27,bonus,2,,,2024-12-30,2:1 bonus; record 27 Dec 2024; deemed allotment 30 Dec 2024; cost 0
+ITCHOTELS,2025-01-06,demerger,0.1,ITC,0.1351,,1 ITCHL per 10 ITC; record 6 Jan 2025; cost split ITC 86.49 / ITCHL 13.51 (ITC filing 28 Jan 2025); ITC dates carry over
+ICICILIFE,2025-01-01,rename,1,ICICIPRULI,,,ICICI Prudential Life renamed; same ISIN INE726G01019; Kite daily rows carry no ISIN

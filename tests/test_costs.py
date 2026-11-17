@@ -65,3 +65,53 @@ def test_oversell_is_reported_not_hidden():
     assert r['unmatched_qty'] == 15
     assert r['gross_pct'] == 10.0            # on the 10 matched shares, not inflated by 25
     assert costs.tax_lots([_t('X', 10, 100.0, '2026-01-01'), _t('X', 12, 120.0, '2026-02-01', 'sell')], 'X', 'primary') == []
+
+
+def _ti(sym, qty, price, d, side='buy', isin=None, ts=None):
+    return {**_t(sym, qty, price, d, side), 'isin': isin, 'executed_at': ts or d + 'T10:00:00'}
+
+
+def test_tax_lots_follows_isin_across_rename():
+    trades = [_ti('OLDNAME', 20, 100.0, '2024-07-29', isin='INE1'),
+              _ti('NEWNAME', 8, 150.0, '2026-11-12', 'sell', isin='INE1')]
+    assert costs.tax_lots(trades, 'NEWNAME', 'primary', events=[]) == \
+        [{'qty': 12, 'price': 100.0, 'date': '2024-07-29'}]
+
+
+def test_tax_lots_same_day_round_trip_nets_out_first():
+    trades = [_ti('X', 10, 100.0, '2026-01-01'),
+              _ti('X', 1, 120.0, '2026-05-19', 'sell', ts='2026-05-19T10:00:00'),
+              _ti('X', 1, 121.0, '2026-05-19', ts='2026-05-19T11:00:00')]
+    assert costs.tax_lots(trades, 'X', 'primary', events=[]) == \
+        [{'qty': 10, 'price': 100.0, 'date': '2026-01-01'}]
+
+
+def test_tax_lots_bonus_adds_zero_cost_lot_on_allotment_date():
+    ev = [{'symbol': 'N', 'date': '2024-12-27', 'kind': 'bonus', 'ratio': 2.0,
+           'parent': '', 'cost_share': 0.0, 'lot_date': '2024-12-30'}]
+    trades = [_ti('N', 10, 200.0, '2024-01-10'), _ti('N', 5, 70.0, '2025-02-01')]
+    assert costs.tax_lots(trades, 'N', 'primary', events=ev) == [
+        {'qty': 10, 'price': 200.0, 'date': '2024-01-10'},
+        {'qty': 20, 'price': 0.0, 'date': '2024-12-30'},
+        {'qty': 5, 'price': 70.0, 'date': '2025-02-01'}]
+
+
+def test_tax_lots_demerger_splits_cost_and_keeps_parent_dates():
+    ev = [{'symbol': 'CHILD', 'date': '2025-01-06', 'kind': 'demerger', 'ratio': 0.1,
+           'parent': 'PAR', 'cost_share': 0.1351, 'lot_date': ''}]
+    trades = [_ti('PAR', 100, 400.0, '2024-03-01'), _ti('CHILD', 5, 200.0, '2025-03-01')]
+    child = costs.tax_lots(trades, 'CHILD', 'primary', events=ev)
+    assert child[0]['qty'] == 10 and child[0]['date'] == '2024-03-01'
+    assert abs(child[0]['price'] - 400.0 * 0.1351 / 0.1) < 1e-6
+    assert child[1] == {'qty': 5, 'price': 200.0, 'date': '2025-03-01'}
+    par = costs.tax_lots(trades, 'PAR', 'primary', events=ev)
+    assert par[0]['qty'] == 100 and abs(par[0]['price'] - 400.0 * 0.8649) < 1e-6
+
+
+def test_tax_lots_rename_event_links_old_symbol_without_isin():
+    ev = [{'symbol': 'NEWNAME', 'date': '2025-01-01', 'kind': 'rename', 'ratio': 1.0,
+           'parent': 'OLDNAME', 'cost_share': 0.0, 'lot_date': ''}]
+    trades = [_ti('OLDNAME', 20, 100.0, '2024-07-29', isin='INE1'),
+              _ti('NEWNAME', 8, 150.0, '2026-11-12', 'sell')]
+    assert costs.tax_lots(trades, 'NEWNAME', 'primary', events=ev) == \
+        [{'qty': 12, 'price': 100.0, 'date': '2024-07-29'}]

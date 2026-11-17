@@ -4,6 +4,8 @@
 Tax constants are the post-July-2024 rates as reported for FY 2026-27; verify
 against the Finance Act before Phase 1 lets a verdict act on them.
 """
+import csv
+import os
 from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 
@@ -34,24 +36,74 @@ def _d(s):
     return date.fromisoformat(str(s)[:10])
 
 
-def tax_lots(trades: list, symbol: str, account: str) -> list:
-    """FIFO open lots [{qty, price, date}] for one symbol in one account."""
-    rows = sorted((t for t in trades
-                   if t.get('symbol') == symbol and t.get('account') == account),
-                  key=lambda t: str(t.get('trade_date')))
-    lots = []
+LOT_EVENTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'lot_events.csv')
+
+
+def load_lot_events(path: str = LOT_EVENTS_PATH) -> list:
+    """Bonus / demerger events the tradebook never shows. `date` is the record
+    date: trades dated before it are entitled (T+1 settlement)."""
+    if not os.path.exists(path):
+        return []
+    with open(path) as fh:
+        return [{**r, 'ratio': float(r['ratio']), 'cost_share': float(r['cost_share'] or 0)}
+                for r in csv.DictReader(fh)]
+
+
+def tax_lots(trades: list, symbol: str, account: str, events: list = None) -> list:
+    """FIFO open lots [{qty, price, date}] for one symbol in one account.
+    Follows renames (ISIN, or a `rename` event when the row has none), nets same-day round trips
+    (intraday) before FIFO, and applies bonus/demerger `events`."""
+    events = load_lot_events() if events is None else events
+    names = {symbol} | {e['parent'] for e in events if e['kind'] == 'rename' and e['symbol'] == symbol}
+    isins = {t.get('isin') for t in trades if t.get('symbol') in names and t.get('isin')}
+    rows = [t for t in trades if t.get('account') == account
+            and (t.get('symbol') in names or (t.get('isin') and t.get('isin') in isins))]
+    by_day = {}
     for t in rows:
-        q = int(float(t.get('quantity') or 0))
-        if str(t.get('trade_type', '')).lower() == 'buy':
-            lots.append({'qty': q, 'price': float(t['price']),
-                         'date': str(t['trade_date'])[:10]})
-            continue
-        while q > 0 and lots:                      # sell consumes oldest first
-            take = min(q, lots[0]['qty'])
+        by_day.setdefault(str(t.get('trade_date'))[:10], []).append(t)
+    evs = sorted((e for e in events if e['kind'] != 'rename' and symbol in (e['symbol'], e.get('parent'))),
+                 key=lambda e: e['date'])
+    lots = []
+
+    def apply_events(before: str):
+        while evs and evs[0]['date'] <= before:
+            e = evs.pop(0)
+            if e['kind'] == 'bonus' and e['symbol'] == symbol:
+                n = int(sum(l['qty'] for l in lots) * e['ratio'])
+                if n:
+                    lots.append({'qty': n, 'price': 0.0, 'date': e['lot_date']})
+            elif e['kind'] == 'demerger' and e.get('parent') == symbol:
+                for l in lots:
+                    l['price'] *= 1 - e['cost_share']
+            elif e['kind'] == 'demerger':
+                par = tax_lots([t for t in trades if str(t.get('trade_date'))[:10] < e['date']],
+                               e['parent'], account, events=[])
+                cum = 0
+                for l in par:          # floor on the running total: fractions were paid in cash
+                    q = int((cum + l['qty']) * e['ratio'] + 1e-9) - int(cum * e['ratio'] + 1e-9)
+                    cum += l['qty']
+                    if q:
+                        lots.append({'qty': q, 'price': l['price'] * e['cost_share'] / e['ratio'],
+                                     'date': l['date']})
+
+    for day in sorted(by_day):
+        apply_events(day)
+        buys = [t for t in by_day[day] if str(t.get('trade_type', '')).lower() == 'buy']
+        sold = sum(int(float(t.get('quantity') or 0)) for t in by_day[day]) \
+            - sum(int(float(t.get('quantity') or 0)) for t in buys)
+        for t in buys:                              # same-day sells cancel same-day buys first
+            q = int(float(t.get('quantity') or 0))
+            take = min(q, sold)
+            sold -= take
+            if q - take:
+                lots.append({'qty': q - take, 'price': float(t['price']), 'date': day})
+        while sold > 0 and lots:                    # the rest consumes oldest first
+            take = min(sold, lots[0]['qty'])
             lots[0]['qty'] -= take
-            q -= take
+            sold -= take
             if lots[0]['qty'] == 0:
                 lots.pop(0)
+    apply_events('9999-12-31')
     return lots
 
 
