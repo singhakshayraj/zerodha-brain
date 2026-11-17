@@ -25,6 +25,7 @@ from datetime import datetime
 import pytz
 
 import config
+import costs
 import database as db
 
 IST = pytz.timezone('Asia/Kolkata')
@@ -33,6 +34,8 @@ MANAGEMENT = 'MANAGEMENT'
 PICKING = 'PICKING'
 _SEED_MGMT_KEY = 'advisor_paper_seed_mgmt'
 _SEED_PICK_KEY = 'advisor_paper_seed_pick'
+PICKING_RP = 'PICKING_RP'
+_SEED_RP_KEY = 'advisor_paper_seed_rp'
 
 
 # ── market-data helpers ──────────────────────────────────────────────────────
@@ -268,11 +271,74 @@ def _close_matured_picks(run_date: str, md, cache: dict) -> None:
             _close_position(p, float(bars[horizon - 1]['close']), run_date, 'HORIZON')
 
 
+# ── PICKING_RP: monthly rebalance to the stored capped-HRP targets ──────────
+
+def _nifty500_close(run_date: str) -> float:
+    """Latest Nifty 500 close on/before run_date (index_bars lags ~1 trading day)."""
+    try:
+        res = (db.supabase.table('index_bars').select('close')
+               .eq('index_name', 'Nifty 500').lte('trade_date', run_date)
+               .order('trade_date', desc=True).limit(1).execute())
+        return float(res.data[0]['close']) if res.data else 0.0
+    except Exception as e:
+        print(f"[paper] nifty500 close: {e}")
+        return 0.0
+
+
+def _seed_rp(rows: list, run_date: str) -> None:
+    capital = sum(int(r.get('quantity') or 0) * float(r.get('last_price') or 0) for r in rows)
+    if capital <= 0:
+        return
+    db.write_config(_SEED_RP_KEY, json.dumps({
+        'capital': round(capital, 2), 'seed_date': run_date,
+        'nifty500_inception': _nifty500_close(run_date)}))
+    print(f"[paper] seeded PICKING_RP: ₹{capital:,.0f}")
+
+
+def _rebalance_rp(run_date: str, md, cache: dict) -> None:
+    """First official run of each calendar month (no RP row opened this month):
+    close everything, reopen at the stored targets. Reads app_config
+    risk_targets_latest as written by the advisor run; skips if absent/stale.
+    Cost per side is baked into the fill prices (buy up, sell down), so
+    _reconstruct_cash and realised P&L stay net of costs with no extra ledger."""
+    anchor = _load(_SEED_RP_KEY)
+    if not anchor:
+        return
+    positions = db.paper_positions(PICKING_RP)
+    if any(str(p.get('entry_date'))[:7] == run_date[:7] for p in positions):
+        return
+    rt = _load('risk_targets_latest')
+    if not rt or rt.get('asof') != run_date or not rt.get('targets'):
+        print(f"[paper] PICKING_RP no fresh targets for {run_date} — skip rebalance")
+        return
+    c = costs.round_trip_cost_pct() / 2 / 100
+    cash = _reconstruct_cash(PICKING_RP, positions, anchor['capital'])
+    for p in positions:
+        if p.get('is_open'):
+            px = _last_close(md, p['symbol'], cache, fallback=p['entry_price'])
+            _close_position(p, px * (1 - c), run_date, 'REBALANCE')
+            cash += int(p['qty']) * px * (1 - c)
+    new = []
+    for t in rt['targets']:
+        px = _last_close(md, t['symbol'], cache)
+        if px <= 0:
+            continue
+        # size so qty*px*(1+c) fits the target slice (cash never goes negative)
+        qty = int(float(t['target_pct']) / 100 * cash / (px * (1 + c)))
+        if qty > 0:
+            new.append(_open_position(PICKING_RP, t['symbol'], 'RP', {}, qty,
+                                      px * (1 + c), run_date))
+    if new:
+        db.insert_paper_positions(new)
+
+
 # ── snapshot ─────────────────────────────────────────────────────────────────
 
 def _snapshot(book: str, run_date: str, md, cache: dict) -> None:
     positions = db.paper_positions(book)
     seed_cash = (config.ADVISOR_PAPER_PICKING_CAPITAL if book == PICKING else 0.0)
+    if book == PICKING_RP:
+        seed_cash = float((_load(_SEED_RP_KEY) or {}).get('capital') or 0.0)
     cash = _reconstruct_cash(book, positions, seed_cash)
     pos_value = sum(
         int(p['qty']) * _last_close(md, p['symbol'], cache, fallback=p['entry_price'])
@@ -286,6 +352,12 @@ def _snapshot(book: str, run_date: str, md, cache: dict) -> None:
         if anchor:
             baseline = sum(int(v['qty']) * _last_close(md, s, cache, fallback=v['price'])
                            for s, v in anchor.get('seed', {}).items())
+    elif book == PICKING_RP:
+        anchor = _load(_SEED_RP_KEY)
+        if anchor and anchor.get('nifty500_inception'):
+            n5 = _nifty500_close(run_date)
+            baseline = float(anchor['capital']) * (n5 / float(anchor['nifty500_inception'])) \
+                if n5 else float(anchor['capital'])
     else:
         anchor = _load(_SEED_PICK_KEY)
         if anchor and anchor.get('nifty_inception'):
@@ -341,6 +413,9 @@ def run_paper_portfolio(md, run_date: str = None) -> bool:
     if not _load(_SEED_PICK_KEY):
         _seed_picking(run_date, md, cache)
 
+    if not _load(_SEED_RP_KEY):
+        _seed_rp(rows, run_date)
+
     # Apply verdicts only once per day (guard on an existing snapshot), so a
     # same-day re-run just refreshes MTM instead of double-acting.
     already = {e['snapshot_date'] for e in db.paper_equity_curve(MANAGEMENT, limit=5)}
@@ -351,4 +426,9 @@ def run_paper_portfolio(md, run_date: str = None) -> bool:
 
     _snapshot(MANAGEMENT, run_date, md, cache)
     _snapshot(PICKING, run_date, md, cache)
+    try:    # RP book is independent: never let it break MANAGEMENT/PICKING
+        _rebalance_rp(run_date, md, cache)
+        _snapshot(PICKING_RP, run_date, md, cache)
+    except Exception as e:
+        print(f"[paper] PICKING_RP failed (non-fatal): {e}")
     return True

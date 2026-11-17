@@ -74,6 +74,9 @@ class _Query:
                     hit.update(new)
             return _Res(self.payload)
         if self.op == 'insert':
+            if self.table == 'advisor_paper_positions':   # DB default uuid
+                import uuid
+                self.payload = [{'id': str(uuid.uuid4()), **r} for r in self.payload]
             rows.extend(dict(r) for r in self.payload)
             return _Res(self.payload)
         if self.op == 'update':
