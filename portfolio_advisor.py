@@ -278,6 +278,37 @@ def _capture_stock_timeline(rows: list) -> None:
         print(f"[advisor] stock-agent capture failed (non-fatal): {e}")
 
 
+def apply_risk_targets(rows, dated_closes, run_date) -> None:
+    """[P-68 ph2] Official run only: capped-HRP targets -> app_config.risk_targets_latest,
+    and indicators.risk_size on sell-grade rows. Display only: never touches a verdict
+    or rotation field. Non-fatal."""
+    try:
+        import risk_targets
+        from household_book import DEFAULT_TARGETS
+        positions = [{'symbol': r['symbol'], 'quantity': r.get('quantity') or 0,
+                      'last_price': r.get('last_price') or 0,
+                      'asset_class': 'etf_gold_silver' if sector_view.is_etf(r['symbol']) else 'equity'}
+                     for r in rows if (r.get('quantity') or 0) > 0]
+        sectors = {u['symbol']: u.get('sector') for u in config.NIFTY500_UNIVERSE}
+        rt = risk_targets.build(positions, dated_closes, sectors, DEFAULT_TARGETS)
+        book = sum(p['quantity'] * p['last_price'] for p in positions)
+        tmap = {t['symbol']: t for t in rt['targets']}
+        for r in rows:
+            t = tmap.get(r['symbol'])
+            if t and r.get('verdict') in ('SELL', 'SELL_ON_BOUNCE', 'TRIM'):
+                r.setdefault('indicators', {})['risk_size'] = {
+                    'target_pct': t['target_pct'], 'current_pct': t['current_pct'],
+                    'sell_qty_to_target': risk_targets.sell_qty_to_target(
+                        r.get('quantity'), r.get('last_price'), t['current_pct'],
+                        t['target_pct'], book, rt['step'])}
+        try:
+            db.write_config('risk_targets_latest', json.dumps({'asof': run_date, **rt}, default=str))
+        except Exception as e:
+            print(f"[advisor.risk_targets] write failed (non-fatal): {e}")
+    except Exception as e:
+        print(f"[advisor.risk_targets] failed (non-fatal): {e}")
+
+
 def run_advisor(market_data) -> int:
     """Analyze every real holding and store today's advice. ADVISORY ONLY —
     reads holdings + candles, writes portfolio_advice, places nothing.
@@ -358,6 +389,7 @@ def run_advisor(market_data) -> int:
     run_date = datetime.now(IST).date().isoformat()
     rows = []
     closes_by_symbol = {}   # daily closes per name → portfolio_risk v2 correlation
+    dated_closes = {}       # same candles keyed by date → risk_targets
     for h in holdings:
         tsym = h.get('tradingsymbol')
         qty = h.get('quantity') or 0
@@ -369,6 +401,9 @@ def run_advisor(market_data) -> int:
             candles = market_data.get_candles(key, 'day', 400)
             closes_by_symbol[tsym] = [float(c['close']) for c in (candles or [])
                                       if c.get('close') is not None]
+            dated_closes[tsym] = {str(c['timestamp'])[:10]: float(c['close'])
+                                  for c in (candles or [])
+                                  if c.get('close') is not None and c.get('timestamp')}
             weight_pct = (round(qty * (h.get('last_price') or 0)
                                 / total_value * 100, 1) if total_value else None)
             # Verdict-time price: EMA of the last three 15-min closes when
@@ -590,6 +625,8 @@ def run_advisor(market_data) -> int:
                   f"{len(risk['tax_loss_harvest'])} names")
     except Exception as e:
         print(f"[advisor] portfolio risk read failed (non-fatal): {e}")
+
+    apply_risk_targets(rows, dated_closes, run_date)   # [P-68 ph2] non-fatal, shadow
 
     run_id = str(uuid.uuid4())
     for row in rows:

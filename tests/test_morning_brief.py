@@ -63,3 +63,13 @@ def test_brief_tax_line():
     assert by['tax'] == 'Tax: ATGL sell after 2027-01-07 (saves ₹4.5k) · 2 cross 12 months by Dec 8: A (12-01), B (12-08)'
     assert [l['kind'] for l in lines].index('tax') == 1
     assert 'tax' not in {l['kind'] for l in mb.compose('2026-11-16', PRIMARY, [], None, None, {}, None, None)}
+
+
+def test_brief_risk_line_below_floor():
+    risk = {'below_floor': True, 'enb_now': 3.2, 'enb_floor': 6, 'targets': [{}] * 12}
+    lines = mb.compose('2026-11-16', PRIMARY, PRIOR, '2026-11-13', NATWAR, {}, MACRO, None, risk=risk)
+    by = {l['kind']: l['text'] for l in lines}
+    assert by['risk'] == 'You hold 12 names but they act like ~3.2 independent bets (floor 6).'
+    ok = mb.compose('2026-11-16', PRIMARY, PRIOR, '2026-11-13', NATWAR, {}, MACRO, None,
+                    risk={**risk, 'below_floor': False})
+    assert all(l['kind'] != 'risk' for l in ok)

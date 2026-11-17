@@ -62,7 +62,7 @@ def _tax_line(today: str, rows: list) -> str:
 
 
 def compose(today: str, primary: list, prior: list, prior_date, natwar: dict,
-            views: dict, macro: dict, fund_asof, watchdog: dict = None, lessons: dict = None) -> list:
+            views: dict, macro: dict, fund_asof, watchdog: dict = None, lessons: dict = None, risk: dict = None) -> list:
     """-> [{'kind', 'text', 'warn'}]. primary/prior: advisor rows; natwar:
     the preview payload or None; views: {label: sector_view}; macro: latest
     macro_daily row or None; fund_asof: fundamentals store date or None."""
@@ -84,6 +84,10 @@ def compose(today: str, primary: list, prior: list, prior_date, natwar: dict,
     skew = [s for label, v in views.items() for s in _skew(label, v)][:3]
     if skew:
         lines.append({'kind': 'household', 'warn': False, 'text': 'Overweight: ' + '; '.join(skew)})
+    if risk and risk.get('below_floor'):
+        lines.append({'kind': 'risk', 'warn': True,
+                      'text': f"You hold {len(risk.get('targets') or [])} names but they act like ~{risk.get('enb_now')} "
+                              f"independent bets (floor {risk.get('enb_floor')})."})
     stale = []
     prev = prev_trading_day(today)
     if macro:
@@ -144,7 +148,8 @@ def publish(today: str) -> dict:
     fund_asof = (_cfg_json('fundamentals_latest') or {}).get('asof')
     out = {'run_date': today, 'lines': compose(today, primary, prior, prior_date, natwar, views,
                                                macro, fund_asof, _cfg_json('watchdog_latest'),
-                                               _cfg_json('call_lessons_latest'))}
+                                               _cfg_json('call_lessons_latest'),
+                                               _cfg_json('risk_targets_latest'))}
     db.write_config(KEY, json.dumps(out, default=str))
     print(f"[brief] {len(out['lines'])} lines")
     return out
