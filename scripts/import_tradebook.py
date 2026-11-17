@@ -14,11 +14,16 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-COLS = {'Symbol': 'symbol', 'ISIN': 'isin', 'Trade Date': 'trade_date',
-        'Exchange': 'exchange', 'Segment': 'segment', 'Series': 'series',
-        'Trade Type': 'trade_type', 'Quantity': 'quantity', 'Price': 'price',
-        'Trade ID': 'trade_id', 'Order ID': 'order_id',
-        'Order Execution Time': 'executed_at'}
+# Keys are normalised headers: XLSX 'Trade ID' and CSV 'trade_id' both -> 'trade id'.
+COLS = {'symbol': 'symbol', 'isin': 'isin', 'trade date': 'trade_date',
+        'exchange': 'exchange', 'segment': 'segment', 'series': 'series',
+        'trade type': 'trade_type', 'quantity': 'quantity', 'price': 'price',
+        'trade id': 'trade_id', 'order id': 'order_id',
+        'order execution time': 'executed_at'}
+
+
+def _h(c) -> str:
+    return str(c).strip().lower().replace('_', ' ') if c is not None else ''
 
 
 def read_rows(path: str) -> list:
@@ -33,11 +38,10 @@ def read_rows(path: str) -> list:
 
 def parse(table: list, account: str = 'primary') -> list:
     """Pure: Console table -> tradebook rows. Header is the row containing
-    'Symbol' and 'Trade ID'; leading blank columns and title rows ignored."""
+    'Symbol' and 'Trade ID' (any case, '_' or ' '); leading blank columns and title rows ignored."""
     hdr_i = next(i for i, r in enumerate(table)
-                 if r and 'Symbol' in [str(c).strip() for c in r if c is not None]
-                 and 'Trade ID' in [str(c).strip() for c in r if c is not None])
-    hdr = [str(c).strip() if c is not None else '' for c in table[hdr_i]]
+                 if r and {'symbol', 'trade id'} <= {_h(c) for c in r})
+    hdr = [_h(c) for c in table[hdr_i]]
     idx = {COLS[h]: i for i, h in enumerate(hdr) if h in COLS}
     out = []
     for r in table[hdr_i + 1:]:
