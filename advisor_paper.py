@@ -36,6 +36,7 @@ _SEED_MGMT_KEY = 'advisor_paper_seed_mgmt'
 _SEED_PICK_KEY = 'advisor_paper_seed_pick'
 PICKING_RP = 'PICKING_RP'
 _SEED_RP_KEY = 'advisor_paper_seed_rp'
+_RP_LAST_KEY = 'advisor_paper_rp_last_rebalance'   # month guard: a no-trade rebalance still counts
 
 
 # ── market-data helpers ──────────────────────────────────────────────────────
@@ -295,41 +296,85 @@ def _seed_rp(rows: list, run_date: str) -> None:
     print(f"[paper] seeded PICKING_RP: ₹{capital:,.0f}")
 
 
+def _rp_sell(lots: list, n: int, px: float, run_date: str, out: list) -> None:
+    """Sell n shares across open lots, oldest first. A partly-sold lot follows the
+    TRIM pattern: a closed row for the sold qty, the open row's qty shrinks."""
+    for p in sorted(lots, key=lambda p: str(p.get('entry_date'))):
+        if n <= 0:
+            break
+        q = int(p['qty'])
+        if n >= q:
+            _close_position(p, px, run_date, 'REBALANCE')
+            n -= q
+            continue
+        e = float(p['entry_price'])
+        row = _open_position(PICKING_RP, p['symbol'], p['source'], {}, n, e, p['entry_date'])
+        row.update({'is_open': False, 'exit_price': px, 'exit_date': run_date,
+                    'exit_reason': 'REBALANCE', 'realized_pnl': round((px - e) * n, 2),
+                    'return_pct': round((px - e) / e * 100, 3) if e else 0.0})
+        out.append(row)
+        db.update_paper_position(p['id'], {'qty': q - n})
+        n = 0
+
+
 def _rebalance_rp(run_date: str, md, cache: dict) -> None:
-    """First official run of each calendar month (no RP row opened this month):
-    close everything, reopen at the stored targets. Reads app_config
-    risk_targets_latest as written by the advisor run; skips if absent/stale.
-    Cost per side is baked into the fill prices (buy up, sell down), so
+    """First official run of each calendar month: move each name `step` of the way
+    from its current shares C to target shares T = floor(target_pct * equity / px),
+    i.e. new = C + trunc(step * (T - C)); held names absent from targets have T=0.
+    Sells first, buys only from cash. Reads app_config risk_targets_latest as
+    written by the advisor run; skips if absent/stale. Cost per side is baked into
+    the fill prices of the traded shares only (buy up, sell down), so
     _reconstruct_cash and realised P&L stay net of costs with no extra ledger."""
     anchor = _load(_SEED_RP_KEY)
     if not anchor:
         return
     positions = db.paper_positions(PICKING_RP)
-    if any(str(p.get('entry_date'))[:7] == run_date[:7] for p in positions):
+    if (str(_load(_RP_LAST_KEY) or '')[:7] == run_date[:7]
+            or any(str(p.get('entry_date'))[:7] == run_date[:7] for p in positions)):
         return
     rt = _load('risk_targets_latest')
     if not rt or rt.get('asof') != run_date or not rt.get('targets'):
         print(f"[paper] PICKING_RP no fresh targets for {run_date} — skip rebalance")
         return
     c = costs.round_trip_cost_pct() / 2 / 100
+    step = float(rt.get('step') or 0.5)
     cash = _reconstruct_cash(PICKING_RP, positions, anchor['capital'])
+    lots, px = {}, {}
     for p in positions:
         if p.get('is_open'):
-            px = _last_close(md, p['symbol'], cache, fallback=p['entry_price'])
-            _close_position(p, px * (1 - c), run_date, 'REBALANCE')
-            cash += int(p['qty']) * px * (1 - c)
-    new = []
+            lots.setdefault(p['symbol'], []).append(p)
+            px[p['symbol']] = _last_close(md, p['symbol'], cache, fallback=p['entry_price'])
+    tpct = {}
     for t in rt['targets']:
-        px = _last_close(md, t['symbol'], cache)
-        if px <= 0:
-            continue
-        # size so qty*px*(1+c) fits the target slice (cash never goes negative)
-        qty = int(float(t['target_pct']) / 100 * cash / (px * (1 + c)))
-        if qty > 0:
-            new.append(_open_position(PICKING_RP, t['symbol'], 'RP', {}, qty,
-                                      px * (1 + c), run_date))
+        p_ = px.get(t['symbol']) or _last_close(md, t['symbol'], cache)
+        if p_ > 0:
+            px[t['symbol']] = p_
+            tpct[t['symbol']] = float(t['target_pct'])
+    equity = cash + sum(int(p['qty']) * px[s] for s, ls in lots.items() for p in ls)
+    delta = {}
+    for s in set(lots) | set(tpct):
+        cur = sum(int(p['qty']) for p in lots.get(s, []))
+        tgt = int(tpct.get(s, 0.0) / 100 * equity / px[s])
+        d = int(step * (tgt - cur))      # int() truncates toward zero
+        if d:
+            delta[s] = d
+    new = []
+    for s, d in delta.items():           # sells first, to fund the buys
+        if d < 0:
+            _rp_sell(lots[s], -d, px[s] * (1 - c), run_date, new)
+            cash += -d * px[s] * (1 - c)
+    for t in rt['targets']:              # buys in target order; never past cash
+        s = t['symbol']
+        d = delta.get(s, 0)
+        if d > 0:
+            fill = px[s] * (1 + c)
+            q = min(d, int(cash / fill))
+            if q > 0:
+                cash -= q * fill
+                new.append(_open_position(PICKING_RP, s, 'RP', {}, q, fill, run_date))
     if new:
         db.insert_paper_positions(new)
+    db.write_config(_RP_LAST_KEY, json.dumps(run_date))
 
 
 # ── snapshot ─────────────────────────────────────────────────────────────────
@@ -413,9 +458,6 @@ def run_paper_portfolio(md, run_date: str = None) -> bool:
     if not _load(_SEED_PICK_KEY):
         _seed_picking(run_date, md, cache)
 
-    if not _load(_SEED_RP_KEY):
-        _seed_rp(rows, run_date)
-
     # Apply verdicts only once per day (guard on an existing snapshot), so a
     # same-day re-run just refreshes MTM instead of double-acting.
     already = {e['snapshot_date'] for e in db.paper_equity_curve(MANAGEMENT, limit=5)}
@@ -427,6 +469,8 @@ def run_paper_portfolio(md, run_date: str = None) -> bool:
     _snapshot(MANAGEMENT, run_date, md, cache)
     _snapshot(PICKING, run_date, md, cache)
     try:    # RP book is independent: never let it break MANAGEMENT/PICKING
+        if not _load(_SEED_RP_KEY):
+            _seed_rp(rows, run_date)
         _rebalance_rp(run_date, md, cache)
         _snapshot(PICKING_RP, run_date, md, cache)
     except Exception as e:

@@ -105,7 +105,7 @@ def sell_qty_to_target(qty, price, current_pct, target_pct, book_value, step):
 def _empty(excluded):
     return {'asof_close': None, 'targets': [], 'excluded': sorted(excluded), 'enb_now': None,
             'enb_target': None, 'enb_floor': ENB_FLOOR, 'below_floor': False,
-            'regime': None, 'step': STEP_CALM, 'caps_infeasible': []}
+            'regime': None, 'step': STEP_CALM, 'caps_infeasible': [], 'included_value': 0.0}
 
 
 def build(positions, closes_by_symbol, sectors, caps=None):
@@ -162,4 +162,4 @@ def build(positions, closes_by_symbol, sectors, caps=None):
     return {'asof_close': dates[-1], 'targets': targets, 'excluded': sorted(excluded),
             'enb_now': enb_now, 'enb_target': enb_tgt, 'enb_floor': ENB_FLOOR,
             'below_floor': enb_now < ENB_FLOOR, 'regime': regime, 'step': step,
-            'caps_infeasible': infeasible}
+            'caps_infeasible': infeasible, 'included_value': round(float(tot), 2)}

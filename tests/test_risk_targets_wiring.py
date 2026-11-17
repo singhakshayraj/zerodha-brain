@@ -63,3 +63,14 @@ def test_risk_pass_failure_is_non_fatal():
     assert _strip(rows) == _strip(_rows())
     with patch.object(pa.db, 'write_config', side_effect=RuntimeError('db')):
         pa.apply_risk_targets(_rows(), _closes(), '2026-11-18')
+
+
+def test_shadow_sell_qty_uses_included_value_not_whole_book():
+    import math
+    rows = _rows() + [{'symbol': 'DDD', 'quantity': 1000, 'last_price': 100.0, 'verdict': 'HOLD'}]
+    _run(rows)                              # DDD has no closes -> excluded from the risk read
+    rs = rows[0]['indicators']['risk_size']
+    included = 100 * 100.0 + 10 * 100.0 + 10 * 100.0   # AAA+BBB+CCC, the pct base
+    want = math.floor(0.5 * (rs['current_pct'] - rs['target_pct']) / 100 * included / 100.0)
+    assert 0 < want < 100
+    assert rs['sell_qty_to_target'] == want

@@ -291,7 +291,7 @@ def apply_risk_targets(rows, dated_closes, run_date) -> None:
                      for r in rows if (r.get('quantity') or 0) > 0]
         sectors = {u['symbol']: u.get('sector') for u in config.NIFTY500_UNIVERSE}
         rt = risk_targets.build(positions, dated_closes, sectors, DEFAULT_TARGETS)
-        book = sum(p['quantity'] * p['last_price'] for p in positions)
+        book = rt['included_value']     # pct base = included names only, not the whole book
         tmap = {t['symbol']: t for t in rt['targets']}
         for r in rows:
             t = tmap.get(r['symbol'])
