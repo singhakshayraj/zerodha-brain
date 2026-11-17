@@ -106,3 +106,131 @@ def net_worth(positions):
             'by_account': {k: round(v, 2) for k, v in by_acct.items()},
             'by_asset_class': {k: round(v, 2) for k, v in by_cls.items()},
             'unpriced': unpriced}
+
+
+# ---- x-ray vs targets, risk, tax ------------------------------------------
+import numpy as np
+from datetime import timedelta
+from dateutil.relativedelta import relativedelta
+
+import advisor_risk
+import costs
+import household as _h
+import sector_view
+
+DEFAULT_TARGETS = {'sector_cap_pct': _h.SECTOR_CAP_PCT, 'dup_cap_pct': _h.DUP_CAP_PCT,
+                   'name_cap_pct': _h.SINGLE_NAME_CAP_PCT, 'etf_cap_pct': _h.HEDGE_SLEEVE_CAP_PCT,
+                   'size_tolerance_pp': 10.0, 'source': 'default'}
+
+
+def _val(p):
+    return (p.get('quantity') or 0) * (p.get('last_price') or 0)
+
+
+def _by_symbol(positions):
+    out = {}
+    for p in positions:
+        d = out.setdefault(p['symbol'], {'value': 0.0, 'accounts': set(), 'cls': p['asset_class']})
+        d['value'] += _val(p)
+        d['accounts'].add(p['account'])
+    return out
+
+
+def xray(positions, sectors, sizes, index_weights, targets=DEFAULT_TARGETS, index_size_mix=None):
+    total = sum(_val(p) for p in positions) or 1.0
+    pct = lambda v: round(v / total * 100, 2)
+    sec, siz, names, etf = {}, {}, [], 0.0
+    for sym, d in _by_symbol(positions).items():
+        g = sector_view.group_of(sym, (sectors or {}).get(sym))
+        sec[g] = sec.get(g, 0.0) + d['value']
+        z = (sizes or {}).get(sym, 'micro')
+        siz[z] = siz.get(z, 0.0) + d['value']
+        if d['cls'] == 'etf_gold_silver' or sector_view.is_etf(sym):
+            etf += d['value']
+        n = pct(d['value'])
+        br = ('name' if n > targets['name_cap_pct']
+              else 'overlap' if len(d['accounts']) > 1 and n > targets['dup_cap_pct'] else None)
+        names.append({'symbol': sym, 'pct': n, 'accounts': sorted(d['accounts']), 'breach': br})
+    sectors_out = [{'name': g, 'pct': pct(v), 'index_pct': (index_weights or {}).get(g, 0.0),
+                    'target_pct': targets['sector_cap_pct'],
+                    'drift_pp': round(pct(v) - (index_weights or {}).get(g, 0.0), 2),
+                    'breach': pct(v) > targets['sector_cap_pct'] and g not in _h.NOT_SECTORS}
+                   for g, v in sec.items()]
+    mix = index_size_mix or {}
+    sizes_out = [{'size': z, 'pct': pct(v), 'index_pct': mix.get(z, 0.0),
+                  'drift_pp': round(pct(v) - mix.get(z, 0.0), 2),
+                  'breach': abs(pct(v) - mix.get(z, 0.0)) > targets['size_tolerance_pp']}
+                 for z, v in siz.items()]
+    for z, ip in mix.items():
+        if z not in siz:
+            sizes_out.append({'size': z, 'pct': 0.0, 'index_pct': ip, 'drift_pp': -ip,
+                              'breach': ip > targets['size_tolerance_pp']})
+    for rows, key in ((sectors_out, 'pct'), (names, 'pct'), (sizes_out, 'pct')):
+        rows.sort(key=lambda r: r[key], reverse=True)
+    return {'sectors': sectors_out, 'sizes': sizes_out, 'names': names,
+            'etf_pct': pct(etf), 'etf_breach': pct(etf) > targets['etf_cap_pct']}
+
+
+def risk(positions, closes_by_symbol, lookback=60):
+    held = {s: d for s, d in _by_symbol(positions).items() if d['cls'] != 'fund_unconfirmed'}
+    rets, excluded = {}, []
+    for s in held:
+        c = np.asarray((closes_by_symbol or {}).get(s) or [], dtype=float)[-(lookback + 1):]
+        if len(c) < 31 or (c[:-1] == 0).any():
+            excluded.append(s)
+        else:
+            rets[s] = np.diff(c) / c[:-1]
+    if len(rets) < 2:
+        return {'effective_bets': None, 'top_contributors': [], 'clusters': [],
+                'n_used': len(rets), 'excluded': excluded}
+    # ponytail: closes carry no dates; aligned on the common tail, upgrade if gaps matter
+    n = min(len(r) for r in rets.values())
+    syms = list(rets)
+    X = np.column_stack([rets[s][-n:] for s in syms])
+    tot = sum(held[s]['value'] for s in syms) or 1.0
+    w = np.array([held[s]['value'] / tot for s in syms])
+    cov, _ = advisor_risk.ledoit_wolf_cov(X)
+    rc = advisor_risk.risk_contributions(cov, w)
+    top = sorted(({'symbol': s, 'risk_pct': round(float(rc['pctr'][i]) * 100, 1),
+                   'value_pct': round(float(w[i]) * 100, 1)} for i, s in enumerate(syms)),
+                 key=lambda r: r['risk_pct'], reverse=True)[:5]
+    corr = advisor_risk._correlation_read(
+        [{'symbol': s, 'weight_pct': w[i] * 100} for i, s in enumerate(syms)], closes_by_symbol)
+    return {'effective_bets': round(float(advisor_risk.effective_number_of_bets(cov, w)), 2),
+            'top_contributors': top, 'clusters': (corr or {}).get('clusters', []),
+            'n_used': len(syms), 'excluded': excluded}
+
+
+def tax_summary(positions, lots_by_account, fy_by_account, today):
+    today_s = today.isoformat()
+    horizon = today + timedelta(days=90)
+    by_acct, cal, harvest, unmatched = {}, [], [], {}
+    for p in positions:
+        a, sym, q = p['account'], p['symbol'], int(p.get('quantity') or 0)
+        lots = ((lots_by_account or {}).get(a) or {}).get(sym) or []
+        r = costs.after_tax_pct(lots, q, p['last_price'], today_s)
+        acc = by_acct.setdefault(a, {'stcg': 0.0, 'ltcg': 0.0})
+        acc['stcg'] += r['stcg_inr']
+        acc['ltcg'] += r['ltcg_inr']
+        if r['unmatched_qty'] > 0:
+            unmatched.setdefault(a, []).append(sym)
+        left = q
+        for lot in lots:
+            take = min(left, lot['qty'])
+            if take <= 0:
+                break
+            left -= take
+            on = date.fromisoformat(lot['date'][:10]) + relativedelta(years=1) + timedelta(days=1)
+            if today < on <= horizon:
+                cal.append({'symbol': sym, 'account': a, 'date': on.isoformat(), 'qty': take})
+        if p['last_price'] < p['avg_price']:
+            harvest.append({'symbol': sym, 'account': a,
+                            'loss_inr': round(q * (p['avg_price'] - p['last_price']), 2)})
+    cal.sort(key=lambda r: r['date'])
+    harvest.sort(key=lambda r: r['loss_inr'], reverse=True)
+    return {'fy_realised': {a: (c.get('ytd_net_realised_inr') if c.get('fy_known') else None)
+                            for a, c in (fy_by_account or {}).items()},
+            'unrealised_stcg': round(sum(v['stcg'] for v in by_acct.values()), 2),
+            'unrealised_ltcg': round(sum(v['ltcg'] for v in by_acct.values()), 2),
+            'by_account': {a: {k: round(x, 2) for k, x in v.items()} for a, v in by_acct.items()},
+            'ltcg_calendar': cal, 'harvest': harvest, 'unmatched': unmatched}
