@@ -31,7 +31,7 @@ def _zerodha_intraday_charges(side: str, price: float, quantity: int) -> float:
     Schedule (NSE equity intraday, as of 2025):
       brokerage: min(₹20, 0.03% of turnover) per executed order
       STT:       0.025% on the SELL side only
-      exchange:  0.00297% of turnover (NSE)
+      exchange:  0.00307% of turnover (NSE, revised 2026-03-01)
       SEBI:      0.0001% of turnover
       GST:       18% on (brokerage + exchange + SEBI)
       stamp:     0.003% on the BUY side only
@@ -39,7 +39,7 @@ def _zerodha_intraday_charges(side: str, price: float, quantity: int) -> float:
     turnover = price * quantity
     brokerage = min(20.0, turnover * 0.0003)
     stt = turnover * 0.00025 if side == 'SELL' else 0.0
-    exchange = turnover * 0.0000297
+    exchange = turnover * 0.0000307
     sebi = turnover * 0.000001
     gst = 0.18 * (brokerage + exchange + sebi)
     stamp = turnover * 0.00003 if side == 'BUY' else 0.0
