@@ -115,3 +115,12 @@ def test_tax_lots_rename_event_links_old_symbol_without_isin():
               _ti('NEWNAME', 8, 150.0, '2026-11-12', 'sell')]
     assert costs.tax_lots(trades, 'NEWNAME', 'primary', events=ev) == \
         [{'qty': 12, 'price': 100.0, 'date': '2024-07-29'}]
+
+
+def test_realised_split_counts_only_this_fy_and_splits_by_holding_period():
+    trades = [_ti('A', 10, 100.0, '2024-01-01'), _ti('A', 5, 200.0, '2026-05-01'),
+              _ti('A', 1, 150.0, '2025-06-01', 'sell'),          # prior FY: ignored
+              _ti('A', 12, 300.0, '2026-06-01', 'sell'),         # 9 old (long) + 3 new (short)
+              _ti('B', 4, 50.0, '2026-04-10'), _ti('B', 4, 40.0, '2026-08-01', 'sell')]
+    out = costs.realised_split(trades, 'primary', '2026-04-01', '2027-03-31', events=[])
+    assert out == {'stcg': 3 * 100.0 - 40.0, 'ltcg': 9 * 200.0}

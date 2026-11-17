@@ -45,6 +45,15 @@ def test_context_fy_from_statement():
     assert ctx['adv_by_symbol'] == {'AAA': 1000.0}
 
 
+def test_context_ltcg_used_from_tradebook():
+    f = _fake()
+    f.tables['tradebook'].append({'symbol': 'AAA', 'account': 'primary', 'trade_type': 'sell', 'quantity': 5,
+                                  'price': 200, 'trade_date': '2026-05-04', 'executed_at': 'd', 'trade_id': '5'})
+    with patch.object(tc.db, 'supabase', f):
+        fy = tc.context_for('primary', '2026-11-17', [])['fy']
+    assert fy['ltcg_used_fy'] == 500.0          # 5 of the 2025-01-01 lot at 100 -> 200, held > 12 months
+
+
 def test_context_unknown_fy_for_natwar():
     with patch.object(tc.db, 'supabase', _fake()):
         ctx = tc.context_for('natwar', '2026-11-17', ['AAA'])

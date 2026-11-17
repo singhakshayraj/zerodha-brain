@@ -107,6 +107,34 @@ def tax_lots(trades: list, symbol: str, account: str, events: list = None) -> li
     return lots
 
 
+def realised_split(trades: list, account: str, fy_start: str, fy_end: str, events: list = None) -> dict:
+    """Realised {'stcg', 'ltcg'} (INR, before charges) of delivery sells dated
+    in [fy_start, fy_end], FIFO against the lots open just before each sale day.
+    Same-day round trips (intraday) are excluded, as tax_lots excludes them."""
+    events = load_lot_events() if events is None else events
+    out = {'stcg': 0.0, 'ltcg': 0.0}
+    for sym in sorted({t['symbol'] for t in trades if t.get('account') == account and t.get('symbol')}):
+        days = sorted({str(t['trade_date'])[:10] for t in trades
+                       if t.get('symbol') == sym and t.get('account') == account
+                       and str(t.get('trade_type', '')).lower() == 'sell'
+                       and fy_start <= str(t['trade_date'])[:10] <= fy_end})
+        for day in days:
+            today = [t for t in trades if t.get('symbol') == sym and t.get('account') == account
+                     and str(t['trade_date'])[:10] == day]
+            sells = [t for t in today if str(t.get('trade_type', '')).lower() == 'sell']
+            sq = sum(int(float(t['quantity'])) for t in sells)
+            net = sq - sum(int(float(t['quantity'])) for t in today if t not in sells)
+            if net <= 0:
+                continue
+            px = sum(int(float(t['quantity'])) * float(t['price']) for t in sells) / sq
+            before = tax_lots([t for t in trades if str(t['trade_date'])[:10] < day], sym, account,
+                              events=[e for e in events if e['date'] < day])
+            a = after_tax_pct(before, net, px, day)
+            out['stcg'] += a['stcg_inr']
+            out['ltcg'] += a['ltcg_inr']
+    return {k: round(v, 2) for k, v in out.items()}
+
+
 def after_tax_pct(lots: list, qty: int, sale_price: float, sale_date: str,
                   ltcg_used_fy: float = 0.0, adv_inr=None) -> dict:
     """Sell `qty` from FIFO `lots` at `sale_price` on `sale_date`.
