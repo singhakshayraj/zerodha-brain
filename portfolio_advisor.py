@@ -176,6 +176,14 @@ from advisor_rotation import (  # noqa: F401  facade re-export
 )
 
 
+def _ist(ts):
+    """Kite timestamps are naive IST; stamp the offset so Postgres doesn't read UTC."""
+    if not ts:
+        return None
+    ts = str(ts).replace(' ', 'T')
+    return ts if ('+' in ts or ts.endswith('Z')) else ts + '+05:30'
+
+
 def sync_tradebook(kite, account: str = 'primary') -> int:
     """Append today's REAL account trades (GET /trades) into tradebook —
     keeps the imported history current going forward. Read-only; dedup makes
@@ -200,8 +208,10 @@ def sync_tradebook(kite, account: str = 'primary') -> int:
                 'quantity': t.get('quantity') or 0,
                 'price': t.get('average_price') or 0,
                 'trade_id': str(t.get('trade_id') or ''),
-                'order_id': str(t.get('order_id') or ''),
-                'executed_at': t.get('fill_timestamp') or t.get('exchange_timestamp'),
+                # exchange_order_id is what Console exports, so imports and this
+                # sync share one (exchange, trade_id, order_id) key.
+                'order_id': str(t.get('exchange_order_id') or t.get('order_id') or ''),
+                'executed_at': _ist(t.get('fill_timestamp') or t.get('exchange_timestamp')),
                 'source': 'kite_daily',
                 'account': account,
             })

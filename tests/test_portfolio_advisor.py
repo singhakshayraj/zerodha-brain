@@ -189,6 +189,23 @@ def test_sync_tradebook_normalizes_and_is_read_only():
         assert not getattr(kite, name).called
 
 
+def test_sync_tradebook_keys_match_console_import():
+    # Console's order_id is the exchange order id; Kite's own order_id differs,
+    # so keying on it stored every fill twice once the Console file was imported.
+    kite = MagicMock()
+    kite.get_account_trades.return_value = [{
+        'tradingsymbol': 'TITAN', 'exchange': 'NSE', 'transaction_type': 'BUY',
+        'quantity': 4, 'average_price': 4976.4, 'trade_id': '611406349',
+        'order_id': '261111171016791', 'exchange_order_id': '1300000102311130',
+        'fill_timestamp': '2026-11-11 14:48:35',
+    }]
+    with patch.object(pa.db, 'upsert_tradebook', side_effect=lambda rows: len(rows)) as up:
+        pa.sync_tradebook(kite, 'natwar')
+    row = up.call_args.args[0][0]
+    assert row['order_id'] == '1300000102311130'
+    assert row['executed_at'] == '2026-11-11T14:48:35+05:30'
+
+
 def test_sync_tradebook_survives_api_error():
     kite = MagicMock()
     kite.get_account_trades.side_effect = RuntimeError('down')
