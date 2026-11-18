@@ -435,6 +435,9 @@ def _maybe_run_lab() -> None:
         global _lab_done_day, _lab_dead_token
         try:
             import lab
+            import lab_db
+            from supabase import create_client
+            lab_db.sb = create_client(config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY)
             should_yield = lambda: _advisor_running or (_bars_thread is not None and _bars_thread.is_alive())
             result = lab.LabRunner(KiteClient(token), today, should_yield).run()
             if result == 'EOD':

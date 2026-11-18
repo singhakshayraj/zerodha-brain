@@ -29,9 +29,8 @@ _POS_FIELDS = ('strategy_id', 'symbol', 'side', 'qty', 'entry_price', 'entry_ts'
 
 def pick_universe(today: str, n: int = 200) -> list:
     """Top n of the Nifty 500 pin by 20-day average traded value."""
-    import tax_context
     tok = {r['symbol']: int(r['instrument_token']) for r in config.NIFTY500_UNIVERSE}
-    adv = tax_context._adv(list(tok), today)
+    adv = lab_db.adv(list(tok), today)
     ranked = sorted((s for s in tok if adv.get(s)), key=lambda s: -adv[s])[:n]
     return [(s, tok[s], i + 1) for i, s in enumerate(ranked)]
 

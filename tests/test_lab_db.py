@@ -42,3 +42,19 @@ def test_open_close_load_round_trip():
         assert lab_db.load_open('2026-11-19') == []
     row = f.tables['lab_trades'][0]
     assert row['status'] == 'CLOSED' and row['exit_reason'] == 'EOD' and row['net_inr'] is not None
+
+
+def test_dedicated_client_isolates_lab_from_shared_connection():
+    shared, own = FakeSupabase(), FakeSupabase()
+    with patch.object(lab_db.db, 'supabase', shared), patch.object(lab_db, 'sb', own):
+        lab_db.register([dict(ROW)])
+    assert own.tables.get('lab_strategies') and not shared.calls
+
+
+def test_adv_ranks_by_20d_mean_traded_value():
+    f = FakeSupabase()
+    f.tables['candles'] = [{'symbol': s, 'interval': 'day', 'trade_date': f'2026-11-{d:02d}', 'close': c, 'volume': 10}
+                           for s, c in (('AAA', 100.0), ('BBB', 50.0)) for d in range(1, 18)]
+    with patch.object(lab_db.db, 'supabase', f):
+        adv = lab_db.adv(['AAA', 'BBB', 'CCC'], '2026-11-18')
+    assert adv == {'AAA': 1000.0, 'BBB': 500.0}
