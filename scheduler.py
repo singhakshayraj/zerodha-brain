@@ -753,6 +753,51 @@ def _maybe_backfill_candles() -> None:
         print(f"[SCHEDULER] candle backfill errored (non-fatal): {e}")
 
 
+_s5_days = set()       # dates S5 ran to completion
+_s5_inflight = set()   # dates a thread is running now
+
+
+def _maybe_run_s5() -> None:
+    """[P-71] S5 momentum PAPER book, 15:40–16:30 IST, once per trading day:
+    month-end rebalance when one is pending (fills at the 15:20 5-min bar,
+    still fetchable post-close), then the daily equity snapshot. Same shape as
+    _maybe_backfill_candles: live token, daemon thread, marked done only on a
+    clean return so an expired token or a fetch error retries in the window."""
+    if config.QA_MODE or not config.S5_PAPER_ENABLED:
+        return
+    try:
+        now = datetime.now(IST)
+        today = now.date().isoformat()
+        if now.weekday() > 4 or today in config.NSE_HOLIDAYS:
+            return
+        m = now.hour * 60 + now.minute
+        if not ((15 * 60 + 40) <= m <= (16 * 60 + 30)):
+            return
+        if today in _s5_days or today in _s5_inflight:
+            return
+        token = db.get_enc_token()
+        if not token or not _token_is_live(token):
+            print('[SCHEDULER] S5 skipped — no live token')
+            return
+        _s5_inflight.add(today)
+
+        def _run():
+            try:
+                import s5_momentum
+                from market_data import MarketData
+                out = s5_momentum.run_s5(MarketData(KiteClient(token)), today)
+                _s5_days.add(today)
+                print(f"[SCHEDULER] S5 done: {out}")
+            except Exception as e:
+                print(f"[SCHEDULER] S5 failed (will retry): {e}")
+            finally:
+                _s5_inflight.discard(today)
+
+        threading.Thread(target=_run, daemon=True, name='s5-paper').start()
+    except Exception as e:
+        print(f"[SCHEDULER] S5 errored (non-fatal): {e}")
+
+
 _watchdog_days = set()
 _lessons_days = set()
 
@@ -1065,6 +1110,7 @@ def run():
             _maybe_run_watchdog()
             _maybe_run_lessons()
             _maybe_run_lab()
+            _maybe_run_s5()
             # Portfolio advisor: once per day when a live token exists.
             # Advisory-only, independent of trading sessions; never blocks
             # the loop (runs on a daemon thread).

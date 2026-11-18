@@ -227,3 +227,43 @@ def test_snapshot_baseline():
     eq = {e['snapshot_date']: e for e in db.paper_equity_curve('S5')}
     assert eq['2027-01-05']['baseline_equity'] == pytest.approx(55000.0)
     assert eq['2027-01-05']['open_positions'] == 10
+
+
+# ── Task 5: scheduler gate ───────────────────────────────────────────────────
+
+def _at(hh, mm):
+    import scheduler
+    d = MagicMock()
+    d.weekday.return_value = 3
+    d.hour, d.minute = hh, mm
+    d.date.return_value.isoformat.return_value = '2026-12-31'
+    d.strftime.return_value = '2026-12-31'
+    return patch.object(scheduler, 'datetime', MagicMock(now=MagicMock(return_value=d)))
+
+
+def test_s5_outside_window_noop():
+    import scheduler
+    scheduler._s5_days.clear()
+    scheduler._s5_inflight.clear()
+    with _at(15, 39), patch.object(scheduler.db, 'get_enc_token') as tok, \
+         patch.object(scheduler.threading, 'Thread') as th:
+        scheduler._maybe_run_s5()
+    tok.assert_not_called()
+    th.assert_not_called()
+
+
+def test_s5_runs_once_per_day():
+    import scheduler
+    scheduler._s5_days.clear()
+    scheduler._s5_inflight.clear()
+    with _at(15, 45), \
+         patch.object(scheduler.db, 'get_enc_token', return_value='t'), \
+         patch.object(scheduler, '_token_is_live', return_value=True), \
+         patch.object(scheduler.threading, 'Thread') as th:
+        scheduler._maybe_run_s5()
+        scheduler._maybe_run_s5()          # thread still in flight
+        assert th.call_count == 1
+        scheduler._s5_inflight.clear()
+        scheduler._s5_days.add('2026-12-31')
+        scheduler._maybe_run_s5()          # done today
+        assert th.call_count == 1
