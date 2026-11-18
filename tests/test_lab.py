@@ -23,19 +23,18 @@ GAP_BARS = [_bar('2026-11-18T15:25', 100.0)] + [_bar(f'{TODAY}T{t}', 102.0, o=10
 
 
 class FakeKite:
-    def __init__(self, ltp=102.0):
-        self.ltp, self.fail, self.hist_calls = ltp, False, 0
+    """Retail enctoken: historical bars work, /quote/ltp 400s (never call it)."""
+    def __init__(self):
+        self.fail, self.hist_calls, self.extra = False, 0, []
 
     def get_historical_data(self, token, interval, from_date, to_date):
         if self.fail:
             raise TokenExpiredError('expired')
         self.hist_calls += 1
-        return [dict(b) for b in GAP_BARS]
+        return [dict(b) for b in GAP_BARS + self.extra]
 
     def get_ltp(self, symbols):
-        if self.fail:
-            raise TokenExpiredError('expired')
-        return {s: {'last_price': self.ltp} for s in symbols}
+        raise AssertionError('/quote/ltp is not available on an enctoken')
 
 
 class Clock:
@@ -173,3 +172,44 @@ def test_yield_mid_fetch_aborts_cycle():
     with patch.object(lab_db.db, 'supabase', f):
         assert _runner(f, should_yield=should_yield).cycle() is False
     assert not f.tables.get('lab_trades')
+
+
+def test_bar_low_through_stop_exits_at_stop():
+    f = FakeSupabase()
+    kite = FakeKite()
+    clock = Clock('09:30:30')
+    with patch.object(lab_db.db, 'supabase', f):
+        r = _runner(f, kite=kite, clock=clock)
+        r.cycle()                                    # GAPGO longs at 102, s1 stop = 100.98
+        kite.extra = [_bar(f'{TODAY}T09:35', 100.5, o=101.5, l=100.5)]
+        clock.t = clock.t.replace(minute=40)
+        r.cycle()
+    s1 = [t for t in f.tables['lab_trades'] if t['strategy_id'].startswith('GAPGO_s1_')]
+    assert s1 and all(t['exit_reason'] == 'STOP' for t in s1)
+    assert all(abs(t['exit_price'] - t['stop']) < 1e-9 for t in s1)
+    s2 = [t for t in f.tables['lab_trades'] if t['strategy_id'].startswith('GAPGO_s2_')]
+    assert all(t['status'] == 'OPEN' for t in s2)    # 2% stop = 99.96, not touched
+
+
+def test_gap_through_stop_fills_at_quarter_r_cap():
+    f = FakeSupabase()
+    kite = FakeKite()
+    clock = Clock('09:30:30')
+    with patch.object(lab_db.db, 'supabase', f):
+        r = _runner(f, kite=kite, clock=clock)
+        r.cycle()
+        kite.extra = [_bar(f'{TODAY}T09:35', 95.0, o=95.0, l=95.0)]
+        clock.t = clock.t.replace(minute=40)
+        r.cycle()
+    t = next(t for t in f.tables['lab_trades'] if t['strategy_id'] == 'GAPGO_s1_base_v1')
+    assert t['exit_reason'] == 'STOP' and abs(t['exit_price'] - (t['stop'] - 0.25 * (t['entry_price'] - t['stop']))) < 1e-9
+
+
+def test_cycles_keep_checking_exits_after_1430():
+    f = FakeSupabase()
+    clock = Clock('14:35:30')
+    with patch.object(lab_db.db, 'supabase', f):
+        r = _runner(f, clock=clock)
+        r._last_cycle = None
+        r.tick()
+    assert r.kite.hist_calls > 0

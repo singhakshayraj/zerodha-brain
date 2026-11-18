@@ -2,9 +2,11 @@
 the live Nifty 200 feed in parallel. Paper only — no Kite order endpoint is
 ever called from here.
 
-Loop (IST): every 5-min boundary + 30s from 09:30 to 14:30 fetch completed
-5-min bars once and fan them out to every variant; exits polled on batch LTP
-every 30s; flatten 15:15; stats 15:20. Yields Kite calls while the advisor or
+Loop (IST): every 5-min boundary + 30s from 09:30 to 15:10 fetch 5-min bars
+once and fan them out to every variant (entries end 14:30 inside the
+strategies). A retail enctoken has no /quote/ltp (400 on every call), so the
+price is the latest bar's close and stops/targets are checked against each
+new bar's open/high/low; flatten 15:15; stats 15:20. Yields Kite calls while the advisor or
 the daily-bar sync runs. Restart-safe: today's OPEN rows reload from lab_trades
 and the in-progress cycle is skipped, so a redeploy never duplicates entries.
 """
@@ -39,6 +41,27 @@ def _f(x):
     return None if x is None else float(x)
 
 
+def _bar_start(bar) -> datetime:
+    return datetime.strptime(str(bar['timestamp'])[:16], '%Y-%m-%dT%H:%M')
+
+
+def _bar_hit(p, bar):
+    """(reason, price) if this bar reaches the stop or target. Stop first when
+    both sit inside one bar (conservative); a gap past the stop fills at the
+    open and Book.close caps it at stop - 0.25R."""
+    if p.side == 'LONG':
+        if bar['open'] <= p.stop or bar['low'] <= p.stop:
+            return 'STOP', min(bar['open'], p.stop)
+        if p.target is not None and bar['high'] >= p.target:
+            return 'TARGET', p.target
+    else:
+        if bar['open'] >= p.stop or bar['high'] >= p.stop:
+            return 'STOP', max(bar['open'], p.stop)
+        if p.target is not None and bar['low'] <= p.target:
+            return 'TARGET', p.target
+    return None
+
+
 class LabRunner:
     def __init__(self, kite, today: str, should_yield, clock=lambda: datetime.now(IST),
                  universe=None, sleep=time.sleep):
@@ -50,7 +73,7 @@ class LabRunner:
         self.rs_order = None
         self.refusals = Counter()
         self.flattened = False
-        self._last_cycle = self._last_exit = None
+        self._last_cycle = None
 
     # ── data ────────────────────────────────────────────────────────────────
     def _fetch(self, token, old):
@@ -64,13 +87,30 @@ class LabRunner:
         keep = [b for b in old if str(b['timestamp'])[:10] < self.today]
         return keep + [b for b in got if str(b['timestamp'])[:10] == self.today]
 
-    def _ltps(self, symbols):
-        if not symbols:
-            return {}
-        raw = self.kite.get_ltp([f'NSE:{s}' for s in symbols]) or {}
-        out = {k.replace('NSE:', ''): v.get('last_price') for k, v in raw.items() if v.get('last_price')}
-        self.last_ltp.update(out)
-        return out
+    def _price(self, sym):
+        """Latest close incl. the in-progress bar — the only live price an
+        enctoken offers (same fallback the old engine used)."""
+        bars = self.bars.get(sym) or []
+        today = [b for b in bars if str(b['timestamp'])[:10] == self.today]
+        if today:
+            self.last_ltp[sym] = today[-1]['close']
+        return self.last_ltp.get(sym)
+
+    def _bar_exits(self, sym):
+        """Stops/targets against every bar after the entry bar (stateless: a
+        bar that hit would already have closed the position last cycle)."""
+        for b in self.books.values():
+            for p in [p for p in b.open if p.symbol == sym]:
+                ent = datetime.fromisoformat(str(p.entry_ts)).astimezone(IST).replace(tzinfo=None)
+                first = ent.replace(minute=ent.minute - ent.minute % 5, second=0, microsecond=0) + timedelta(minutes=5)
+                for bar in self.bars.get(sym) or []:
+                    if _bar_start(bar) < first:
+                        continue
+                    hit = _bar_hit(p, bar)
+                    if hit:
+                        reason, px = hit
+                        lab_db.close_trade(p.db_id, b.close(p, px, self.clock().isoformat(), reason))
+                        break
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     def resume(self):
@@ -105,12 +145,12 @@ class LabRunner:
                 return False
             self.bars[sym] = self._fetch(token, self.bars.get(sym))
         self.nifty_bars = self._fetch(NIFTY_TOKEN, self.nifty_bars)
-        ltps = self._ltps([s for s, _, _ in self.universe])
         nifty = completed_bars(self.nifty_bars, now)
         if self.rs_order is None and (now.hour, now.minute) >= (10, 15):
             self.rs_order = self._rank_rs(now, nifty)
         for sym, _, rank in self.universe:
-            ltp = ltps.get(sym)
+            self._bar_exits(sym)
+            ltp = self._price(sym)
             if not ltp:
                 continue
             ctx = Ctx(now, sym, completed_bars(self.bars.get(sym) or [], now), ltp, nifty, rank,
@@ -151,26 +191,16 @@ class LabRunner:
             return
         res.db_id = lab_db.insert_open(res, self.today)
 
-    def check_exits(self):
-        opened = [(b, p) for b in self.books.values() for p in b.open]
-        if not opened:
-            return
-        ltps = self._ltps(sorted({p.symbol for _, p in opened}))
-        ts = self.clock().isoformat()
-        for b, p in opened:
-            ltp = ltps.get(p.symbol)
-            reason = b.check_exit(p, ltp) if ltp else None
-            if reason:
-                lab_db.close_trade(p.db_id, b.close(p, ltp, ts, reason))
-
     def flatten(self, reason: str):
         opened = [(b, p) for b in self.books.values() for p in b.open]
-        ltps = {}
         if opened and reason != 'TOKEN_LOST':
-            ltps = self._ltps(sorted({p.symbol for _, p in opened}))
+            tok = {s: t for s, t, _ in self.universe}
+            for sym in sorted({p.symbol for _, p in opened}):
+                if sym in tok:
+                    self.bars[sym] = self._fetch(tok[sym], self.bars.get(sym))
         ts = self.clock().isoformat()
         for b, p in opened:
-            ltp = ltps.get(p.symbol) or self.last_ltp.get(p.symbol) or p.entry_ref
+            ltp = (self._price(p.symbol) if reason != 'TOKEN_LOST' else self.last_ltp.get(p.symbol)) or p.entry_ref
             lab_db.close_trade(p.db_id, b.close(p, ltp, ts, reason))
         self.flattened = True
 
@@ -205,12 +235,9 @@ class LabRunner:
             return True
         boundary = now.replace(minute=now.minute - now.minute % 5, second=0, microsecond=0)
         if ((now - boundary).total_seconds() >= 30 and boundary != self._last_cycle
-                and (9, 30) <= (boundary.hour, boundary.minute) <= (14, 30)):
+                and (9, 30) <= (boundary.hour, boundary.minute) <= (15, 10)):
             if self.cycle():
                 self._last_cycle = boundary
-        if self._last_exit is None or (now - self._last_exit).total_seconds() >= 30:
-            self._last_exit = now
-            self.check_exits()
         return True
 
     def run(self) -> str:
