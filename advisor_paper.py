@@ -274,15 +274,15 @@ def _close_matured_picks(run_date: str, md, cache: dict) -> None:
 
 # ── PICKING_RP: monthly rebalance to the stored capped-HRP targets ──────────
 
-def _nifty500_close(run_date: str) -> float:
-    """Latest Nifty 500 close on/before run_date (index_bars lags ~1 trading day)."""
+def _index_close(run_date: str, name: str = 'Nifty 500') -> float:
+    """Latest close of index `name` on/before run_date (index_bars lags ~1 trading day)."""
     try:
         res = (db.supabase.table('index_bars').select('close')
-               .eq('index_name', 'Nifty 500').lte('trade_date', run_date)
+               .eq('index_name', name).lte('trade_date', run_date)
                .order('trade_date', desc=True).limit(1).execute())
         return float(res.data[0]['close']) if res.data else 0.0
     except Exception as e:
-        print(f"[paper] nifty500 close: {e}")
+        print(f"[paper] {name} close: {e}")
         return 0.0
 
 
@@ -292,7 +292,7 @@ def _seed_rp(rows: list, run_date: str) -> None:
         return
     db.write_config(_SEED_RP_KEY, json.dumps({
         'capital': round(capital, 2), 'seed_date': run_date,
-        'nifty500_inception': _nifty500_close(run_date)}))
+        'nifty500_inception': _index_close(run_date)}))
     print(f"[paper] seeded PICKING_RP: ₹{capital:,.0f}")
 
 
@@ -403,7 +403,7 @@ def _snapshot(book: str, run_date: str, md, cache: dict) -> None:
     elif book == PICKING_RP:
         anchor = _load(_SEED_RP_KEY)
         if anchor and anchor.get('nifty500_inception'):
-            n5 = _nifty500_close(run_date)
+            n5 = _index_close(run_date)
             baseline = float(anchor['capital']) * (n5 / float(anchor['nifty500_inception'])) \
                 if n5 else float(anchor['capital'])
     else:

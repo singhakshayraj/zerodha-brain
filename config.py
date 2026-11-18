@@ -731,5 +731,11 @@ def get_tunable(key: str):
 
 # ── Strategy lab [P-70] — parallel intraday PAPER variants (lab.py) ──────────
 LAB_ENABLED = os.getenv('LAB_ENABLED', 'true').strip().lower() == 'true'
+
+# [P-71] S5 trend-filtered momentum — ₹50k PAPER book, monthly (trial 265,
+# zerodha-trading docs/reference/s1_momentum/PREREG_S5.md). Paper only.
+S5_PAPER_ENABLED = os.getenv('S5_PAPER_ENABLED', 'true').strip().lower() == 'true'
+S5_START = '2026-12-31'          # first month-end rebalance (frozen in PREREG_S5)
+S5_CAPITAL = 50000.0
 LAB_UNIVERSE_N = int(os.getenv('LAB_UNIVERSE_N', '200'))
 LAB_FETCH_DELAY_S = float(os.getenv('LAB_FETCH_DELAY_S', '0.35'))
