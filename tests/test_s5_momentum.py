@@ -94,9 +94,11 @@ import database as db
 UNIV = [f'S{i:02d}' for i in range(1, 31)]
 
 
-def _md(no_bar=(), nifty_rising=True, end=date(2027, 1, 29)):
+def _md(no_bar=(), nifty_rising=True, end=date(2027, 1, 29), fail=()):
     """Day bars ending at `end` (growth falls with the symbol number, so S01 is
-    the strongest) and one 15:20 5-min bar per asked day at the last close."""
+    the strongest) and one 15:20 5-min bar per asked day at the last close.
+    Like the real MarketData: no instrument token → []. `no_bar` = halted
+    (5-min bars exist, none at 15:20 on the day); `fail` = fetch returns []."""
     day = {s: _series(330, 0.003 - 0.0001 * i, start=100.0, end=end) for i, s in enumerate(UNIV)}
     nifty = _nifty(rising=nifty_rising, n=330)
     md = MagicMock()
@@ -104,10 +106,12 @@ def _md(no_bar=(), nifty_rising=True, end=date(2027, 1, 29)):
 
     def candles(key, interval, days):
         sym = key.replace('NSE:', '')
+        if key not in md._instrument_cache or (sym, interval) in fail or sym in fail:
+            return []
         if interval == 'day':
             return nifty if sym == 'NIFTY 50' else day.get(sym, [])
         if sym in no_bar:
-            return []
+            return [{'timestamp': '2026-12-29 15:20:00+05:30', 'close': 1.0}]
         last = (day.get(sym) or nifty)[-1]['close']
         return [{'timestamp': f'{d} 15:20:00+05:30', 'close': last}
                 for d in ('2026-12-31', '2027-01-29')]
@@ -257,6 +261,8 @@ def test_s5_runs_once_per_day():
     scheduler._s5_days.clear()
     scheduler._s5_inflight.clear()
     with _at(15, 45), \
+         patch.object(scheduler, '_bars_thread', None), \
+         patch.object(scheduler, '_advisor_running', False), \
          patch.object(scheduler.db, 'get_enc_token', return_value='t'), \
          patch.object(scheduler, '_token_is_live', return_value=True), \
          patch.object(scheduler.threading, 'Thread') as th:
@@ -267,3 +273,125 @@ def test_s5_runs_once_per_day():
         scheduler._s5_days.add('2026-12-31')
         scheduler._maybe_run_s5()          # done today
         assert th.call_count == 1
+
+
+# ── final-review fix pass ────────────────────────────────────────────────────
+
+def _rank(order, eligible=30, risk_off=False):
+    return patch.object(s5, 'rank', return_value={'ranked': order, 'risk_off': risk_off,
+                                                   'eligible': eligible})
+
+
+def _break_table(name):
+    """Make every query on `name` raise, like a torn HTTP/2 connection."""
+    real = db.supabase.table
+
+    def table(n):
+        if n == name:
+            raise ConnectionError('ConnectionTerminated')
+        return real(n)
+    return patch.object(db.supabase, 'table', side_effect=table)
+
+
+def test_c1_positions_read_failure_raises_no_trades():
+    s5.run_s5(_md(), today='2026-12-31')
+    with _break_table('advisor_paper_positions'), pytest.raises(Exception):
+        s5.run_s5(_md(), today='2027-01-29')
+    assert len(_open()) == 10 and _last()['date'] == '2026-12-31'
+
+
+def test_c1_sell_update_failure_aborts_before_buys():
+    s5.run_s5(_md(), today='2026-12-31')
+    with _rank(UNIV[10:] + UNIV[:10]), patch.object(db, 'update_paper_position', return_value=False):
+        out = s5.run_s5(_md(), today='2027-01-29')
+    assert out['rebalanced'] is None
+    assert sorted(p['symbol'] for p in _open()) == UNIV[:10] and _last()['date'] == '2026-12-31'
+
+
+def test_c1_config_read_failure_never_overwrites_guard():
+    s5.run_s5(_md(), today='2026-12-31')
+    with patch.object(db, 'get_config_strict', side_effect=ConnectionError('x')), \
+         pytest.raises(ConnectionError):
+        s5.run_s5(_md(), today='2027-01-11')
+    assert _last()['status'] == 'run'
+
+
+def test_c1_snapshot_read_failure_writes_no_point():
+    s5.run_s5(_md(), today='2026-12-31')
+    with _break_table('advisor_paper_positions'), pytest.raises(Exception):
+        s5.run_s5(_md(), today='2027-01-05')
+    assert '2027-01-05' not in {e['snapshot_date'] for e in db.paper_equity_curve('S5')}
+
+
+def test_i1_name_leaving_pin_sells_at_market(monkeypatch):
+    s5.run_s5(_md(), today='2026-12-31')
+    pin = {k: v for k, v in config.NIFTY500_INSTRUMENT_TOKENS.items() if k != 'NSE:S01'}
+    monkeypatch.setattr(config, 'NIFTY500_INSTRUMENT_TOKENS', pin)
+    md = _md()
+    s5.run_s5(md, today='2027-01-29')
+    s01 = [p for p in db.paper_positions('S5') if p['symbol'] == 'S01'][0]
+    last = [c for c in md.get_candles.call_args_list]           # fetched with the stored token
+    assert s01['is_open'] is False
+    assert float(s01['exit_price']) == pytest.approx(s5.sell_fill(_series(330, 0.003, end=date(2027, 1, 29))[-1]['close'], s01['qty']))
+    assert last
+
+
+def test_i2_scheduler_yields_to_bars_and_advisor():
+    import scheduler
+    scheduler._s5_days.clear()
+    scheduler._s5_inflight.clear()
+    alive = MagicMock()
+    alive.is_alive.return_value = True
+    with _at(15, 45), \
+         patch.object(scheduler.db, 'get_enc_token', return_value='t'), \
+         patch.object(scheduler, '_token_is_live', return_value=True), \
+         patch.object(scheduler.threading, 'Thread') as th:
+        with patch.object(scheduler, '_bars_thread', alive):
+            scheduler._maybe_run_s5()
+        with patch.object(scheduler, '_advisor_running', True):
+            scheduler._maybe_run_s5()
+        assert th.call_count == 0
+
+
+def test_i2_held_day_fetch_failure_aborts():
+    s5.run_s5(_md(), today='2026-12-31')
+    out = s5.run_s5(_md(fail=(('S03', 'day'),)), today='2027-01-29')
+    assert out['rebalanced'] is None and len(_open()) == 10 and _last()['date'] == '2026-12-31'
+
+
+def test_i2_thin_rank_aborts():
+    s5.run_s5(_md(), today='2026-12-31')
+    with _rank(UNIV[10:], eligible=5):
+        out = s5.run_s5(_md(), today='2027-01-29')
+    assert out['rebalanced'] is None and _last()['date'] == '2026-12-31'
+
+
+def test_i2_empty_5min_fetch_aborts_not_skips():
+    s5.run_s5(_md(), today='2026-12-31')
+    with _rank(UNIV[10:] + UNIV[:10]):
+        out = s5.run_s5(_md(fail=(('S11', '5minute'),)), today='2027-01-29')
+    assert out['rebalanced'] is None and _last()['date'] == '2026-12-31'
+
+
+def test_i3_halted_held_name_sells_even_if_ranked():
+    s5.run_s5(_md(), today='2026-12-31')
+    with _rank(UNIV):                                      # S01 still rank 1
+        s5.run_s5(_md(no_bar=('S01',)), today='2027-01-29')
+    s01 = [p for p in db.paper_positions('S5') if p['symbol'] == 'S01'][0]
+    assert s01['is_open'] is False
+
+
+def test_i4_bonus_1_for_3_patched():
+    db.insert_paper_positions([ap._open_position('S5', 'S01', 'S5', {}, 6, 1000.0, '2026-12-31')])
+    bars = {'S01': [{'timestamp': '2026-12-31', 'close': 750.0}]}   # 1:3 bonus, k = 1.333
+    assert s5.patch_splits(_open(), bars) == 1
+    p = _open()[0]
+    assert p['qty'] == 8 and float(p['entry_price']) == pytest.approx(750.0)
+
+
+def test_m1_universe_fetch_window_500_days():
+    md = _md()
+    s5.run_s5(md, today='2026-12-31')
+    days = [c.args[2] for c in md.get_candles.call_args_list if c.args[1] == 'day'
+            and c.args[0] != 'NSE:NIFTY 50']
+    assert days and min(days) >= 500

@@ -775,6 +775,10 @@ def _maybe_run_s5() -> None:
             return
         if today in _s5_days or today in _s5_inflight:
             return
+        # One Kite historical scan at a time: the daily-bar sync and the advisor
+        # each walk ~500 symbols and must not race the rate limit.
+        if (_bars_thread is not None and _bars_thread.is_alive()) or _advisor_running:
+            return
         token = db.get_enc_token()
         if not token or not _token_is_live(token):
             print('[SCHEDULER] S5 skipped — no live token')

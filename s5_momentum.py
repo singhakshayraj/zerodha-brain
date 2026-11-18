@@ -26,9 +26,11 @@ from data_jobs import _is_trading_day
 IST = pytz.timezone('Asia/Kolkata')
 BOOK = 'S5'
 INDEX = 'Nifty200 Momentum 30'     # the 2028-12-31 decision benchmark
-SEED_KEY, LAST_KEY = 's5_seed', 's5_last_rebalance'
+SEED_KEY, LAST_KEY, TOKENS_KEY = 's5_seed', 's5_last_rebalance', 's5_tokens'
 CATCHUP_SESSIONS = 5
-SPLIT_BAND = (0.70, 1.45)
+SPLIT_BAND = (0.95, 1.05)        # PREREG_S5 Addendum C (k ≈ 1 ± costs unless a corporate action)
+DAY_WINDOW = 500                 # calendar days ≈ 340 sessions vs MIN_HIST 260 (Addendum C)
+MIN_ELIGIBLE_SHARE = 0.5         # fewer eligible than this × pin = a data failure, not a market
 NIFTY_TOKEN = 256265
 
 # Constants copied verbatim from the S1 kit (backtest.py) — a change is a new trial.
@@ -142,26 +144,54 @@ def pending_rebalance(today: str, last):
     return me.isoformat(), ('run' if late <= CATCHUP_SESSIONS else 'skip')
 
 
+# ── strict reads: a swallowed DB error must never look like "no positions" ──
+
+class FetchError(Exception):
+    """A Kite fetch came back empty: retry later, never trade on it."""
+
+
+def _positions() -> list:
+    return (db.supabase.table('advisor_paper_positions').select('*')
+            .eq('book', BOOK).execute().data or [])              # raises on failure
+
+
+def _load(key: str):
+    raw = db.get_config_strict(key)                              # raises on failure
+    return json.loads(raw) if raw else None
+
+
 # ── market data ──────────────────────────────────────────────────────────────
 
-def _day_bars(md, sym: str, days: int) -> list:
+def _tokens() -> dict:
+    """Nifty-500 pin plus the tokens of names S5 bought (a held name can leave
+    the pin at a reconstitution or a rename; Kite keeps its token)."""
+    m = {k.split(':', 1)[1]: t for k, t in config.NIFTY500_INSTRUMENT_TOKENS.items()}
+    for s, t in (_load(TOKENS_KEY) or {}).items():
+        m.setdefault(s, t)
+    m['NIFTY 50'] = NIFTY_TOKEN
+    return m
+
+
+def _day_bars(md, sym: str, days: int, tokens: dict) -> list:
     key = f'NSE:{sym}'
-    tok = NIFTY_TOKEN if sym == 'NIFTY 50' else config.NIFTY500_INSTRUMENT_TOKENS.get(key)
-    if tok:
-        md._instrument_cache[key] = tok
+    if tokens.get(sym):
+        md._instrument_cache[key] = tokens[sym]
     bars = md.get_candles(key, 'day', days) or []      # TokenExpiredError propagates
     time.sleep(config.ADVISOR_UNIVERSE_SCAN_DELAY_MS / 1000)
     return bars
 
 
-def _bar_1520(md, sym: str, day: str, today: str):
-    """Close of the 15:20 5-minute bar on `day` (the kit's 15:25 price), or None."""
+def _bar_1520(md, sym: str, day: str, today: str, tokens: dict):
+    """Close of the 15:20 5-minute bar on `day` (the kit's 15:25 price). None =
+    bars exist but not that one (halted); FetchError = nothing came back."""
     key = f'NSE:{sym}'
-    tok = NIFTY_TOKEN if sym == 'NIFTY 50' else config.NIFTY500_INSTRUMENT_TOKENS.get(key)
-    if tok:
-        md._instrument_cache[key] = tok
-    days = (date.fromisoformat(today) - date.fromisoformat(day)).days + 3
-    for b in md.get_candles(key, '5minute', days) or []:
+    if tokens.get(sym):
+        md._instrument_cache[key] = tokens[sym]
+    days = (date.fromisoformat(today) - date.fromisoformat(day)).days + 10
+    bars = md.get_candles(key, '5minute', days) or []
+    if not bars:
+        raise FetchError(f'{sym} 5-minute fetch empty')
+    for b in bars:
         ts = str(b.get('timestamp') or '')
         if ts[:10] == day and ts[11:16] == '15:20' and b.get('close') is not None:
             return float(b['close'])
@@ -178,7 +208,8 @@ def _last_close(bars: list, upto: str):
 def patch_splits(positions: list, bars: dict) -> int:
     """k = entry_price / adjusted close on the entry date. Outside SPLIT_BAND the
     holder's shares changed (split/bonus, or a demerger patched in the series):
-    qty × k at entry ÷ k, cost basis kept. Idempotent (k ≈ 1 afterwards)."""
+    qty × k at entry ÷ k, cost basis kept. Idempotent (k ≈ 1 afterwards).
+    Raises when the patch cannot be written, so the run retries."""
     series = corporate_actions.adjust(
         {s: {_day(b): float(b['close']) for b in bs if b.get('close') is not None}
          for s, bs in bars.items()})
@@ -195,7 +226,8 @@ def patch_splits(positions: list, bars: dict) -> int:
         qty = int(p['qty'])
         new_qty = max(1, round(qty * f))
         entry = float(p['entry_price']) * qty / new_qty
-        db.update_paper_position(p['id'], {'qty': new_qty, 'entry_price': round(entry, 4)})
+        if not db.update_paper_position(p['id'], {'qty': new_qty, 'entry_price': round(entry, 4)}):
+            raise RuntimeError(f"split patch write failed for {p['symbol']}")
         print(f"[s5] split patch {p['symbol']}: {qty} → {new_qty} (k={k:.3f})")
         p.update(qty=new_qty, entry_price=entry)
         n += 1
@@ -206,26 +238,36 @@ def patch_splits(positions: list, bars: dict) -> int:
 
 def _rebalance(md, me: str, today: str):
     """One month-end rebalance. Returns `me` on success, None when it must be
-    retried (no Nifty bar, short history, rejected write) — guard unwritten."""
-    positions = db.paper_positions(BOOK)
-    held = [p for p in positions if p.get('is_open')]
-    if _bar_1520(md, 'NIFTY 50', me, today) is None:
-        print(f"[s5] no Nifty 15:20 bar on {me} (holiday / calendar gap?) — retry later")
+    retried (no Nifty bar, empty fetch, thin data, rejected write) — guard
+    unwritten. Every abort happens before any buy is written; a retry after
+    persisted sells converges (target-state, rank-based)."""
+    try:
+        return _rebalance_once(md, me, today)
+    except (FetchError, ValueError) as e:
+        print(f"[s5] rebalance {me} aborted, will retry: {e}")
         return None
+
+
+def _rebalance_once(md, me: str, today: str):
+    positions = _positions()
+    held = [p for p in positions if p.get('is_open')]
+    tokens = _tokens()
+    if _bar_1520(md, 'NIFTY 50', me, today, tokens) is None:
+        raise ValueError(f'no Nifty 15:20 bar on {me} (holiday / calendar gap?)')
     oldest = min([str(p['entry_date'])[:10] for p in held] + [me])
-    deep = max(400, (date.fromisoformat(today) - date.fromisoformat(oldest)).days + 10)
+    deep = max(DAY_WINDOW, (date.fromisoformat(today) - date.fromisoformat(oldest)).days + 10)
     bars = {}
     for p in held:                                  # deep first: the candle cache keys ignore `days`
-        bars[p['symbol']] = _day_bars(md, p['symbol'], deep)
+        bars[p['symbol']] = _day_bars(md, p['symbol'], deep, tokens)
+        if not bars[p['symbol']]:
+            raise FetchError(f"held {p['symbol']} day bars empty")
     universe = [k.split(':', 1)[1] for k in config.NIFTY500_INSTRUMENT_TOKENS]
     for s in universe:
         if s not in bars:
-            bars[s] = _day_bars(md, s, 400)
-    try:
-        r = rank({s: bars[s] for s in universe}, _day_bars(md, 'NIFTY 50', 400), me)
-    except ValueError as e:
-        print(f"[s5] rank aborted for {me}: {e}")
-        return None
+            bars[s] = _day_bars(md, s, DAY_WINDOW, tokens)
+    r = rank({s: bars[s] for s in universe}, _day_bars(md, 'NIFTY 50', DAY_WINDOW, tokens), me)
+    if r['eligible'] < MIN_ELIGIBLE_SHARE * len(universe):
+        raise ValueError(f"only {r['eligible']} of {len(universe)} eligible — data, not market")
     patch_splits(held, bars)
 
     cash = ap._reconstruct_cash(BOOK, positions, config.S5_CAPITAL)
@@ -233,15 +275,17 @@ def _rebalance(md, me: str, today: str):
     sells, buys, skipped, kept = [], [], [], []
     for p in held:
         s, qty = p['symbol'], int(p['qty'])
-        px = _bar_1520(md, s, me, today)
-        if r['risk_off'] or pos.get(s, 10 ** 6) > BUFFER:
-            px = px or _last_close(bars.get(s), me) or float(p['entry_price'])
+        px = _bar_1520(md, s, me, today, tokens)
+        if r['risk_off'] or px is None or pos.get(s, 10 ** 6) > BUFFER:
+            px = px or _last_close(bars[s], me) or float(p['entry_price'])
             fill = sell_fill(px, qty)
-            ap._close_position(p, fill, me, 'REBALANCE')
+            if not ap._close_position(p, fill, me, 'REBALANCE'):
+                print(f"[s5] sell write failed for {s} — abort before buys")
+                return None
             cash += fill * qty
             sells.append((s, qty, px))
         else:
-            kept.append((p, px or _last_close(bars.get(s), me) or float(p['entry_price'])))
+            kept.append((p, px))
     equity = cash + sum(int(p['qty']) * px for p, px in kept)
     have, new = {p['symbol'] for p, _ in kept}, []
     if not r['risk_off']:
@@ -250,7 +294,7 @@ def _rebalance(md, me: str, today: str):
                 break
             if s in have:
                 continue
-            px = _bar_1520(md, s, me, today)
+            px = _bar_1520(md, s, me, today, tokens)
             if px is None:
                 skipped.append(s)
                 continue
@@ -269,7 +313,11 @@ def _rebalance(md, me: str, today: str):
     if new and db.insert_paper_positions(new) != len(new):
         print(f"[s5] insert failed for {me} — guard not written, will retry")
         return None
-    if not ap._load(SEED_KEY):
+    if buys:
+        known = _load(TOKENS_KEY) or {}
+        known.update({s: tokens[s] for s, _, _ in buys if tokens.get(s)})
+        db.write_config(TOKENS_KEY, json.dumps(known))
+    if not _load(SEED_KEY):
         db.write_config(SEED_KEY, json.dumps({
             'capital': config.S5_CAPITAL, 'inception': me,
             'index_inception': ap._index_close(me, INDEX)}))
@@ -296,17 +344,18 @@ def _notify(me, today, risk_off, sells, buys, skipped, equity) -> None:
 # ── daily snapshot ───────────────────────────────────────────────────────────
 
 def _snapshot(md, today: str, seed: dict) -> None:
-    positions = db.paper_positions(BOOK)
+    positions = _positions()                        # read once: cash and value from one view
     held = [p for p in positions if p.get('is_open')]
+    tokens = _tokens()
     oldest = min([str(p['entry_date'])[:10] for p in held] + [today])
-    deep = max(400, (date.fromisoformat(today) - date.fromisoformat(oldest)).days + 10)
-    bars = {p['symbol']: _day_bars(md, p['symbol'], deep) for p in held}
+    deep = max(DAY_WINDOW, (date.fromisoformat(today) - date.fromisoformat(oldest)).days + 10)
+    bars = {p['symbol']: _day_bars(md, p['symbol'], deep, tokens) for p in held}
     patch_splits(held, bars)
     value = sum(int(p['qty']) * (_last_close(bars.get(p['symbol']), today) or float(p['entry_price']))
                 for p in held)
-    cash = ap._reconstruct_cash(BOOK, db.paper_positions(BOOK), float(seed['capital']))
+    cash = ap._reconstruct_cash(BOOK, positions, float(seed['capital']))
     idx0, idx = float(seed.get('index_inception') or 0), ap._index_close(today, INDEX)
-    nifty = _last_close(_day_bars(md, 'NIFTY 50', 10), today)
+    nifty = _last_close(_day_bars(md, 'NIFTY 50', 10, tokens), today)
     db.upsert_paper_equity({
         'book': BOOK, 'snapshot_date': today,
         'cash': round(cash, 2), 'positions_value': round(value, 2),
@@ -319,18 +368,19 @@ def _snapshot(md, today: str, seed: dict) -> None:
 
 
 def run_s5(md, today: str = None) -> dict:
-    """Post-close entry: rebalance if a month-end is pending, then snapshot."""
+    """Post-close entry: rebalance if a month-end is pending, then snapshot.
+    DB read failures raise (the scheduler retries in its window)."""
     out = {'rebalanced': None, 'snapshot': False}
     if not config.S5_PAPER_ENABLED:
         return out
     today = today or datetime.now(IST).date().isoformat()
-    pend = pending_rebalance(today, ap._load(LAST_KEY))
+    pend = pending_rebalance(today, _load(LAST_KEY))
     if pend and pend[1] == 'skip':
         db.write_config(LAST_KEY, json.dumps({'date': pend[0], 'status': 'skipped'}))
         print(f"[s5] month-end {pend[0]} missed beyond {CATCHUP_SESSIONS} sessions — skipped")
     elif pend:
         out['rebalanced'] = _rebalance(md, pend[0], today)
-    seed = ap._load(SEED_KEY)
+    seed = _load(SEED_KEY)
     if seed:
         _snapshot(md, today, seed)
         out['snapshot'] = True

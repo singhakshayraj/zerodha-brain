@@ -150,12 +150,12 @@ def _open_position(book, sym, source, row, qty, price, run_date):
     }
 
 
-def _close_position(pos: dict, price: float, run_date: str, reason: str) -> None:
+def _close_position(pos: dict, price: float, run_date: str, reason: str) -> bool:
     qty = int(pos['qty'])
     entry = float(pos['entry_price'])
     pnl = (float(price) - entry) * qty
     ret = (float(price) - entry) / entry * 100 if entry else 0.0
-    db.update_paper_position(pos['id'], {
+    return db.update_paper_position(pos['id'], {
         'exit_price': float(price), 'exit_date': run_date,
         'exit_reason': reason, 'realized_pnl': round(pnl, 2),
         'return_pct': round(ret, 3), 'is_open': False,
@@ -296,15 +296,17 @@ def _seed_rp(rows: list, run_date: str) -> None:
     print(f"[paper] seeded PICKING_RP: ₹{capital:,.0f}")
 
 
-def _rp_sell(lots: list, n: int, px: float, run_date: str, out: list) -> None:
+def _rp_sell(lots: list, n: int, px: float, run_date: str, out: list, updates: list) -> None:
     """Sell n shares across open lots, oldest first. A partly-sold lot follows the
-    TRIM pattern: a closed row for the sold qty, the open row's qty shrinks."""
+    TRIM pattern: a closed row for the sold qty, the open row's qty shrinks.
+    Writes nothing: lot changes go to `updates`, applied only after `out` inserts,
+    so a rejected insert leaves the book untouched and the retry steps once."""
     for p in sorted(lots, key=lambda p: str(p.get('entry_date'))):
         if n <= 0:
             break
         q = int(p['qty'])
         if n >= q:
-            _close_position(p, px, run_date, 'REBALANCE')
+            updates.append(lambda p=p: _close_position(p, px, run_date, 'REBALANCE'))
             n -= q
             continue
         e = float(p['entry_price'])
@@ -313,7 +315,7 @@ def _rp_sell(lots: list, n: int, px: float, run_date: str, out: list) -> None:
                     'exit_reason': 'REBALANCE', 'realized_pnl': round((px - e) * n, 2),
                     'return_pct': round((px - e) / e * 100, 3) if e else 0.0})
         out.append(row)
-        db.update_paper_position(p['id'], {'qty': q - n})
+        updates.append(lambda p=p, left=q - n: db.update_paper_position(p['id'], {'qty': left}))
         n = 0
 
 
@@ -358,10 +360,10 @@ def _rebalance_rp(run_date: str, md, cache: dict) -> None:
         d = int(step * (tgt - cur))      # int() truncates toward zero
         if d:
             delta[s] = d
-    new = []
+    new, updates = [], []
     for s, d in delta.items():           # sells first, to fund the buys
         if d < 0:
-            _rp_sell(lots[s], -d, px[s] * (1 - c), run_date, new)
+            _rp_sell(lots[s], -d, px[s] * (1 - c), run_date, new, updates)
             cash += -d * px[s] * (1 - c)
     for t in rt['targets']:              # buys in target order; never past cash
         s = t['symbol']
@@ -377,6 +379,8 @@ def _rebalance_rp(run_date: str, md, cache: dict) -> None:
         # rejected every row and the guard still blocked retries until December.
         print(f"[paper] PICKING_RP insert failed for {run_date} — guard not written, will retry")
         return
+    for apply in updates:
+        apply()
     db.write_config(_RP_LAST_KEY, json.dumps(run_date))
 
 

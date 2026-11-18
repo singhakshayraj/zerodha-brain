@@ -205,3 +205,19 @@ def test_fake_rejects_unknown_book():
         db.supabase.table('advisor_paper_equity').upsert(
             {'book': 'NOPE', 'snapshot_date': '2026-11-19'},
             on_conflict='book,snapshot_date').execute()
+
+
+
+def test_rp_failed_insert_leaves_book_untouched_and_retry_steps_once():
+    """A rejected insert must not leave sells applied: the retry would step the
+    gap a second time (over-sell) and the partly-sold lot's closed row is lost."""
+    _bars(**{'2026_11_17': 1000.0})
+    _targets('2026-11-18')
+    _run('2026-11-18')
+    before = sorted((p['symbol'], p['qty'], p['is_open']) for p in _rp())
+    _targets('2026-12-01', 100, None)       # GOLDBEES gone -> partial sell + AAA buy
+    with patch.object(db, 'insert_paper_positions', return_value=0):
+        _run('2026-12-01')
+    assert sorted((p['symbol'], p['qty'], p['is_open']) for p in _rp()) == before
+    _run('2026-12-01')                      # clean retry
+    assert _held('GOLDBEES') == 40
