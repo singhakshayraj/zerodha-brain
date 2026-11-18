@@ -183,3 +183,25 @@ def test_rp_seed_failure_never_blocks_other_books():
         assert _run('2026-11-18')
     assert len(db.paper_equity_curve('MANAGEMENT')) == 1
     assert len(db.paper_equity_curve('PICKING')) == 1
+
+
+def test_rp_guard_not_written_when_insert_fails():
+    """11-18 prod: the book CHECK rejected PICKING_RP rows (insert swallowed,
+    returned 0) yet the month guard was written, so no retry until December."""
+    _bars(**{'2026_11_17': 1000.0})
+    _targets('2026-11-18')
+    with patch.object(db, 'insert_paper_positions', return_value=0):
+        _run('2026-11-18')
+    assert db.get_config('advisor_paper_rp_last_rebalance') is None
+
+
+def test_fake_rejects_unknown_book():
+    import pytest
+    with pytest.raises(ValueError):
+        db.supabase.table('advisor_paper_positions').insert(
+            {'book': 'NOPE', 'symbol': 'X', 'source': 'T', 'qty': 1,
+             'entry_price': 1.0, 'entry_date': '2026-11-19', 'is_open': True}).execute()
+    with pytest.raises(ValueError):
+        db.supabase.table('advisor_paper_equity').upsert(
+            {'book': 'NOPE', 'snapshot_date': '2026-11-19'},
+            on_conflict='book,snapshot_date').execute()

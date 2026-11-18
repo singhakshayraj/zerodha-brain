@@ -62,6 +62,10 @@ class _Query:
     def execute(self):
         rows = self.db.tables.setdefault(self.table, [])
         self.db.calls.append((self.table, self.op, self.kw))
+        if self.table in PAPER_BOOK_TABLES and self.op in ('insert', 'upsert'):
+            bad = [r.get('book') for r in self.payload if r.get('book') not in PAPER_BOOKS]
+            if bad:   # mirrors the prod *_book_check constraint
+                raise ValueError(f'{self.table}_book_check violated: {bad}')
         if self.op == 'upsert':
             default = 'key' if self.table == 'app_config' else 'id'
             keys = [k.strip() for k in (self.kw['on_conflict'] or default).split(',')]
@@ -98,6 +102,10 @@ class _Query:
         if self._limit is not None:
             out = out[:self._limit]
         return _Res(out)
+
+
+PAPER_BOOK_TABLES = ('advisor_paper_positions', 'advisor_paper_equity')
+PAPER_BOOKS = ('MANAGEMENT', 'PICKING', 'PICKING_RP', 'S5')   # = scripts/paper_book_check_2026-11-19.sql
 
 
 class FakeSupabase:

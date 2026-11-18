@@ -372,8 +372,11 @@ def _rebalance_rp(run_date: str, md, cache: dict) -> None:
             if q > 0:
                 cash -= q * fill
                 new.append(_open_position(PICKING_RP, s, 'RP', {}, q, fill, run_date))
-    if new:
-        db.insert_paper_positions(new)
+    if new and db.insert_paper_positions(new) != len(new):
+        # Never mark the month done on a rejected write: the 11-18 book CHECK
+        # rejected every row and the guard still blocked retries until December.
+        print(f"[paper] PICKING_RP insert failed for {run_date} — guard not written, will retry")
+        return
     db.write_config(_RP_LAST_KEY, json.dumps(run_date))
 
 
