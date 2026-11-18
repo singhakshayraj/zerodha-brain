@@ -185,7 +185,7 @@ class LabRunner:
         if not ok:
             self.refusals[(sid, 'bad_levels')] += 1
             return
-        res = self.books[sid].try_open(sym, side, ltp, stop, target, slip_bps, now.isoformat())
+        res = self.books[sid].try_open(sym, side, ltp, stop, target, slip_bps, self.clock().isoformat())
         if isinstance(res, str):
             self.refusals[(sid, res)] += 1
             return

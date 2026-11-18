@@ -213,3 +213,16 @@ def test_cycles_keep_checking_exits_after_1430():
         r._last_cycle = None
         r.tick()
     assert r.kite.hist_calls > 0
+
+
+def test_entry_stamped_at_placement_not_cycle_start():
+    """V-47 replays open notional from entry/exit timestamps. Exits are stamped
+    when processed (after the ~2-min fetch), so entries must be too, or a same-
+    cycle exit sorts after the entry that reused its margin (2026-11-18 false FAIL)."""
+    f = FakeSupabase()
+    clock = Clock('09:30:30')
+    start = clock()
+    with patch.object(lab_db.db, 'supabase', f):
+        _runner(f, clock=clock).cycle()               # each fetch sleeps -> clock advances
+    opened = _open(f)
+    assert opened and all(datetime.fromisoformat(o['entry_ts']) > start for o in opened)
