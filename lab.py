@@ -21,7 +21,7 @@ import lab_db
 from kite_client import TokenExpiredError
 from lab_book import Book, Position
 from lab_stats import cumulative, day_row
-from lab_strategies import VARIANTS, Ctx, completed_bars, prior_close, registry_rows
+from lab_strategies import VARIANTS, Ctx, _t, completed_bars, prior_close, registry_rows
 
 IST = pytz.timezone('Asia/Kolkata')
 NIFTY_TOKEN = 256265
@@ -42,7 +42,7 @@ def _f(x):
 
 
 def _bar_start(bar) -> datetime:
-    return datetime.strptime(str(bar['timestamp'])[:16], '%Y-%m-%dT%H:%M')
+    return _t(bar)
 
 
 def _bar_hit(p, bar):

@@ -9,6 +9,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from functools import lru_cache
 
 import inplay
 import orb
@@ -17,8 +18,13 @@ from indicators import calculate_atr
 NO_ENTRY_AFTER = (14, 30)
 
 
+@lru_cache(maxsize=1 << 19)      # same bars re-parsed every cycle; strptime was ~85% of a cycle
+def _parse(ts: str) -> datetime:
+    return datetime.strptime(ts, '%Y-%m-%dT%H:%M')
+
+
 def _t(bar) -> datetime:
-    return datetime.strptime(str(bar['timestamp'])[:16], '%Y-%m-%dT%H:%M')
+    return _parse(str(bar['timestamp'])[:16])
 
 
 def _hm(now) -> tuple:
@@ -131,13 +137,14 @@ def _gapfade(ctx, stop_pct, gap_min):
 def _vwaprev(ctx, stop_pct, k_atr):
     if ctx.rank_adv > 100 or not _in(ctx.now_ist, (9, 45), NO_ENTRY_AFTER):
         return None
-    t = _today(ctx.bars)
-    den = sum(b.get('volume') or 0 for b in t)
-    if not den:
-        return None
-    vwap = sum((b['high'] + b['low'] + b['close']) / 3 * (b.get('volume') or 0) for b in t) / den
-    atr = calculate_atr(ctx.bars[-50:])
-    if not atr:
+    if 'vwap' not in ctx.cache:              # same for all 9 variants of a symbol-cycle
+        t = _today(ctx.bars)
+        den = sum(b.get('volume') or 0 for b in t)
+        vwap = (sum((b['high'] + b['low'] + b['close']) / 3 * (b.get('volume') or 0) for b in t) / den
+                if den else None)
+        ctx.cache['vwap'] = (vwap, calculate_atr(ctx.bars[-50:]) if den else None)
+    vwap, atr = ctx.cache['vwap']
+    if not vwap or not atr:
         return None
     dev = ctx.ltp - vwap
     if dev >= k_atr * atr:
