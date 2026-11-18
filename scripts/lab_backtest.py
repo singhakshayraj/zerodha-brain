@@ -212,19 +212,20 @@ def replay_days(days, uni):
     return out
 
 
-def run(start='2018-03-01', end='2025-12-31', workers=4):
+def run(start='2018-03-01', end='2025-12-31', workers=6):
     import pandas as pd
-    from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures import ProcessPoolExecutor, as_completed
     uni = universes(daily_panel())
     days = sorted(d for d in uni if start <= d <= end)
     os.makedirs(_p('bt'), exist_ok=True)
     chunks = {}
-    for d in days:                                  # one chunk per year: memory ~300 MB each
-        chunks.setdefault(d[:4], []).append(d)
+    for d in days:                                  # one chunk per quarter: keeps P+E cores busy
+        chunks.setdefault(f'{d[:4]}q{(int(d[5:7]) - 1) // 3 + 1}', []).append(d)
     todo = [(y, ds) for y, ds in chunks.items() if not os.path.exists(_p(f'bt/trades_{y}.parquet'))]
     with ProcessPoolExecutor(workers) as ex:
         futs = {ex.submit(replay_days, ds, {d: uni[d] for d in ds}): y for y, ds in todo}
-        for f, y in futs.items():
+        for f in as_completed(futs):
+            y = futs[f]
             pd.DataFrame(f.result()).to_parquet(_p(f'bt/trades_{y}.parquet'), index=False)
             print(f'[run] {y} done', flush=True)
 
@@ -275,7 +276,7 @@ if __name__ == '__main__':
     if cmd == 'fetch':
         fetch()
     elif cmd == 'run':
-        run(*sys.argv[2:4])
+        run(*sys.argv[2:4], *map(int, sys.argv[4:5]))
     elif cmd == 'report':
         report()
     else:
