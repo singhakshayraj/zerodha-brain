@@ -275,3 +275,41 @@ def test_max_drawdown_counts_drop_from_base_100():
 def test_short_window_returns_are_none():
     out = twr([_row('2026-01-01', 1000, 100000), _row('2026-01-02', 1010, 101000)])
     assert out['1m'] is None and out['3m'] is None and out['since'] == 2.01
+
+
+# ---- named buys for underweight sectors ------------------------------------
+def _uw_xr(gap_pp=10.0):
+    return {'names': [], 'sectors': [{'name': 'IT', 'pct': 0, 'drift_pp': -gap_pp, 'breach': False}]}
+
+
+def _scored(**syms):   # name=(score, price)
+    return {s: {'symbol': s, 'score': sc, 'sector': 'IT', 'last_close': px} for s, (sc, px) in syms.items()}
+
+
+def test_underweight_buy_funded_by_unrotated_trim_from_richest_account():
+    ps = [dict(_pos('A', 'X', 10, 1000), verdict='TRIM'),                  # frees 5000 * 0.95
+          dict(_pos('B', 'Y', 10, 1000), verdict='HOLD'),
+          dict(_pos('B', 'Z', 10, 1000), verdict='SELL', rotation_target_symbol='Q')] + _fill(20, 5000)
+    out = rebalance(_uw_xr(), ps, {}, {}, DEFAULT_TARGETS, _date(2026, 11, 17),
+                    {'TCS': 'IT', 'INFY': 'IT'}, _scored(TCS=(80, 400), INFY=(60, 100), LOW=(10, 1)))
+    r = out[-1]
+    # book 130k: gap 13k, A has 4750 free, new name capped at 3% = 3900 -> 9 sh
+    assert r['buy'] == {'symbol': 'TCS', 'score': 80, 'account': 'A', 'qty': 9, 'price': 400, 'inr': 3600}
+    assert r['ideas'] == ['TCS', 'INFY'] and r['note'] is None        # LOW is below the score floor
+
+
+def test_underweight_gap_reduced_by_todays_rotation_buys():
+    ps = [dict(_pos('A', 'X', 10, 1000), verdict='SELL', rotation_target_symbol='WIPRO',
+               rotation_buy_qty=100, rotation_buy_price=1000)] + _fill(20, 1000)   # 100k into IT
+    out = rebalance(_uw_xr(), ps, {}, {}, DEFAULT_TARGETS, _date(2026, 11, 17),
+                    {'WIPRO': 'IT', 'TCS': 'IT'}, _scored(TCS=(80, 400)))
+    assert out[-1]['gap_inr'] == 0 and out[-1]['buy'] is None
+    assert out[-1]['note'] == "today's rotation buys already cover this gap"
+
+
+def test_underweight_without_proceeds_says_needs_new_money():
+    ps = [dict(_pos('A', 'X', 10, 1000), verdict='HOLD')] + _fill(20, 1000)
+    out = rebalance(_uw_xr(), ps, {}, {}, DEFAULT_TARGETS, _date(2026, 11, 17),
+                    {'TCS': 'IT'}, _scored(TCS=(80, 400)))
+    assert out[-1]['buy'] is None and out[-1]['ideas'] == ['TCS']
+    assert out[-1]['note'] == 'no sell proceeds left today — needs new money'

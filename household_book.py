@@ -272,10 +272,11 @@ def _tax_for(a, sym, qty, px, lots_by_account, fy_by_account, today_s):
             r['unmatched_qty'])
 
 
-def rebalance(xray_out, positions, lots_by_account, fy_by_account, targets, today, sectors=None):
+def rebalance(xray_out, positions, lots_by_account, fy_by_account, targets, today, sectors=None, scored=None):
     """Whole-share trims that bring each breach inside its cap, from the account
-    where the trim is cheapest in tax (never more than held there), plus sector-only
-    underweights vs the index. Pure."""
+    where the trim is cheapest in tax (never more than held there), plus the worst
+    underweight sectors vs the index — each with a named buy when `scored` (today's
+    universe scores) is given. Pure."""
     total = sum(_val(p) for p in positions)
     today_s = today.isoformat()
     held = {(p['account'], p['symbol']): int(p.get('quantity') or 0) for p in positions}
@@ -325,8 +326,65 @@ def rebalance(xray_out, positions, lots_by_account, fy_by_account, targets, toda
     trims.sort(key=lambda t: t['freed_inr'], reverse=True)
     under = sorted((s for s in xray_out['sectors'] if s['drift_pp'] < 0 and s['name'] not in _h.NOT_SECTORS),
                    key=lambda s: s['drift_pp'])[:3]
-    return trims + [{'kind': 'underweight', 'sector': s['name'], 'gap_pp': round(-s['drift_pp'], 2)}
-                    for s in under]
+    rows = [{'kind': 'underweight', 'sector': s['name'], 'gap_pp': round(-s['drift_pp'], 2)} for s in under]
+    if scored is not None:
+        _fund_underweights(rows, positions, trims, total, scored, sectors or {})
+    return trims + rows
+
+
+def _fund_underweights(rows, positions, trims, total, scored, sectors):
+    """Name a buy per underweight sector, funded by money today's calls free and
+    rotation does not reuse: SELL/TRIM rows with no rotation target (TRIM = half)
+    plus the cap trims above. Today's rotation buys count toward the gap first.
+    The best-scored unheld name that passes the household caps wins, sized to at
+    most DUP_CAP_PCT of the book; the account with the most unplaced cash buys it.
+    Mutates rows."""
+    import config
+    group = lambda s: sector_view.group_of(s, sectors.get(s) or (scored.get(s) or {}).get('sector'))
+    trimmed = {(t['account'], t['symbol']) for t in trims}
+    cash = {}
+    for t in trims:
+        cash[t['account']] = cash.get(t['account'], 0.0) + t['freed_inr'] * _h.DEPLOY
+    for p in positions:
+        if (p.get('verdict') in ('SELL', 'TRIM') and not p.get('rotation_target_symbol')
+                and (p['account'], p['symbol']) not in trimmed):
+            cash[p['account']] = cash.get(p['account'], 0.0) + _h.buy_estimate(p)
+    value = {s: d['value'] for s, d in _by_symbol(positions).items()}
+    pending = {}
+    for p in positions:
+        t = p.get('rotation_target_symbol')
+        if t and p.get('rotation_buy_qty') and p.get('rotation_buy_price'):
+            pending[group(t)] = pending.get(group(t), 0.0) + float(p['rotation_buy_qty']) * float(p['rotation_buy_price'])
+            value[t] = value.get(t, 0.0) + float(p['rotation_buy_qty']) * float(p['rotation_buy_price'])
+    guard = _h.Guard(value, {s: sectors.get(s) or c.get('sector') for s, c in scored.items()}, {})
+    for r in rows:
+        gap = r['gap_pp'] / 100 * total - pending.get(r['sector'], 0.0)
+        r['gap_inr'] = round(max(gap, 0.0), 2)
+        r['buy'], r['note'] = None, None
+        ideas = sorted((c for s, c in scored.items() if s not in value and group(s) == r['sector']
+                        and (c.get('score') or -999) >= config.ROTATION_MIN_TARGET_SCORE
+                        and (c.get('last_close') or 0) > 0), key=lambda c: c['score'], reverse=True)
+        r['ideas'] = [c['symbol'] for c in ideas[:3]]
+        if gap <= 0:
+            r['note'] = "today's rotation buys already cover this gap"
+            continue
+        if not ideas:
+            r['note'] = f"no unheld {r['sector']} name scores ≥ {config.ROTATION_MIN_TARGET_SCORE} today"
+            continue
+        acct = max(cash, key=cash.get, default=None)
+        amt = min(gap, cash.get(acct, 0.0), _h.DUP_CAP_PCT / 100 * total)   # a new name starts no bigger than the overlap cap
+        for c in ideas:
+            qty = int(amt // c['last_close'])
+            if qty >= 1 and guard.check(c['symbol'], qty * c['last_close'])[0]:
+                inr = round(qty * c['last_close'], 2)
+                r['buy'] = {'symbol': c['symbol'], 'score': c['score'], 'account': acct,
+                            'qty': qty, 'price': c['last_close'], 'inr': inr}
+                cash[acct] -= inr
+                guard.commit(None, 0.0, c['symbol'], inr)
+                break
+        if not r['buy']:
+            r['note'] = ('no sell proceeds left today — needs new money' if amt < ideas[0]['last_close']
+                         else 'every idea would break a household cap')
 
 
 # ---- publish (the one DB-touching entry point) -----------------------------
@@ -354,6 +412,11 @@ def _index_size_mix(sizes=None):
     return {k: v / tot * 100 for k, v in g.items()}
 
 
+def _call(r):
+    """Today's verdict + rotation leg, so the rebalance list knows what money is free."""
+    return {k: r.get(k) for k in ('verdict', 'rotation_target_symbol', 'rotation_buy_qty', 'rotation_buy_price')}
+
+
 def _positions():
     t = db.supabase.table
     top = t('portfolio_advice').select('run_id,run_date').eq('is_official', True) \
@@ -363,7 +426,7 @@ def _positions():
         run_date = str(top[0].get('run_date'))
         pos = [{'account': 'primary', 'symbol': r['symbol'], 'quantity': r['quantity'],
                 'avg_price': r.get('avg_price'), 'last_price': r.get('last_price'),
-                'asset_class': 'etf_gold_silver' if sector_view.is_etf(r['symbol']) else 'equity'}
+                'asset_class': 'etf_gold_silver' if sector_view.is_etf(r['symbol']) else 'equity', **_call(r)}
                for r in _paged(lambda: t('portfolio_advice').select('*').eq('run_id', top[0]['run_id'])
                                .order('symbol'))]
     raw = db.get_config('advisor_natwar_latest')
@@ -379,7 +442,7 @@ def _positions():
     for r in nat:
         pos.append({'account': 'natwar', 'symbol': r['symbol'], 'quantity': r['quantity'],
                     'avg_price': r.get('avg_price', r.get('average_price')), 'last_price': r.get('last_price'),
-                    'asset_class': 'etf_gold_silver' if sector_view.is_etf(r['symbol']) else 'equity'})
+                    'asset_class': 'etf_gold_silver' if sector_view.is_etf(r['symbol']) else 'equity', **_call(r)})
     unconf = [r['holding_label'] for r in _paged(lambda: t('holding_scheme_map').select('*')
               .eq('confirmed', False).order('holding_label'))]
     pos += [{'account': 'unknown', 'symbol': u, 'quantity': 0, 'avg_price': 0, 'last_price': 0,
@@ -450,6 +513,16 @@ def _xirr_window(fl):
     return xirr(sorted(fl.items()))
 
 
+def _scored(run_date, held_syms):
+    """Today's Nifty-500 scores (the official run's scan); {} if missing."""
+    try:
+        import account_preview
+        return account_preview.todays_universe_scores(run_date, set(held_syms))
+    except Exception as e:
+        print(f'[household] universe scores unavailable: {e}')
+        return {}
+
+
 def publish(today=None):
     today = today or datetime.now(pytz.timezone('Asia/Kolkata')).date()
     today_s = today.isoformat()
@@ -495,7 +568,7 @@ def publish(today=None):
     xr = xray(held, sectors, sizes, _h._index_weights(), _index_size_mix(sizes), targets)
     out = {'asof': today_s, 'net_worth': nw, 'returns': returns, 'xray': xr,
            'risk': risk(held, closes), 'tax': tax,
-           'rebalance': rebalance(xr, held, lots, fy, targets, today, sectors),
+           'rebalance': rebalance(xr, held, lots, fy, targets, today, sectors, _scored(run_date, syms)),
            'funds_unconfirmed': unconf, 'targets_source': targets.get('source', 'operator'),
            'sections_asof': {'positions': min(d for d in (run_date, nat_date) if d),   # the older of the two
                              'positions_primary': run_date, 'positions_natwar': nat_date,
