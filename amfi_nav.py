@@ -77,3 +77,15 @@ def fetch_navall(timeout: int = 60) -> str:
 
 def fetch_and_parse() -> list:
     return parse_navall(fetch_navall())
+
+
+def fetch_held() -> list:
+    """Today's NAVs for the schemes in holding_scheme_map only [P-38]. Storing
+    the whole ~14.5k-scheme file daily made amfi_nav the largest table, and
+    every reader looks up mapped codes. A newly mapped fund gets its NAV on
+    the next daily ingest. A failed map read raises, so nothing is written."""
+    import database as db
+    codes = {m['amfi_scheme_code'] for m in
+             (db.supabase.table('holding_scheme_map').select('amfi_scheme_code')
+              .execute().data or []) if m.get('amfi_scheme_code')}
+    return [r for r in fetch_and_parse() if r['scheme_code'] in codes] if codes else []

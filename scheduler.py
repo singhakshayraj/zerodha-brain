@@ -257,7 +257,7 @@ def _maybe_ingest_amfi_nav() -> None:
     def _run():
         try:
             import amfi_nav
-            n = db.upsert_amfi_nav(amfi_nav.fetch_and_parse())
+            n = db.upsert_amfi_nav(amfi_nav.fetch_held())
             print(f"[amfi_nav] ingested {n} NAV rows for {today}")
         except Exception as e:
             print(f"[amfi_nav] ingest failed (non-fatal): {e}")
