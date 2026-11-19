@@ -7,6 +7,7 @@ store replaces Supabase. Nothing here touches prod.
   python scripts/lab_backtest.py fetch           # download + 5-min resample (~6 GB in, ~1 GB kept)
   python scripts/lab_backtest.py run [from] [to] # replay days, writes trades.parquet
   python scripts/lab_backtest.py report          # per-variant PF / net / t / SPRT
+  python scripts/lab_backtest.py exp X01 [workers]  # one registered experiment, 2018-03..2024-12
 
 Known biases (read before believing a number): survivorship (today's ~550
 Nifty 500 names only), one source with repeated sessions (deduped), corporate
@@ -175,7 +176,7 @@ def _bars_for(df, day):
     return starts, rows
 
 
-def replay_days(days, uni):
+def replay_days(days, uni, exp=None):
     """Run lab.LabRunner over each day with in-memory storage; returns closed trades."""
     import pandas as pd
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -185,6 +186,9 @@ def replay_days(days, uni):
     import lab
     import lab_db
     from tests.fake_supabase import FakeSupabase
+    if exp:
+        import lab_experiments
+        lab.VARIANTS = lab_experiments.EXPERIMENTS[exp]
     real_stdout, sys.stdout = sys.stdout, open(os.devnull, 'w')   # signal_engine logs
     lo = (pd.Timestamp(days[0]) - pd.Timedelta(days=16))
     frames = {}
@@ -212,34 +216,40 @@ def replay_days(days, uni):
     return out
 
 
-def run(start='2018-03-01', end='2025-12-31', workers=6):
+HOLDOUT = '2025-01-01'   # experiments never see 2025 (LAB_EXPERIMENTS.md)
+
+
+def run(start='2018-03-01', end='2025-12-31', workers=6, exp=None):
     import pandas as pd
     from concurrent.futures import ProcessPoolExecutor, as_completed
     uni = universes(daily_panel())
     days = sorted(d for d in uni if start <= d <= end)
+    assert not (exp and end >= HOLDOUT), 'experiments stop at 2024-12-31; 2025 is the locked holdout'
+    pre = f'bt/exp_{exp}_' if exp else 'bt/trades_'
     os.makedirs(_p('bt'), exist_ok=True)
     chunks = {}
     for d in days:                                  # one chunk per quarter: keeps P+E cores busy
         chunks.setdefault(f'{d[:4]}q{(int(d[5:7]) - 1) // 3 + 1}', []).append(d)
-    todo = [(y, ds) for y, ds in chunks.items() if not os.path.exists(_p(f'bt/trades_{y}.parquet'))]
+    todo = [(y, ds) for y, ds in chunks.items() if not os.path.exists(_p(f'{pre}{y}.parquet'))]
     with ProcessPoolExecutor(workers) as ex:
-        futs = {ex.submit(replay_days, ds, {d: uni[d] for d in ds}): y for y, ds in todo}
+        futs = {ex.submit(replay_days, ds, {d: uni[d] for d in ds}, exp): y for y, ds in todo}
         for f in as_completed(futs):
             y = futs[f]
-            pd.DataFrame(f.result()).to_parquet(_p(f'bt/trades_{y}.parquet'), index=False)
+            pd.DataFrame(f.result()).to_parquet(_p(f'{pre}{y}.parquet'), index=False)
             print(f'[run] {y} done', flush=True)
 
 
 BLOCKS = [('2018-03-01', '2020-12-31'), ('2021-01-01', '2022-12-31'), ('2023-01-01', '2025-12-31')]
 
 
-def verdicts(trades, n_days):
+def verdicts(trades, n_days, variants=None):
     """Pre-registered history rule (spec §5, 2026-11-18): full-window SPRT
     promoted + t_day >= 3.72 + PF >= 1.3 + net >= Rs100 per replay day, and
     net > 0 in every block. `trades`: closed lab_trades rows (dicts)."""
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from lab_stats import cumulative, day_row, PROMOTE_INR_DAY
     from lab_strategies import VARIANTS
+    VARIANTS = variants or VARIANTS
     by = {}
     for t in trades:
         by.setdefault(t['strategy_id'], {}).setdefault(t['trade_date'], []).append(t)
@@ -260,15 +270,27 @@ def verdicts(trades, n_days):
     return sorted(out, key=lambda r: -(r['pf'] or 0))
 
 
-def report():
+def report(exp=None, parent=None):
     import glob
     import pandas as pd
-    t = pd.concat([pd.read_parquet(f) for f in sorted(glob.glob(_p('bt/trades_*.parquet')))])
-    n_days = len(set(universes(daily_panel())) & set(t['trade_date']))
-    rows = verdicts(t.to_dict('records'), n_days)
+    t = pd.concat([pd.read_parquet(f) for f in sorted(glob.glob(_p(f'bt/exp_{exp}_*.parquet' if exp else 'bt/trades_*.parquet')))])
+    if exp:   # same explore window for the parent, from the frozen 54-variant run
+        base = pd.concat([pd.read_parquet(f) for f in glob.glob(_p('bt/trades_*.parquet'))])
+        t = pd.concat([t, base[(base['strategy_id'] == parent) & (base['trade_date'] < HOLDOUT)]])
+    days = set(universes(daily_panel()))
+    n_days = len({d for d in days if d < HOLDOUT} if exp else days & set(t['trade_date']))
+    variants = None
+    if exp:
+        import lab_experiments
+        from lab_strategies import VARIANTS as live
+        variants = lab_experiments.EXPERIMENTS[exp] + [v for v in live if v.id == parent]
+    rows = verdicts(t.to_dict('records'), n_days, variants)
+    for r in rows:   # raw edge before costs: what the change bought
+        g = t[t['strategy_id'] == r['id']]['gross_inr']
+        r['gross_pf'] = round(g[g > 0].sum() / -g[g < 0].sum(), 2) if (g < 0).any() else None
     print(f'{len(t)} trades over {n_days} replay days')
     print(pd.DataFrame(rows).to_string(index=False))
-    pd.DataFrame(rows).to_csv(_p('bt/verdicts.csv'), index=False)
+    pd.DataFrame(rows).to_csv(_p(f'bt/verdicts_{exp}.csv' if exp else 'bt/verdicts.csv'), index=False)
 
 
 if __name__ == '__main__':
@@ -279,5 +301,10 @@ if __name__ == '__main__':
         run(*sys.argv[2:4], *map(int, sys.argv[4:5]))
     elif cmd == 'report':
         report()
+    elif cmd == 'exp':
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        run('2018-03-01', '2024-12-31', int(sys.argv[3]) if len(sys.argv) > 3 else 6, sys.argv[2])
+        import lab_experiments
+        report(sys.argv[2], lab_experiments.PARENT[sys.argv[2]])
     else:
         print(__doc__)
