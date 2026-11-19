@@ -191,10 +191,11 @@ def replay_days(days, uni, exp=None):
         lab.VARIANTS = lab_experiments.EXPERIMENTS[exp]
     real_stdout, sys.stdout = sys.stdout, open(os.devnull, 'w')   # signal_engine logs
     lo = (pd.Timestamp(days[0]) - pd.Timedelta(days=16))
+    hi = pd.Timestamp(days[-1]) + pd.Timedelta(days=1)   # only this chunk's bars: was ~2 GB/worker
     frames = {}
     for s in {x[0] for d in days for x in uni.get(d, [])} | {NIFTY}:
         df = pd.read_parquet(os.path.join(_p('5m'), f'{s}.parquet'))
-        frames[s] = df[df['Date'] >= lo]
+        frames[s] = df[(df['Date'] >= lo) & (df['Date'] < hi)]
     out = []
     try:
         for d in days:
