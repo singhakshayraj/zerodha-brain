@@ -405,6 +405,17 @@ NSE_HOLIDAYS_2026 = [
     '2026-12-25',  # Christmas
 ]
 
+# NSE 2027 holidays — PROVISIONAL (2026-11-21). NSE's circular is not out
+# yet (usually December). Only the non-lunar weekday dates are listed; May 1,
+# Aug 15, Oct 2 and Dec 25 fall on weekends. TODO: replace with the circular
+# (Holi, Id, Ram Navami, Mahavir Jayanti, Muharram, Ganesh Chaturthi, Dussehra,
+# Diwali, Gurpurb are still missing). Missing dates only overcount trading days.
+NSE_HOLIDAYS_2027 = [
+    '2027-01-26',  # Republic Day
+    '2027-03-26',  # Good Friday
+    '2027-04-14',  # Dr Ambedkar Jayanti
+]
+
 # NSE 2025 holidays (hardcoded)
 NSE_HOLIDAYS_2025 = [
     '2025-01-26',  # Republic Day
@@ -423,7 +434,7 @@ NSE_HOLIDAYS_2025 = [
 ]
 
 # Combined lookup used by risk_manager.is_market_open()
-NSE_HOLIDAYS = set(NSE_HOLIDAYS_2025) | set(NSE_HOLIDAYS_2026)
+NSE_HOLIDAYS = set(NSE_HOLIDAYS_2025) | set(NSE_HOLIDAYS_2026) | set(NSE_HOLIDAYS_2027)
 
 NIFTY50_INSTRUMENT_TOKENS = {
     'NSE:RELIANCE':   738561,
