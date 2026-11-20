@@ -214,7 +214,7 @@ class LabRunner:
         rows = []
         for sid, trades in by.items():
             d = day_row(trades)
-            hist = [{k: _f(v) if k != 'trade_date' else v for k, v in h.items()}
+            hist = [{k: v if k in ('trade_date', 'strategy_id', 'sprt_state') else _f(v) for k, v in h.items()}
                     for h in lab_db.daily_history(sid) if str(h['trade_date']) != self.today]
             c = cumulative(hist + [d], len(VARIANTS))
             if status.get(sid, 'running') == 'running' and c['sprt_state'] != 'running':

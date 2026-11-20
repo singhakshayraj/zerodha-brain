@@ -106,6 +106,26 @@ def test_yields_while_advisor_running():
     assert kite.hist_calls == 0 and not f.tables.get('lab_trades')
 
 
+def test_finish_day_reads_prior_history_with_text_columns():
+    """Day 2+: lab_daily history rows carry strategy_id / sprt_state text.
+    finish_day crashed on float('CONF_...') from 2026-11-19, writing nothing."""
+    f = FakeSupabase()
+    with patch.object(lab_db.db, 'supabase', f):
+        r = _runner(f)
+        lab_db.register(lab.registry_rows())
+        r.cycle()
+        r.flatten('EOD')
+        sid = f.tables['lab_trades'][0]['strategy_id']
+        f.tables['lab_daily'] = [{
+            'trade_date': '2026-01-01', 'strategy_id': sid, 'n': 1, 'wins': 1,
+            'gross_inr': 10, 'charges_inr': 1, 'slippage_inr': 1, 'net_inr': 8,
+            'net_win_inr': 8, 'net_loss_inr': 0, 'sum_gross_r': 1, 'sum_cost_r': 0.1,
+            'sum_net_r': 0.9, 'sprt_state': 'running', 'sprt_llr': 0.1}]
+        r.finish_day()
+    row = next(x for x in f.tables['lab_daily'] if x['strategy_id'] == sid and x['trade_date'] == TODAY)
+    assert row['cum_n'] == 2 and row['cum_days'] == 2
+
+
 def test_finish_day_writes_one_row_per_variant_with_trades():
     f = FakeSupabase()
     with patch.object(lab_db.db, 'supabase', f):
