@@ -566,6 +566,22 @@ def prune_activity(keep_days: int = 90) -> int:
         return 0
 
 
+def prune_advice_snapshots(keep_days: int = 7) -> int:
+    """Delete non-official portfolio_advice snapshots older than keep_days. [P-38]
+
+    Only user_executions reads them (5-day lookback); grading and the graded
+    read are official-only. The Postgres function floors keep_days at 7 and
+    skips rows user_executions / advisor_paper_positions point at.
+    """
+    try:
+        res = database.supabase.rpc(
+            'prune_advice_snapshots', {'p_keep_days': keep_days}).execute()
+        return int(res.data or 0)
+    except Exception as e:
+        print(f"[prune_advice_snapshots] error: {e}")
+        return 0
+
+
 def upsert_amfi_nav(rows: list) -> int:
     """Idempotent upsert of AMFI NAV rows on (scheme_code, nav_date). Non-fatal
     if the table does not exist yet (operator-applied DDL). Returns count."""

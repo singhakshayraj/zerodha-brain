@@ -881,6 +881,8 @@ def _maybe_prune_activity() -> None:
         _activity_pruned_days.add(today)
         removed = db.prune_activity(90)
         print(f"[SCHEDULER] activity retention: removed {removed} rows")
+        snaps = db.prune_advice_snapshots(7)
+        print(f"[SCHEDULER] advice snapshot retention: removed {snaps} rows")
     except Exception as e:
         print(f"[SCHEDULER] activity retention errored (non-fatal): {e}")
 

@@ -34,3 +34,14 @@ def test_never_raises_into_the_loop():
     with _clock(18), patch.object(scheduler.db, 'prune_activity',
                                   side_effect=Exception('db down')):
         scheduler._maybe_prune_activity()   # must not raise
+
+
+def test_also_prunes_old_advice_snapshots_once():
+    """Non-official portfolio_advice snapshots older than 7 days go too.
+    Only user_executions reads them, with a 5-day lookback."""
+    scheduler._activity_pruned_days.clear()
+    with _clock(17), patch.object(scheduler.db, 'prune_activity', return_value=0), \
+            patch.object(scheduler.db, 'prune_advice_snapshots', return_value=3) as p:
+        scheduler._maybe_prune_activity()
+        scheduler._maybe_prune_activity()
+    p.assert_called_once_with(7)

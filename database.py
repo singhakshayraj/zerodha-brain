@@ -565,7 +565,7 @@ def get_session_trades(session_id: str) -> list:
 from db_records import (  # noqa: E402,F401  facade re-export
     _fetch_all, log_decision, link_decision_trade, log_quote_snapshot,
     candle_rows, upsert_candles, archive_candles, upsert_news_events,
-    traded_symbols, traded_symbols_on, prune_activity, upsert_tradebook, get_tradebook, append_decision_skip,
+    traded_symbols, traded_symbols_on, prune_activity, prune_advice_snapshots, upsert_tradebook, get_tradebook, append_decision_skip,
     upsert_amfi_nav,
     insert_holdings_snapshot, get_confirmed_holding_map, latest_amfi_nav,
     get_latest_holdings_snapshot, get_holdings_snapshot,
