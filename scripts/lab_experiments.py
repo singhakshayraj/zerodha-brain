@@ -30,6 +30,8 @@ EXPERIMENTS = {
     'X03': [Variant('X03_GAPFADE_short_v1', 'GAPFADE_SHORT', 0.5, 2.5)],
     'X04': [Variant('X04_GAPFADE_short_top100_v1', 'GAPFADE_SHORT_TOP100', 0.5, 2.5)],
     'X05': [Variant('X05_GAPFADE_short_top100_gap1.5_v1', 'GAPFADE_SHORT_TOP100', 0.5, 1.5)],
+    'X06': [Variant('X06_GAPFADE_short_top100_s1_v1', 'GAPFADE_SHORT_TOP100', 1.0, 2.5)],
 }
 PARENT = {'X01': 'GAPFADE_s0.5_strict_v1', 'X02': 'GAPFADE_s0.5_strict_v1', 'X03': 'GAPFADE_s0.5_strict_v1',
-          'X04': 'X03_GAPFADE_short_v1', 'X05': 'X04_GAPFADE_short_top100_v1'}   # explore: gross PF 1.56, net 0.93
+          'X04': 'X03_GAPFADE_short_v1', 'X05': 'X04_GAPFADE_short_top100_v1',
+          'X06': 'X04_GAPFADE_short_top100_v1'}   # explore: gross PF 1.56, net 0.93

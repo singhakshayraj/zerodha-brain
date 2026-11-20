@@ -8,6 +8,8 @@ store replaces Supabase. Nothing here touches prod.
   python scripts/lab_backtest.py run [from] [to] # replay days, writes trades.parquet
   python scripts/lab_backtest.py report          # per-variant PF / net / t / SPRT
   python scripts/lab_backtest.py exp X01 [workers]  # one registered experiment, 2018-03..2024-12
+  python scripts/lab_backtest.py fetch_kite [from] [to]  # 2026 bars from Kite (today's enc_token) -> 5m_kite/
+  python scripts/lab_backtest.py merge_kite      # append them to 5m/ (not while a replay runs)
 
 Known biases (read before believing a number): survivorship (today's ~550
 Nifty 500 names only), one source with repeated sessions (deduped), corporate
@@ -83,6 +85,76 @@ def _safe(sym):
         return _one(sym)
     except Exception as e:
         return sym, f'FAIL {e}'
+
+
+def fetch_kite(start='2025-12-01', end=None):
+    """2026 bars from Kite (the free source ends 2025-12-31) into 5m_kite/.
+    Needs today's enc_token. Starts in Dec 2025 so the overlap can be checked
+    against the free source; `merge_kite` appends only the newer bars."""
+    import datetime as dt
+    import pandas as pd
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import config
+    import database
+    from kite_client import KiteClient, KiteAPIError
+    kite = KiteClient(database.get_enc_token() or '')
+    import csv
+    import io
+    dump = csv.DictReader(io.StringIO(_get('https://api.kite.trade/instruments/NSE').decode()))  # public
+    tok = {r['tradingsymbol']: int(r['instrument_token']) for r in dump
+           if r['segment'] == 'NSE' and r['instrument_type'] == 'EQ'}   # names that left the Nifty 500
+    tok.update({r['symbol']: int(r['instrument_token']) for r in config.NIFTY500_UNIVERSE})
+    tok[NIFTY] = 256265
+    os.makedirs(_p('5m_kite'), exist_ok=True)
+    first = dt.date.fromisoformat(start)
+    last = dt.date.fromisoformat(end) if end else dt.date.today() - dt.timedelta(days=1)
+    names = sorted(f[:-8] for f in os.listdir(_p('5m')) if f.endswith('.parquet'))
+    for i, sym in enumerate(names, 1):
+        out = os.path.join(_p('5m_kite'), f'{sym}.parquet')
+        if os.path.exists(out) or sym not in tok:
+            print(f'[kite] {i}/{len(names)} {sym} {"have" if sym in tok else "no token"}', flush=True)
+            continue
+        rows, a = [], first
+        try:
+            while a <= last:   # Kite serves at most 100 days of 5-min bars per call
+                b = min(a + dt.timedelta(days=90), last)
+                rows += kite.get_historical_data(tok[sym], '5minute', f'{a} 00:00:00', f'{b} 23:59:59')
+                a = b + dt.timedelta(days=1)
+                time.sleep(0.35)   # Kite historical limit: 3 req/s
+        except KiteAPIError as e:
+            print(f'[kite] {i}/{len(names)} {sym} FAIL {e}', flush=True)
+            continue
+        df = pd.DataFrame(rows, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df.columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']
+        df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)   # IST wall time, like the free source
+        df.to_parquet(out + '.tmp', index=False)
+        os.replace(out + '.tmp', out)
+        print(f'[kite] {i}/{len(names)} {sym} {len(df)} bars', flush=True)
+
+
+def merge_kite():
+    """Append each 5m_kite/ file's bars newer than the free source's last bar,
+    then drop the cached daily panel so it rebuilds. Never run during a replay.
+    Kite back-adjusts for later corporate actions, so its prices are rescaled to
+    the free source on the overlap; otherwise the seam shows a fake gap."""
+    import pandas as pd
+    n = scaled = 0
+    for f in sorted(os.listdir(_p('5m_kite'))):
+        new, path = pd.read_parquet(os.path.join(_p('5m_kite'), f)), os.path.join(_p('5m'), f)
+        old = pd.read_parquet(path)
+        ov = old.merge(new, on='Date', suffixes=('', '_k'))
+        r = (ov['Close_k'] / ov['Close']).median() if len(ov) else 1.0
+        if abs(r - 1) > 0.001:
+            new[['Open', 'High', 'Low', 'Close']] = new[['Open', 'High', 'Low', 'Close']] / r
+            scaled += 1
+        new = new[new['Date'] > old['Date'].max()].astype(old.dtypes.to_dict())
+        if len(new):
+            pd.concat([old, new], ignore_index=True).to_parquet(path + '.tmp', index=False)
+            os.replace(path + '.tmp', path)
+            n += 1
+    if os.path.exists(_p('daily.parquet')):
+        os.remove(_p('daily.parquet'))
+    print(f'[merge] {n} symbols extended, {scaled} rescaled to the free source')
 
 
 # ── replay ──────────────────────────────────────────────────────────────────
@@ -299,6 +371,10 @@ if __name__ == '__main__':
     cmd = sys.argv[1] if len(sys.argv) > 1 else ''
     if cmd == 'fetch':
         fetch()
+    elif cmd == 'fetch_kite':
+        fetch_kite(*sys.argv[2:4])
+    elif cmd == 'merge_kite':
+        merge_kite()
     elif cmd == 'run':
         run(*sys.argv[2:4], *map(int, sys.argv[4:5]))
     elif cmd == 'report':
