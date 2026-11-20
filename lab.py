@@ -37,6 +37,10 @@ def pick_universe(today: str, n: int = 200) -> list:
     return [(s, tok[s], i + 1) for i, s in enumerate(ranked)]
 
 
+_TEXT_COLS = ('trade_date', 'strategy_id', 'sprt_state')   # lab_daily text columns
+_INT_COLS = ('n', 'wins', 'cum_n', 'cum_days')               # lab_daily integer columns
+
+
 def _f(x):
     return None if x is None else float(x)
 
@@ -214,7 +218,7 @@ class LabRunner:
         rows = []
         for sid, trades in by.items():
             d = day_row(trades)
-            hist = [{k: v if k in ('trade_date', 'strategy_id', 'sprt_state') else _f(v) for k, v in h.items()}
+            hist = [{k: v if k in _TEXT_COLS else int(v) if k in _INT_COLS else _f(v) for k, v in h.items()}
                     for h in lab_db.daily_history(sid) if str(h['trade_date']) != self.today]
             c = cumulative(hist + [d], len(VARIANTS))
             if status.get(sid, 'running') == 'running' and c['sprt_state'] != 'running':

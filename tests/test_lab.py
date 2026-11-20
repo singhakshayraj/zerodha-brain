@@ -124,6 +124,8 @@ def test_finish_day_reads_prior_history_with_text_columns():
         r.finish_day()
     row = next(x for x in f.tables['lab_daily'] if x['strategy_id'] == sid and x['trade_date'] == TODAY)
     assert row['cum_n'] == 2 and row['cum_days'] == 2
+    assert all(type(row[k]) is int for k in ('n', 'wins', 'cum_n', 'cum_days')), \
+        'integer columns: Postgres rejects "51.0"'
 
 
 def test_finish_day_writes_one_row_per_variant_with_trades():
