@@ -275,16 +275,17 @@ def report(exp=None, parent=None):
     import glob
     import pandas as pd
     t = pd.concat([pd.read_parquet(f) for f in sorted(glob.glob(_p(f'bt/exp_{exp}_*.parquet' if exp else 'bt/trades_*.parquet')))])
-    if exp:   # same explore window for the parent, from the frozen 54-variant run
-        base = pd.concat([pd.read_parquet(f) for f in glob.glob(_p('bt/trades_*.parquet'))])
-        t = pd.concat([t, base[(base['strategy_id'] == parent) & (base['trade_date'] < HOLDOUT)]])
-    days = set(universes(daily_panel()))
-    n_days = len({d for d in days if d < HOLDOUT} if exp else days & set(t['trade_date']))
     variants = None
-    if exp:
+    if exp:   # same explore window for the parent: a kept experiment's run, else the frozen 54-variant run
         import lab_experiments
         from lab_strategies import VARIANTS as live
-        variants = lab_experiments.EXPERIMENTS[exp] + [v for v in live if v.id == parent]
+        pexp = next((k for k, vs in lab_experiments.EXPERIMENTS.items() if any(v.id == parent for v in vs)), None)
+        base = pd.concat([pd.read_parquet(f) for f in glob.glob(_p(f'bt/exp_{pexp}_*.parquet' if pexp else 'bt/trades_*.parquet'))])
+        t = pd.concat([t, base[(base['strategy_id'] == parent) & (base['trade_date'] < HOLDOUT)]])
+        pool = live + [v for vs in lab_experiments.EXPERIMENTS.values() for v in vs]
+        variants = lab_experiments.EXPERIMENTS[exp] + [v for v in pool if v.id == parent]
+    days = set(universes(daily_panel()))
+    n_days = len({d for d in days if d < HOLDOUT} if exp else days & set(t['trade_date']))
     rows = verdicts(t.to_dict('records'), n_days, variants)
     for r in rows:   # raw edge before costs: what the change bought
         g = t[t['strategy_id'] == r['id']]['gross_inr']
