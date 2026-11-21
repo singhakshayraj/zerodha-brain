@@ -45,6 +45,15 @@ def _gapfade_0945(ctx, stop_pct, gap_min):
 
 
 ls.ARCHETYPES.setdefault('GAPFADE_SHORT_TOP100_NIFTY_0945', (_gapfade_0945,) + ls.ARCHETYPES['GAPFADE'][1:])
+def _no_target(fn):
+    def f(ctx, stop, entry):
+        sig = fn(ctx, stop, entry)
+        return dict(sig, target=None) if sig else None   # exit at stop or 15:15 only
+    return f
+
+
+ls.ARCHETYPES.setdefault('GAPFADE_SHORT_TOP100_NIFTY_NOTGT',
+                         (_no_target(ls.ARCHETYPES['GAPFADE_SHORT_TOP100_NIFTY'][0]),) + ls.ARCHETYPES['GAPFADE'][1:])
 ls.ARCHETYPES.setdefault('GAPFADE_SHORT_TOP100', (_max_rank(_side_only(ls._gapfade, 'SHORT'), 100),) + ls.ARCHETYPES['GAPFADE'][1:])
 ls.ARCHETYPES.setdefault('GAPFADE_TOP100', (_max_rank(ls._gapfade, 100),) + ls.ARCHETYPES['GAPFADE'][1:])
 
@@ -57,8 +66,10 @@ EXPERIMENTS = {
     'X06': [Variant('X06_GAPFADE_short_top100_s1_v1', 'GAPFADE_SHORT_TOP100', 1.0, 2.5)],
     'X07': [Variant('X07_GAPFADE_short_top100_s1_nifty_v1', 'GAPFADE_SHORT_TOP100_NIFTY', 1.0, 2.5)],
     'X08': [Variant('X08_GAPFADE_short_top100_s1_nifty_0945_v1', 'GAPFADE_SHORT_TOP100_NIFTY_0945', 1.0, 2.5)],
+    'X09': [Variant('X09_GAPFADE_short_top100_s1_nifty_notgt_v1', 'GAPFADE_SHORT_TOP100_NIFTY_NOTGT', 1.0, 2.5)],
 }
 PARENT = {'X01': 'GAPFADE_s0.5_strict_v1', 'X02': 'GAPFADE_s0.5_strict_v1', 'X03': 'GAPFADE_s0.5_strict_v1',
           'X04': 'X03_GAPFADE_short_v1', 'X05': 'X04_GAPFADE_short_top100_v1',
           'X06': 'X04_GAPFADE_short_top100_v1', 'X07': 'X06_GAPFADE_short_top100_s1_v1',
-          'X08': 'X07_GAPFADE_short_top100_s1_nifty_v1'}   # explore: gross PF 1.56, net 0.93
+          'X08': 'X07_GAPFADE_short_top100_s1_nifty_v1',
+          'X09': 'X07_GAPFADE_short_top100_s1_nifty_v1'}   # explore: gross PF 1.56, net 0.93
